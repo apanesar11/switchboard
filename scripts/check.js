@@ -1,0 +1,120 @@
+'use strict';
+
+// npm run check — the gate every file in this app has to pass.
+// node --check every .js under src/ and scripts/, JSON.parse every .json, then
+// report which of ARCHITECTURE §1's files do not exist yet.  Exit 1 on any
+// syntax or parse error; a file that has not been written yet is not a failure.
+
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+const root = path.join(__dirname, '..');
+const SCAN = ['src', 'scripts'];
+const EXTRA = ['package.json', 'config.example.json'];
+
+// ARCHITECTURE §1, in its own order.
+const EXPECTED = [
+  'package.json',
+  'src/main/index.js',
+  'src/main/publisher.js',
+  'src/main/desktop-install.js',
+  'src/main/config.js',
+  'src/main/default-config.json',
+  'src/main/workspaces.js',
+  'src/main/git.js',
+  'src/main/github.js',
+  'src/main/runner.js',
+  'src/main/ports.js',
+  'src/main/shell.js',
+  'src/main/drops.js',
+  'src/main/usage.js',
+  'src/preload.js',
+  'src/renderer/index.html',
+  'src/renderer/styles.css',
+  'src/renderer/icons.js',
+  'src/renderer/dom.js',
+  'src/renderer/app.js',
+  'src/renderer/markdown.js',
+  'src/renderer/diffview.js',
+  'src/renderer/views/workspace.js',
+  'src/renderer/views/logs.js',
+  'src/renderer/term-theme.js',
+  'src/renderer/views/terminal.js',
+  'src/renderer/views/grid.js',
+  'src/renderer/views/usage.js',
+  'src/renderer/views/files.js',
+  'src/renderer/views/diff.js',
+  'src/renderer/views/pr.js',
+  'src/renderer/views/prs.js',
+];
+
+function walk(dir, out) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (_) {
+    return out;
+  }
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walk(full, out);
+    else if (/\.(js|json)$/.test(entry.name)) out.push(full);
+  }
+  return out;
+}
+
+function checkFile(file) {
+  if (file.endsWith('.json')) {
+    try {
+      JSON.parse(fs.readFileSync(file, 'utf8'));
+      return null;
+    } catch (err) {
+      return err.message;
+    }
+  }
+  try {
+    execFileSync(process.execPath, ['--check', file], { stdio: ['ignore', 'ignore', 'pipe'] });
+    return null;
+  } catch (err) {
+    const stderr = String(err.stderr || '').trim();
+    // node --check prints the offending source line, a caret, then the error.
+    const line = stderr.split('\n').filter(Boolean).find(l => /Error|error:/.test(l));
+    return line ? line.trim() : (stderr.split('\n')[0] || 'failed --check');
+  }
+}
+
+const files = [];
+for (const dir of SCAN) walk(path.join(root, dir), files);
+for (const extra of EXTRA) {
+  const full = path.join(root, extra);
+  if (fs.existsSync(full) && files.indexOf(full) === -1) files.push(full);
+}
+files.sort();
+
+let failed = 0;
+for (const file of files) {
+  const rel = path.relative(root, file);
+  const problem = checkFile(file);
+  if (problem) {
+    failed++;
+    console.log(`FAIL  ${rel}\n        ${problem}`);
+  } else {
+    console.log(`ok    ${rel}`);
+  }
+}
+
+const missing = EXPECTED.filter(rel => !fs.existsSync(path.join(root, rel)));
+if (missing.length) {
+  console.log('');
+  console.log(`not written yet (${missing.length}):`);
+  for (const rel of missing) console.log(`      ${rel}`);
+}
+
+console.log('');
+if (failed) {
+  console.log(`FAIL — ${failed} of ${files.length} file${files.length === 1 ? '' : 's'} did not parse`);
+  process.exit(1);
+}
+console.log(`PASS — ${files.length} file${files.length === 1 ? '' : 's'} checked${missing.length ? `, ${missing.length} not written yet` : ''}`);

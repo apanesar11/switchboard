@@ -1,0 +1,1211 @@
+# Switchboard — architecture contract
+
+A macOS Electron app that replaces Cursor as the control panel for the multi-repo
+workspaces under `~/Projects`. It shows, per workspace: what is running, what
+changed, and what the branch's pull request looks like — and it starts and stops the
+dev servers.
+
+This file is the **contract**. Every module is written against it, in parallel, by
+separate authors. If you own a file listed below, you implement exactly the exports and
+IPC shapes described here. Do not invent new IPC channels, do not rename fields, do not
+edit files you do not own.
+
+---
+
+## 0. Ground rules
+
+- **No build step, no bundler, no framework.** Plain CommonJS in the main process,
+  plain *classic* scripts (no ES modules, no `import`) in the renderer.
+- **Renderer modules attach to a single global**, `window.SB`. Every renderer file
+  starts with `window.SB = window.SB || {}` and assigns its namespace. Load order is
+  fixed by `index.html`; a file may only call into namespaces loaded before it, except
+  inside functions that run after load.
+- **The renderer never touches Node.** `contextIsolation: true`, `nodeIntegration: false`.
+  Everything goes through `window.sb`, defined in `src/preload.js`.
+- **Design fidelity is the point.** The approved mock-up is the spec; the styles and DOM
+  come from it. Do not restyle, do not "improve" the layout, do not add a dashboard.
+  The user's standing rule: *one row = name + one line of state + one action; details
+  are a tap away; summarise counts, don't list.*
+- **Never write to the user's repos** except the explicit actions: `git pull --ff-only`
+  (Pull main), starting/stopping dev processes, and Publish building Switchboard's
+  source into a desktop app. No commits, no checkouts, no stashes. Squash and merge
+  (§4.4) acts on GitHub through `gh pr merge --squash -R owner/repo` and then deletes
+  the merged branch there, as GitHub's own Delete branch button would — never on the
+  checkout: nothing is checked out and no local branch is deleted.
+- Errors are values. Main-process handlers never throw across IPC: they resolve to
+  `{ ok: false, error: "human sentence" }`. The renderer renders the sentence.
+
+---
+
+## 1. File ownership
+
+```
+switchboard/
+  package.json                  — owner: scaffold
+  README.md                     — owner: scaffold
+  ARCHITECTURE.md               — this file
+  src/main/index.js             — app lifecycle, BrowserWindow, IPC wiring        [M1]
+  src/main/publisher.js         — build from source; retain the prepared update    [M1]
+  src/main/desktop-install.js   — verified staging and rollback-safe app swap      [M1]
+  src/main/config.js            — config file load/save/defaults                  [M2]
+  src/main/workspaces.js        — discovery + per-workspace scan orchestration    [M2]
+  src/main/git.js               — every git command                               [M3]
+  src/main/github.js            — every `gh` command                              [M4]
+  src/main/runner.js            — dev process lifecycle, pty, log buffer          [M5]
+  src/main/ports.js             — listening-port probe + ngrok tunnel lookup      [M5]
+  src/main/shell.js             — the interactive login shell per workspace       [M6]
+  src/main/drops.js             — what a terminal types for a dropped/pasted file  [M6]
+  src/preload.js                — the `window.sb` bridge                          [M1]
+  src/renderer/index.html       — shell + script load order                       [R1]
+  src/renderer/styles.css       — the whole design system                         [R1]
+  src/renderer/icons.js         — SB.icons                                        [R1]
+  src/renderer/dom.js           — SB.dom helpers                                  [R1]
+  src/renderer/term-theme.js    — SB.termTheme: the light/dark terminal palette   [R9]
+  src/renderer/app.js           — state, routing, data loading, sidebar           [R2]
+  src/renderer/markdown.js      — SB.markdown: GitHub-flavoured markdown → DOM     [R3]
+  src/renderer/diffview.js      — SB.diffview: unified-diff → DOM                 [R3]
+  src/renderer/views/workspace.js — Changes tab (repo rows) + header              [R4]
+  src/renderer/views/logs.js    — Logs tab (terminal)                             [R5]
+  src/renderer/views/terminal.js — Terminal tab (a real login shell)               [R8]
+  src/renderer/views/grid.js    — Grid: four terminals side by side, in views     [R10]
+  src/renderer/views/usage.js   — Usage screen + the Grid's five-hour gauge         [R11]
+  src/main/usage.js             — Claude usage: the keychain token, the endpoint    [M7]
+  src/renderer/views/files.js   — Files + All diffs screens                       [R6]
+  src/renderer/views/diff.js    — single-file Diff screen                         [R6]
+  src/renderer/views/pr.js      — Pull request screen                             [R7]
+  src/renderer/views/prs.js     — Pull requests screen: every open PR of yours    [R12]
+```
+
+---
+
+## 2. Domain model
+
+A **workspace** is usually a directory under the root (`~/Projects`) whose
+immediate children include git repos: `sample-1 … sample-4`, `example-1`,
+`example-2`, `demo`. It can also be a **single repo** — a folder that is the repo
+itself, with nothing nested (`switchboard`, and any app that is one repository) — which
+discovery never finds on its own, so the config declares it (§3, `workspaces.<id>.dir`);
+its one repo is the folder. Its **project** is the id with a trailing `-<n>` stripped
+(`sample-2` → `sample`). Only one copy of a project may run at a time. Its **section**
+is the rail heading it sits under: the project's own name when that project has more
+than one workspace, else `other`, which the single-workspace projects share.
+
+A **repo** is one of those immediate children (`sample-api-2`). Its **display name** is
+the directory name with the workspace's numeric suffix stripped (`sample-api-2` →
+`sample-api`), because the mock-up shows `sample-api`.
+
+### Shapes (the single source of truth for both sides)
+
+```js
+Workspace = {
+  id: 'sample-2',
+  project: 'sample',
+  section: 'sample' | 'other',          // the rail heading — decided by discover(), never the renderer
+  dir: '/Users/…/apps/sample-2',
+  self: false,                           // true for the workspace that IS this app (its package.json
+                                         // is Switchboard's): never startable — devCommand null and
+                                         // processes [] whatever the folder says — and no Start (§6 R4)
+  devCommand: 'npm run dev' | null,      // a root dev script, when there is one
+  processes: ['demo-nextjs', …],      // the config's named processes; a workspace is
+                                         // startable when devCommand OR processes exist
+  fetchedAt: 1737000000000 | null,       // oldest successful fetch across the repos
+  fetchAgeMs: 540000 | null,
+  fetchStale: false,                     // true past 10 min — behind-counts are a guess
+  repos: [Repo],                          // present only on scan(), not on list()
+  branchSummary: 'TASK-352' | 'mixed' | 'main',  // the dominant non-main branch, for the sub line
+  files: 6, add: 131, del: 24,           // workspace totals over all repos
+  behindRepos: 1,                         // repos on main with behind > 0
+}
+
+Repo = {
+  name: 'sample-api',                     // display name
+  dirName: 'sample-api-2',
+  dir: '/Users/…/apps/sample-2/sample-api-2',
+  branch: 'TASK-352',
+  detached: false,
+  head: '8740cb4…' | null,                // full HEAD sha — the only identity a detached repo has
+  hasOrigin: true,
+  onMain: false,                          // branch === 'main' (or 'master')
+  ahead: 2, behind: 0,                    // vs origin/<branch> if tracking, else vs origin/main
+  remote: { owner: 'example-user', repo: 'sample-api' } | null,
+  files: [FileChange],
+  add: 84, del: 3,
+  pr: { number: 218, state: 'OPEN' } | null,   // filled lazily; see §4.4
+  error: null | 'human sentence',
+}
+
+FileChange = {
+  path: 'src/services/filters.ts',
+  status: 'M' | 'A' | 'D' | 'R' | '?',    // '?' = untracked, rendered as 'A'
+  add: 9, del: 2,
+  binary: false,
+  oldPath: null,                          // set when status === 'R'
+}
+
+RunState = {
+  wsId: 'sample-2',
+  status: 'idle' | 'starting' | 'running' | 'exited',
+  pid: 12345 | null,
+  startedAt: 1737000000000 | null,        // epoch ms
+  exitCode: null | number,                // 128+N when a signal killed it, so a crash
+                                          // never reads as a clean stop
+  links: [Link],                          // live links, see ports.js
+  procs: [{ name, pid, status, exitCode, signal, startedAt, command, cwd, mode, bytes, lines }],
+}
+
+GridView = {                              // one of the Grid's views — §4.10
+  id: 'vmu8tsoedbx0b',
+  name: 'Sample',
+  cells: ['sample-1', '/Users/…/any/folder', null, 'sample-4'],   // always four; null is an empty
+                                         // square; an absolute path is a FOLDER square — §4.10
+}
+
+Usage = {                                 // what Anthropic says about the plan — §4.11
+  ok: true,
+  configured: true,                       // a local Claude OAuth credential was found
+  plan: 'Max 5x' | 'Pro' | null,
+  session: Limit | null,                  // the five-hour window
+  weekly: Limit | null,                   // the week
+  scoped: [Limit],                        // per-model weeks — "Fable this week"
+  fetchedAt: 1737000000000,
+}                                         // or { ok: false, configured, reason, error: 'human sentence', fetchedAt }
+
+Limit = {
+  name: 'Session' | 'This week' | 'Fable this week',
+  percent: 92,                            // 0–100, rounded
+  resetsAt: '2026-09-19T21:00:00Z' | null,
+  severity: 'normal' | 'warning' | 'critical',   // Anthropic's when it says one; else 75 / 90
+}
+
+Shell = {                                 // the Terminal tab's login shell, NOT a dev process
+  wsId: 'sample-2',                       // or a folder square's absolute path — §4.10
+  status: 'running' | 'exited',
+  pid: 12345 | null,
+  startedAt: 1737000000000 | null,
+  exitedAt: 1737000004000 | null,         // stamped by main in finish(); the renderer
+                                          // cannot infer it for a shell that ended while
+                                          // its window was shut
+  exitCode: null | number,                // 128+N on a signal, as RunState does
+  signal: null | number,
+  cwd: '/Users/…/Projects/sample-2',
+  shell: '/bin/zsh',
+  pty: true,                              // false when node-pty is unavailable; see M6
+  persistent: true,                       // inside tmux, so it outlives the app — M6
+  closed: false,                          // true when Switchboard hung it up (close/quit)
+                                          // rather than the user typing `exit`. zsh exits
+                                          // 1 on SIGHUP, so the code alone cannot tell
+                                          // a deliberate close from a crash.
+  error: null | 'human sentence',
+}
+
+Link = { label: 'localhost:3000', url: 'http://localhost:3000', repo: 'sample-api', live: true }
+
+Pr = {
+  number: 218, title: 'Add search filters', state: 'OPEN' | 'MERGED' | 'CLOSED' | 'DRAFT',
+  url: 'https://github.com/…/pull/218',
+  owner: 'example-user', repo: 'sample-api',  // the remote's, so a PR from the list names itself
+  headRef: 'TASK-352', baseRef: 'main',
+  headSha: '8740cb4…' | null,             // the head shown; sb:pr:merge sends it back as its guard
+  mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN',   // GitHub's word; UNKNOWN while it computes
+  commits: 3, changedFiles: 3, additions: 22, deletions: 3,
+  createdAt: '2026-09-15T…Z', relative: '2d ago',
+  updatedAt: '2026-09-17T…Z',
+  body: '## The problem\n…',              // the description, GitHub-flavoured markdown
+  author: 'example-user', avatarInitials: 'EU',
+  reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null,
+  reactions: [Reaction],                   // on the description — Codex's 👍 lives here
+  timeline: [PrEvent],                     // the conversation, oldest first — §4.4
+  files: [{ path, add, del, patch }],      // patch = the unified diff body for that file
+  comments: [PrComment],
+  commentCount: 3,                         // conversation comments + inline review comments
+}
+
+Reaction = {
+  content: 'THUMBS_UP',                    // GitHub's enum: THUMBS_UP … EYES
+  emoji: '👍', count: 1,
+  users: ['chatgpt-codex-connector'],      // who, when asked for (see §4.4); [] on inline comments
+}
+
+PrEvent = {                                // one entry of the Overview's conversation
+  kind: 'comment' | 'review' | 'inline',   // a conversation comment, a review, or an inline
+                                           // comment that belongs to no review on the page
+  id: 123, url: '…', author: 'maya', avatarInitials: 'MA',
+  createdAt: '…', relative: '2h ago',
+  body: '…markdown…',                      // '' for a review that only carried inline comments
+  state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | null,   // reviews only
+  verdict: 'approved' | 'requested changes' | 'commented' | null,
+  reactions: [Reaction],
+  comments: [PrComment],                   // the inline comments submitted with this review
+}
+
+MyPr = {                                   // one row of the Pull requests screen — §4.12
+  number: 81, title: '…', url: '…', state: 'OPEN' | 'DRAFT',
+  owner: 'example-user', repo: 'sample-native',
+  headRef: 'TASK-341', baseRef: 'main',
+  createdAt: '…', updatedAt: '…', relative: '1d ago',
+  additions: 2555, deletions: 830, changedFiles: 15,
+  reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null,
+  checks: 'SUCCESS' | 'FAILURE' | 'ERROR' | 'PENDING' | 'EXPECTED' | null,   // the last commit's rollup
+  comments: 3,                             // conversation comments + review threads
+}
+
+PrComment = {
+  id: 123, path: 'prisma/schema.prisma',
+  line: 61 | null,                         // line in the NEW file; NULL means the comment
+                                           // belongs to no line of the patch on screen
+                                           // (outdated, or file-level) and must be rendered
+                                           // at the end of that file's diff, never on a line
+  originalLine: 490 | null,                // the line it was written against — shown, never used as an anchor
+  diffHunk: '@@ …',                        // the hunk it was written against, for context
+  url: 'https://github.com/…#discussion_r1',
+  side: 'RIGHT' | 'LEFT',
+  body: 'Add `@@index([itemId])` here — …',   // GitHub-flavoured markdown, render inline code only
+  author: 'maya', avatarInitials: 'MA',
+  createdAt: '…', relative: '2h ago',
+  resolved: false,
+  outdated: false,                         // true when the anchor line no longer exists
+  replyTo: null | 123,
+  reviewId: 456 | null,                    // the review it was submitted with — folds it under
+                                           // that review on the Overview
+  reactions: [Reaction],                   // counts only; see §4.4
+}
+```
+
+---
+
+## 3. Config
+
+`src/main/default-config.json` is exactly `{}`. On first run, the app creates
+`~/.switchboard/config.json` as an empty object. It does not select or scan a
+workspace root automatically. `SWITCHBOARD_CONFIG` can select another local file.
+User edits and app preferences are merged into that file, never the shipped defaults.
+
+See `config.example.json` for a fictional starting point and
+`.agents/skills/switchboard-setup/SKILL.md` for assisted onboarding. Real workspace
+names, paths, commands, and ports belong only in the user's local configuration.
+
+Optional configuration fields:
+
+- `root`: a directory to discover multi-repo workspaces under. `~` expands to the
+  current user's home. `appsRoot` is a legacy alias; explicit `root` takes precedence.
+- `exclude`: child folder names to omit from discovery.
+- `workspaces`: entries keyed by workspace ID. `dir` declares a folder even if it
+  has only one repo. An absolute or `~/` directory works without a root; a relative
+  directory requires a root. Declared folders are not filtered by `exclude`.
+- `projects`: shared presets keyed by project name. Per-workspace settings override
+  them. A trailing numeric workspace suffix is removed to derive the project name.
+- `devCommand`, `processes`, `preflight`, `sideEffects`, `extras`, `needsPty`, and
+  `repos` configure execution and links under a project or workspace. Per-workspace
+  `links` override matching repo links. No command or port inventory ships by default.
+- `terminal.appearance`, `sidebar.visible`, and `grid.views` store UI preferences.
+  Each grid view has an `id`, `name`, and four `cells` (workspace IDs, absolute folder
+  paths, or null).
+
+Invalid configuration reports `configError` and falls back to an empty setup;
+it is not overwritten on load. Missing roots produce no automatic discoveries.
+Explicit folder terminals and absolute declared workspaces still work without a root.
+
+---
+
+## 4. IPC contract
+
+Channel names are `sb:<area>:<verb>`. Every handler is registered with
+`ipcMain.handle` in `src/main/index.js` and exposed on `window.sb` by `preload.js` with
+exactly these names:
+
+### 4.1 Workspaces
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.listWorkspaces()` | `sb:ws:list` | `Workspace[]` without `repos` — fast, no git |
+| `sb.scanWorkspace(id, {fetch=false})` | `sb:ws:scan` | `Workspace` with `repos` |
+| `sb.pullMain(id, repoName?)` | `sb:ws:pullMain` | `{ ok, results: [{repo, ok, message}] }` — all main repos when `repoName` omitted |
+
+`scanWorkspace` must finish a 4-repo workspace in well under a second without `fetch`.
+With `fetch: true` it runs `git fetch --no-tags` per repo first, in parallel.
+
+### 4.2 Running
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.start(id)` | `sb:run:start` | `{ ok }` or `{ ok:false, error }` or `{ ok:false, conflict: { wsId } }` |
+| `sb.stop(id)` | `sb:run:stop` | `{ ok }` |
+| `sb.runStates()` | `sb:run:states` | `{ [wsId]: RunState }` |
+| `sb.logs(id, procName?)` | `sb:run:logs` | `{ ok, text, name, procs: [{name, status}] }` — one process's ring buffer, for replay; the self workspace's last publish (§4.13) when the runner has nothing |
+| `sb.sendInput(id, data, procName?)` | `sb:run:input` | `{ ok }` — keystrokes to the pty (expo's `i`, `r`) |
+| `sb.resize(id, cols, rows, procName?)` | `sb:run:resize` | `{ ok }` — the terminal tells the pty its real size |
+
+`conflict` is returned when another copy of the same project is running; the renderer
+then offers "Stop <that one> and start this". The renderer performs that by calling
+`sb.stop(conflict.wsId)` then `sb.start(id)` — main does not do it implicitly.
+
+### 4.13 Desktop publishing
+
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.publish(id)` | `sb:publish:start` | `{ok, status, wsId, message}` or `{ok:false, error}` |
+| `sb.publishState()` | `sb:publish:state` | `{status, wsId, message}` |
+| `sb.onPublish(cb)` | `sb:evt:publish` | subscription; receives the same state |
+
+Only a discovered `self` workspace may publish. `status` is `idle`, `publishing`,
+`ready`, or `error`. A single build runs at a time; state survives renderer reloads.
+Publish runs that workspace's `npm run install:desktop -- --stage <receipt> --target
+<app>` with the repaired PATH. The target is the running packaged app, or the desktop
+app when running from source. Neither paths nor shell commands come from the renderer.
+
+The installer builds and signs a complete app, copies it to a hidden sibling folder,
+and verifies it before reporting ready. The current app is unchanged until normal
+quit: wait for any active publish, stop dev processes/detach terminals, then swap
+the prepared app into the same location. A failed swap restores the old app and
+keeps the window open with an error. Closing the window also quits while an update
+is pending, so close/reopen works; ordinary macOS window closing is unchanged.
+Publish requires the source checkout and its development dependencies. It publishes
+locally, without Git operations, uploads or a remote release.
+
+The build's output is written verbatim to `publish.log` under the app's user-data
+folder and, at the same time, shown in the workspace's Logs tab. The publisher is not
+a runner session — a session is stopped on quit, whereas a quit during a publish waits
+for the build — so it emits the runner's own `sb:evt:log` and `sb:evt:run` events for
+a single pseudo-process named `publish`, with piped line feeds rewritten as CR LF for
+xterm. `sb:run:states` includes the workspace's last publish as a RunState (`running`,
+then `exited` with code 0 or 1) when the runner has no session for it, and
+`sb:run:logs` answers from the publisher's buffer (1 MB, trimmed at a line) in the
+same case. The Logs footer of the self workspace offers **Publish again** in place of
+Restart, and hides it while a verified update is pending; before any publish it reads
+"nothing has been published yet — press Publish". Keystrokes typed into that pane go
+nowhere: the build's stdin is not connected.
+
+### 4.3 Diffs
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.fileDiff(id, repoName, path)` | `sb:diff:file` | `{ ok, patch, binary, truncated }` |
+| `sb.allDiffs(id, repoName?)` | `sb:diff:all` | `{ ok, files: [{repo, path, add, del, patch, binary, truncated}] }` |
+
+`patch` is the raw unified diff **body** (hunk headers + lines), without the
+`diff --git`/`index`/`---`/`+++` preamble. Truncate any single file at 2000 lines and
+set `truncated: true`.
+
+### 4.4 Pull requests
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.prSummary(id)` | `sb:pr:summary` | `{ [repoName]: { number, state } \| null }` — cheap, cached 60 s |
+| `sb.pr(id, repoName, {fresh})` | `sb:pr:get` | `{ ok, pr: Pr }` or `{ ok:false, error }`; `fresh` skips the 60 s cache (⌘R) |
+| `sb.prByNumber(owner, repo, number, {host, fresh})` | `sb:pr:byNumber` | the same `Pr`, for a pull request named by owner/repo/number alone — how the Pull requests screen opens one, cloned here or not |
+| `sb.mergePr(ref, {headSha})` | `sb:pr:merge` | `{ ok, merged: true, branch }`, `{ ok, merged: false, queued: true, branch: null }` when the base branch has a merge queue, or `{ ok:false, error }` — squash and merge on GitHub, then delete the merged branch there. `branch` is `{ name, deleted: true, already? }`, `{ name, deleted: false, skipped: 'it lives in a fork' }` or `{ name, deleted: false, error }`. `ref` is `{ wsId, repoName, number }` from a branch pill or `{ owner, repo, host, number }` from the list |
+
+Errors the renderer must be able to show verbatim: `gh is not installed`,
+`gh is not signed in`, `no pull request for TASK-352 yet`, `no pull request #81 in owner/repo`.
+
+**Squash and merge** is `gh pr merge <number> --squash --repo [host/]owner/repo`, with
+`--match-head-commit <headSha>` when the screen has one: `-R` keeps gh out of the
+checkout entirely (no branch delete, no checkout — §0), and the head guard is the one
+GitHub's own button uses, so a branch that was pushed to after the screen loaded is
+refused with GitHub's sentence rather than merged unseen. The squash commit's message
+is GitHub's default. On success every cached answer is dropped — the same pull request
+may be cached under four workspace directories, the list's pseudo-directory and the
+list itself — so the next look anywhere says Merged. A refusal (branch protection,
+failing checks, a draft, conflicts) is gh's sentence with its `X` glyph and "failed to
+merge pull request:" wrapper stripped.
+
+**Then the branch goes**, on GitHub only: the click the user was always making on
+GitHub's Delete branch button after a merge. Main asks GitHub what it merged
+(`state headRefName baseRefName isCrossRepository`) rather than trusting the screen, and
+deletes that head through `DELETE /repos/o/r/git/refs/heads/<branch>` only when the
+state is MERGED, the branch is the repository's own (never a fork's) and it is not a
+trunk. A 422 "Reference does not exist" is the branch already gone — a repository that
+deletes head branches itself — and counts as deleted. The outcome rides along in
+`branch` and never turns a merge that happened into a failure: the renderer's bar reads
+`squashed and merged #218 into main · deleted TASK-352 on GitHub`, or a warning with
+GitHub's sentence when the delete was refused. The checkout's local branch is untouched
+(§0); a queued merge deletes nothing, the branch being still needed.
+
+`Pr.timeline` is the conversation as GitHub's own tab shows it: every comment on the
+pull request and every review, oldest first, each review carrying the inline comments
+it was submitted with (`PrComment.reviewId`). A review with nothing to say — no body,
+no inline comments, state COMMENTED — is the shell GitHub leaves behind when one inline
+comment is posted alone, and is dropped; an empty APPROVED or CHANGES_REQUESTED review
+is kept, the verdict being the content.
+
+**Reactions are the point of the Overview**, not decoration: the Codex connector posts
+no review at all when it has nothing to say — it leaves a 👍 on the PR's description
+(login `chatgpt-codex-connector`), and that is only readable with the login. So the
+query asks WHO reacted on the description, the conversation comments and the reviews,
+and only HOW MANY on the inline review comments. The difference is the rate limit,
+measured on #81: reactor lists under every inline comment cost 53 of the 5000
+points/hour per PR; counts alone, 3.
+
+### 4.12 Your pull requests
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.myPrs({fresh})` | `sb:prs:mine` | `{ ok, login, prs: [MyPr], total, fetchedAt }` or `{ ok:false, error }` — every open PR the signed-in user authored, in any repository, newest activity first; cached 60 s, `fresh` skips it |
+
+One `gh api graphql` search (`is:pr is:open author:@me archived:false sort:updated-desc`),
+the only call that spans every repository at once; one rate-limit point, ~1 s warm. It
+needs nothing but the `gh` sign-in the rest of the app already uses — no token of its own.
+
+### 4.5 Misc
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.openExternal(url)` | `sb:open` | `{ ok }` — `shell.openExternal` |
+| `sb.writeClipboard(text)` | `sb:clipboard:write` | `{ ok }` — main owns the clipboard; see §4.7 |
+| `sb.revealInFinder(dir)` | `sb:reveal` | `{ ok }` |
+| `sb.openInEditor(dir)` | `sb:editor` | `{ ok }` — `open -a "Visual Studio Code" dir`, best effort |
+| `sb.pathForFile(file)` | — | `string` — the absolute path of a `File` a Finder drop handed the renderer, `''` when it has none. Answered in the preload by `webUtils.getPathForFile`, no IPC: a sandboxed renderer's `File` has carried no path since Electron 32. The Terminal's drop handling (R8) is its only caller |
+| `sb.dragBegan()` | `sb:term:drag` | `{ ok }` — a drag has entered a terminal pane; main snapshots the macOS drag pasteboard's promised files while the drag is live (R8, `main/drops.js`). Answered when the read is done; the renderer does not wait |
+| `sb.dropFiles(entries)` | `sb:term:drop` | `{ ok, text }` — `entries` is `[{ path, name, type, bytes? }]` for a drop's Files (`path` from `sb.pathForFile`, `bytes` a `Uint8Array` when there was no path); `text` is what the terminal types: each file's escaped path, space-separated, a space after the last; `''` for a drop with no file. R8 |
+
+### 4.6 Terminal
+
+The Terminal tab is a real interactive login shell in the workspace directory — the
+thing the user runs `claude` in. It is **not** the dev server: `Stop` never touches it,
+and it survives every navigation. One shell per workspace, opened lazily the first time
+that workspace's Terminal tab is shown.
+
+**It survives quitting, too.** With tmux installed, the shell runs inside a tmux session
+on Switchboard's own socket and what the app holds is a client attached to it; quitting
+detaches the client, the next launch attaches again, and tmux paints the screen that was
+there — Claude mid-turn included. `sb:term:open` on a session that already exists
+attaches rather than spawns, and answers the SAME `startedAt` and `pid` (the session's
+creation time and the shell inside it) so the renderer reads it as the shell it is. A
+fresh xterm asking `sb:term:buffer` for a live tmux-backed shell gets `''` and a fresh
+client behind it, painted whole by tmux, instead of a ring-buffer replay. See M6.
+
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.openShell(id, cols, rows)` | `sb:term:open` | `{ ok, state: Shell }` — idempotent: returns the live shell if there is one, else spawns. `id` is a workspace id or a folder square's absolute path (§4.10); main resolves either through `workspaces.dirOf` (M2), so a declared workspace (`website`, folder `website-landing-v2`) opens in its declared folder and never in one merely named after its id |
+| `sb.shellInput(id, data)` | `sb:term:input` | `{ ok }` — keystrokes to the pty |
+| `sb.shellResize(id, cols, rows)` | `sb:term:resize` | `{ ok }` |
+| `sb.shellBuffer(id)` | `sb:term:buffer` | `{ ok, text }` — the ring buffer, for replay into a fresh xterm; `''` for a live tmux-backed shell, which is re-attached and repainted instead |
+| `sb.closeShell(id)` | `sb:term:close` | `{ ok }` — SIGHUP the group, as closing a terminal window does |
+| `sb.shellStates()` | `sb:term:states` | `{ [wsId]: Shell }` — for adoption after a renderer reload |
+| `sb.termAppearance()` | `sb:term:appearance` | `{ appearance, effective }` — asked once at boot |
+| `sb.setTermAppearance(choice)` | `sb:term:setAppearance` | `{ appearance, effective }` |
+
+### 4.7 Push events (main → renderer)
+`preload.js` exposes subscribe helpers returning an unsubscribe function:
+
+```js
+sb.onLog((wsId, chunk, procName) => {})  // 'sb:evt:log' — pty output, tagged with its process
+sb.onRunState((state /*RunState*/) => {})  // 'sb:evt:run'
+sb.onLinks((wsId, links /*Link[]*/) => {}) // 'sb:evt:links' — as ports come up
+sb.onFocus((opt) => {})              // 'sb:evt:focus' — refresh now; {fetch:true} from ⌘R
+sb.onTermData((wsId, chunk) => {})   // 'sb:evt:term' — shell output
+sb.onTermState((state /*Shell*/) => {})  // 'sb:evt:termState' — spawned, exited
+sb.onEdit((e) => {})                 // 'sb:evt:edit' — {action:'copy'|'paste'|'selectAll', text?}
+sb.onAppearance((s) => {})           // 'sb:evt:appearance' — {appearance, effective}; see §4.8
+sb.onSidebar((s) => {})              // 'sb:evt:sidebar' — {visible}; see §4.9
+```
+
+`sb:evt:edit` exists because a menu accelerator wins over the renderer's keydown, and
+xterm's selection is **not** a DOM selection, so `role: 'copy'` copies nothing from the
+terminal. The Edit menu's Copy / Paste / Select All are therefore custom items that send
+this event; the renderer gives the terminal first refusal and otherwise reads the
+document's own selection.
+
+**Both directions of the clipboard belong to main**, and this is not a preference:
+* Chromium refuses `document.execCommand('copy')` outside a user gesture, and an IPC
+  event is not one. It fails *silently* — verified with a 337-character diff selection
+  and an untouched clipboard — so every copy goes to `sb:clipboard:write`.
+* `clipboard.readText()` in this Electron is **async**: the module exposes the six-method
+  web API (`clear/has/read/readText/write/writeText`), not the old synchronous one.
+  Sending its return value straight through put a `Promise` in the IPC payload, which
+  cannot be structured-cloned, so `webContents.send` threw inside the menu callback and
+  Paste did nothing at all while Copy and Select All worked. Await it, and never send a
+  non-string.
+* Reading the clipboard in main also keeps the renderer from needing clipboard-read
+  permission, and writing there works when the window is not focused — which is exactly
+  the case for a `/copy` finishing in a workspace the user is not looking at.
+* ⌘V with an image on the clipboard and no text (a screenshot copied with ⌃⇧⌘4, an
+  image copied from a browser): `readText()` answers `''`, and the Paste item then reads
+  the clipboard's `image/png` (`clipboard.has` / `read` / `getType`, all async), writes
+  it under `$TMPDIR/switchboard-pastes/` via `main/drops.js` and sends that file's
+  escaped path as `text` — the same text a Finder drop of the image would have typed,
+  and so the same route into Claude Code. Without it the accelerator swallowed ⌘V and
+  the terminal never saw the keystroke.
+
+### 4.8 Terminal appearance
+
+`appearance` is the user's choice — `'light' | 'dark' | 'system'`, persisted at
+`config.terminal.appearance` and set from **View ▸ Terminal appearance**. `effective` is
+that choice resolved against `nativeTheme.shouldUseDarkColors`, so it is only ever
+`'light'` or `'dark'`, and it is the one anything paints with. `nativeTheme`'s `updated`
+event re-resolves it, but only while the choice is `'system'`.
+
+Light is the default, and deliberately not `'system'`: the rest of the app is light-only
+(`color-scheme: light`, window `#ffffff`), so following a Mac in Dark Mode would leave a
+single dark slab in an otherwise white window — the thing this setting exists to fix.
+
+The choice has two consumers and they need it at different moments:
+
+* **The renderer**, immediately. `term-theme.js` rewrites the `:root` colour tokens and
+  assigns the new palette to every live `Terminal.options.theme`. xterm registers
+  `onSpecificOptionChange('theme')`, so a pane repaints in place — no rebuild, which
+  matters because rebuilding would throw away the scrollback, the keyboard focus and a
+  half-painted TUI's frame. Measured after a toggle: the shell's `startedAt` is unchanged,
+  the text on screen is the text that was there before, and focus is still in the pane.
+* **`shell.js`**, *before* it spawns. A shell's environment is fixed at fork, so
+  `COLORFGBG` (`0;15` light, `15;0` dark) can only ever be set for the NEXT shell. A
+  running shell keeps the old value on purpose rather than being restarted under the user.
+
+`COLORFGBG` is not belt-and-braces. xterm.js *does* answer the OSC 11 background query
+from the live theme — measured: light replies `ESC ] 11 ; rgb:f7f7/f7f7/f9f9 ST`, dark
+replies `rgb:1c1c/1c1c/1e1e` — and that path stays true for the life of a pane. But a
+program has to know to *ask*, and the ones that do gate it on a short list of terminal
+names which cannot include this one. Claude Code is the case in point: it reads
+`COLORFGBG`, and on `theme: auto` this is what stops it picking its dark theme on a white
+pane. (On an explicit `"theme": "light"` — the common case — none of this is consulted and
+the pane's background is the whole story, which is why this feature exists.)
+
+### 4.9 Sidebar
+
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.sidebar()` | `sb:ui:sidebar` | `{ visible }` — asked once at boot |
+| `sb.setSidebar(visible)` | `sb:ui:setSidebar` | `{ visible }` — persists, broadcasts, rebuilds the menu |
+
+Hiding the rail is a **layout** change, not a render: nothing in the view tree reads it,
+so it is one class (`.norail`) on `.win` and the stylesheet does the rest. That is what
+makes it free of the usual cost — no view is rebuilt, so the terminal's scrollback, its
+focus and any selection all survive it, and the shell never notices.
+
+Main owns the stored value for one reason: the View item has to read **Hide Sidebar** or
+**Show Sidebar**, and the menu is main's. `⌃⌘S` is macOS's own accelerator for it. The
+renderer applies the class the moment its own button is clicked and tells main after, so
+a click never waits on IPC; the `sb:evt:sidebar` that comes back lands on the state the
+window is already in and does nothing.
+
+Three things the layout has to get right, all of them measured:
+
+* **The rail leaves on a negative `margin-left`, not a width.** Its content keeps its
+  220px and slides out whole. Animating the width instead reflows every row on the way,
+  and the labels squash against the edge rather than leaving with the panel.
+* **The traffic lights.** They are the OS's, painted at `{x:18, y:18}` — 12px each, 8px
+  apart, so they end at x=70, y=30. With the rail gone they sit over the main column, so
+  it grows a 30px inset (its header's own 26px makes up the 56px the rail's first row
+  starts at) and the button moves to x=82. A `.drag` strip covers that band so the window
+  can still be dragged by it — and it is `display:none` while the rail is open, where it
+  would otherwise cover the top third of the Start button and swallow its clicks.
+* **`SB.layout.busy()`.** The slide fires the terminals' `ResizeObserver` on every frame
+  of itself. `views/terminal.js` and `views/logs.js` ask this before every fit and hold;
+  `app.js` calls their `relayout()` once when it is over. Measured on a 1100px window
+  with a live shell: the gate gives **one** reflow, 753px → 971px. Without it, seven —
+  seven pty resizes and seven SIGWINCHs into a TUI that is redrawing between each one.
+
+One thing the rail is the only place for: a background workspace's bell. With it closed
+the button carries the blue dot instead, so hiding the rail does not silently drop the
+signal it exists for.
+
+### 4.10 Grid
+
+The Grid is the row above the workspace groups in the rail (`⌘0`): four terminals side by
+side, in **views** the user makes — "Sample" is sample-1…4 in the four squares,
+"Everything else" is what is left. It is the two iTerm2 windows of four panes each that
+the Terminal tab replaced one at a time, brought back as one screen. Route `{view:'grid'}`,
+and it is the one route with no `wsId`.
+
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.gridViews()` | `sb:grid:list` | `{ views: GridView[] }` — asked once at boot |
+| `sb.saveGridViews(views)` | `sb:grid:save` | `{ views }` — what main kept after cleaning |
+| `sb.chooseFolder()` | `sb:dialog:folder` | `{ ok, dir }` — the system's folder sheet on the window (`openDirectory`, `createDirectory`, opening on the root); `{ ok:false, canceled:true }` when dismissed, which is not an error. A smoke run never shows a sheet: `SB_SMOKE_FOLDER=<path>` is the choice there, and without it the answer is a cancel |
+
+Main is the store and nothing more: it keeps only the `GridView` shape (four cells, no
+workspace twice in one view, at most 20 views) and writes `config.grid.views`. A cell
+naming a workspace that no longer exists is **kept**; the renderer shows the square as
+gone with a Clear button, which beats a view silently losing a square when a folder is
+renamed. Which view the Grid is showing, and whether the window was last on the Grid at
+all, live in `localStorage` the way the last workspace does.
+
+**A square may hold a folder instead of a workspace** (added 2026-09-20, the user's ask:
+a terminal need not belong to a workspace). The picker's first group, `Folder`, offers
+`Choose a folder…`, which raises the system's own folder sheet through
+`sb.chooseFolder()`; the chosen folder's absolute path goes into the cell as its id —
+the root itself, a repo outside it, any folder on the Mac. A folder square is a terminal
+and nothing more: it is on no rail, has no workspace screen, is never scanned and never
+started. Its path is its id everywhere a workspace id goes — the pane, the shell, the
+tmux session, the bell — so nothing beyond `views/grid.js` (the strip: the folder's name,
+the path as tooltip, no dot, no jump) and `shell.js` (opens in the path itself; M6 names
+the session) has to tell the two apart. Choosing the folder a workspace already lives in
+puts that workspace in the square, not a second shell in its folder under another name.
+A folder that has since gone shows the shell's own sentence with Try again, and Edit
+terminals takes it out.
+
+**A square is that workspace's Terminal.** `views/terminal.js` keeps one xterm and one
+shell per workspace and exposes `mount(wsId, into)`, which moves the same host into
+whatever is showing it — a Grid square or the workspace's own Terminal tab. Only one
+screen is ever on, so the host simply moves; nothing is duplicated and nothing restarts.
+Measured: the host element in the square is the host element on the Terminal tab, the
+marker typed in one is in the other, and the shell's `startedAt` is unchanged across the
+round trip. Taking a workspace out of a square — only from the `⋯`'s Edit terminals,
+R10 — leaves its shell running.
+
+Three rules in `app.js` follow from that:
+
+* `retirePanes()` treats a square on screen as a Terminal tab on screen — a pane in the
+  current view is never retired. It walks the folder ids main's shell states carry as
+  well as the rail's workspaces, so a folder square's pane is retired like any other once
+  its shell has exited and it has left its square.
+* A bell from a square on screen has already been read: `bell()` ignores it and
+  `renderMain()` clears the set on every navigation, as it does for the Terminal tab.
+* `SB.grid` — `create / rename / remove / select / assign` — is the only writer of
+  `state.grid`. Every change is applied first and written after, so a click never waits
+  on the round trip, and whatever main kept replaces the list when it answers.
+
+The layout is CSS: `.grid` is `1fr 1fr` by `1fr 1fr` and fills the body; below 860px of
+body width (a container query) it is one column of fixed-height rows and the page
+scrolls. Fixed, not auto: an auto row takes its height from the terminal and the terminal
+its rows from the height, and the pair settle wherever xterm's default 24 rows put them.
+
+### 4.11 Claude usage
+
+The three bars claude.ai's "Your usage" page shows — the five-hour session, the week,
+and any per-model week — in the app: a gauge in the Grid's header for the session, and a
+Usage screen for all of them behind the row pinned to the bottom of the rail. Route
+`{view:'usage'}`; like the Grid it carries no `wsId`, and it shows with no workspaces at
+all, being about this Mac's Claude sign-in rather than any folder.
+
+The row, gauge and Usage content are hidden until a local Claude OAuth credential
+is found (`configured: true`). Missing credentials return `configured: false` and
+`reason: 'no-login'` without a network request. That clears cached numbers, hides
+the row and gauge, and sends an active or restored Usage route to the Grid. While
+the initial check is pending, a restored Usage route displays the Grid. Configured
+accounts retain Usage and its error messages on expired sign-ins or network failures.
+
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.usage()` | `sb:usage:get` | `Usage` — the last answer, or the one in flight; asked once at boot |
+| `sb.refreshUsage()` | `sb:usage:refresh` | `Usage` — asks Anthropic again now (the screen's ↻, its Try again, and ⌘R there) |
+| `sb.onUsage(cb)` | `sb:evt:usage` | every answer: every 5 min, on a window focus when the last is over 60s old, and on the manual refresh |
+
+There is no CLI for this — `claude` has no usage subcommand, and `/usage` is a screen
+inside its TUI — so `usage.js` does what that screen does: it reads the OAuth token
+Claude Code keeps in the macOS keychain (`Claude Code-credentials`, written by
+`/usr/bin/security` and so readable by it without a prompt; `~/.claude/.credentials.json`
+is the fallback) and asks `api.anthropic.com/api/oauth/usage` with it. **The token is a
+credential.** It is read per request, sent to that one host, and never logged, never in
+an IPC payload, never written anywhere. Nothing refreshes it — Claude Code rotates its
+own, and a second refresher racing it would invalidate the session the user is typing
+into — so an expired token is a sentence (`reason: 'expired'`) and the next poll simply
+tries again, by which time Claude Code has renewed it. Every failure is an `{ ok:false }`
+Usage with a sentence; the handlers never reject.
+
+The answer's `limits[]` (kind `session` / `weekly_all` / `weekly_scoped`, the last with a
+`scope.model.display_name` such as "Fable") is the shape read; `five_hour` / `seven_day`
+/ `seven_day_<model>` are the older windows and the fallback when it is missing.
+Anthropic's `severity` is kept when it says one; otherwise red from 90 and amber from 75,
+which is where claude.ai's own page turns.
+
+The endpoint is shared with every Claude Code the user is running — each polls it for
+its own status line — so the app is deliberately gentle: 5-minute automatic polls, a
+fetch on window focus only when the last is over 60s old, and the manual ↻. A failure
+sets an exponential cooldown (a 429 backs off from 5 min doubling to 30; a network blip
+from 1 min) during which the timer and focus hold off; the manual ↻ ignores the cooldown
+because it is a person asking. A transient failure **never replaces the numbers already on
+screen**: `state.usage` is only ever the last good answer, a failure sets `usageError`
+beside it, and the gauge, the rail's dot and the screen's rows all keep showing the last
+good data with a quiet "couldn't refresh" note. The full-screen sentence is only for a
+configured account that has never had an answer at all. This is the whole fix for
+"why do I keep seeing this" — a passing rate-limit used to blank everything.
+
+**A poll landing must not cost a render.** `app.js` keeps a signature of what is
+visible — the plan, and each limit's percent, severity and reset — and when a poll
+changes nothing it does nothing. When one does, the rail's row and the Grid's gauge are
+rewritten in place (`views/usage.js` `refresh()`), and only the Usage screen itself is
+rebuilt, being the one screen with no terminal on it: a render of the Grid for a bar
+that moved two percent would re-parent four live shells and drop whichever one had
+focus. A gauge appearing takes a render, and `refresh()` says so by answering `false`.
+Removing a gauge after sign-out happens in place, preserving the live terminals.
+Measured: after an answer that moved the bar, the Grid's `.grid` element is the one that
+was there before, and the gauge that had focus still has it.
+
+`SB_USAGE_FIXTURE=<a.json>[,<b.json>…]` stands in for the network in a smoke run — each
+poll reads the next file, the last one repeats; a file may add `_credential` for the
+plan name, `_status` (with `_expired`) to play a bad answer, or `_nologin` — and
+`SB_USAGE_INTERVAL=<ms>` sets the poll. Neither is read outside those variables.
+
+---
+
+## 5. Main-process modules
+
+### M2 `config.js`
+`load()`, `save(patch)`, `defaults()`, `linksFor(workspace, repo)`.
+
+### M2 `workspaces.js`
+`discover()` → `Workspace[]` (no git): read `root`, keep directories with ≥2 child git
+repos, drop `exclude`, then add every `workspaces.<id>.dir` the config declares (a
+folder that is missing is skipped, and `exclude` does not apply — it is declared, not
+discovered). Mark the one whose package.json is this app's own `self`, with
+`devCommand: null` and `processes: []` whatever the folder or the config says.
+Give each its `section`: its project when that project has more than one
+workspace, else `other`. Sort by section in the config's project order with `other`
+last, then by project, then by id.
+`scan(id, {fetch})` → `Workspace` with `repos` — the child repos, or the folder itself
+when it has no repo children and is a repo (a single-repo workspace) — calling `git.js`
+per repo **in parallel** and folding in `pr` from the cached PR summary if present.
+Never throws: a repo that fails gets `error` and empty change data.
+`lookup(id)` → the `Workspace` (no repos) the rail shows under that id, or null — the one
+place a bare id turns back into a folder, so a declared workspace resolves to its
+declared `dir`. `dirOf(id)` → the absolute folder a terminal for `id` opens in: an
+absolute path (a folder square, §4.10) when it is a directory, else `lookup(id).dir`,
+else the root's child of that name (the old resolution), else null. `shell.js` and
+`runner.js` resolve every bare id through these and never join the root with the id
+themselves — that is how `website` used to answer "unknown workspace".
+
+### M3 `git.js`
+Pure functions over a repo directory, all `execFile('git', […], {cwd})`, no shell:
+`branchInfo(dir)`, `divergence(dir, branch)`, `changes(dir)` (tracked numstat + status +
+untracked, NUL-separated parsing), `fileDiff(dir, path, {untracked})`, `allDiffs(dir)`,
+`pullMain(dir)`, `remoteInfo(dir)`, `fetch(dir)`. Handle: no upstream, missing
+`origin/main`, detached HEAD, renames, binary files, paths with spaces and unicode.
+
+### M4 `github.js`
+`prForBranch(dir, branch)`, `prDetail(dir, number)`, `prDetailByRemote({owner, repo,
+host}, number, {fresh})`, `myPullRequests({fresh})`, `reviewComments(dir, number)`,
+`resolvedThreads(dir, number)`, `mergePr(dir, number, {headSha})`,
+`mergePrByRemote({owner, repo, host}, number, {headSha})`, `deleteHeadBranch(target,
+{dryRun})`, `deleteRemoteBranch(remote, branch)` (§4.4). Uses `gh` with `--json`; caches per (dir, branch) for
+60 s — a PR named by remote alone is cached under a `host/owner/repo` pseudo-directory,
+which no real directory can collide with; distinguishes *not installed* / *not
+authenticated* / *no PR* by exit code and stderr, returning those exact sentences.
+
+### M5 `runner.js`
+One dev process per workspace. Spawns the workspace's `devCommand` through a pty when
+`node-pty` loads, else `child_process.spawn` with `FORCE_COLOR=1`. Keeps a ring buffer
+(1 MB / 5000 lines) per workspace for replay. Emits `sb:evt:log` and `sb:evt:run`.
+Stops by killing the whole process group (SIGTERM → SIGKILL after 4 s) so npm, node,
+expo and ngrok children never survive. Refuses to start a second copy of the same
+project, returning `conflict`. Kills everything on `app.before-quit`. A bare id from
+`sb:run:start` is resolved through `workspaces.lookup` (M2) to `{ id, project, dir }`
+only — the config fills the processes in — so a declared workspace starts in its
+declared folder.
+
+### M6 `shell.js`
+One interactive login shell per workspace: `pty.spawn($SHELL, ['-l'], {cwd: ws.dir})`, so
+it reads the same `.zprofile`/`.zshrc` iTerm2 does and `claude` is on `PATH`. A bare id
+is resolved through `workspaces.dirOf` (M2): a workspace id opens in the folder the rail
+lists for it, declared `dir` included, and an absolute path — a folder square (§4.10) —
+opens in itself. A folder that is not there answers `that folder is not there any more:
+<path>`; an id the rail does not know, `unknown workspace "<id>"`. The tmux session for a
+workspace id is `sb-<id>` and must stay so across versions, or a launch would stop finding
+last week's session; a folder's is `sb-<basename>-<8 hex of sha1(path)>`, so two folders
+of one name are two sessions and the name still reads in `tmux -L switchboard ls`. `TERM` is
+`xterm-256color`, `COLORTERM` is `truecolor`, `TERM_PROGRAM` is `Switchboard`, and
+`COLORFGBG` says which way round the terminal is (§4.8). Deliberately does NOT set
+`FORCE_COLOR`/`CLICOLOR_FORCE` — a real tty needs no coaxing and forcing them lies to
+anything that pipes. `setAppearance(name)` takes the resolved appearance for the NEXT
+shell; an environment cannot be rewritten after fork.
+
+Keeps a 1 MB / 5000-line ring buffer per shell, trimmed at a line boundary, for replay.
+Emits `sb:evt:term` (wsId, chunk) and `sb:evt:termState` (Shell).
+
+**The shell outlives the app** (added 2026-09-19, the user's ask). When `tmux` is on
+PATH (Homebrew's 3.7), the shell runs inside a tmux session named `sb-<wsId>` on the
+app's own server — `tmux -L switchboard -f src/main/switchboard.tmux.conf`, so the
+user's own tmux and `~/.tmux.conf` are never touched — and `Term.term` is a tmux
+*client* attached to it in the pty. `open()` attaches to a session that is already
+there and creates one only when it is not (`new-session -d -c dir -x cols -y rows -e
+COLORFGBG=…`, a login shell as tmux runs `default-shell`); `startedAt` is the session's
+`session_created` and `pid` its `pane_pid`, so a shell attached again next week is the
+same generation to the renderer. `buffer()` for a live one re-attaches a fresh client
+(the old one is dropped first, so its exit is not the shell's) and answers `''`: tmux
+paints the whole screen into the fresh pane, where a ring replay would paint a
+half-drawn TUI. `closeAll()` at quit *detaches* (SIGHUP to the client, which tmux takes
+as detach); `close()` is `kill-session`. A client that ends unasked means the session is
+gone — the user typed `exit`, and tmux prints `[exited]` first — or it was detached
+under us, in which case it just gets a new client. Without tmux, everything is the old
+way: a bare `zsh -l`, hung up at quit, and `claude --continue` resumes.
+
+Things the config gets right that took measuring: the server exits the moment it has
+no sessions (`exit-empty`), so `-f` rides on EVERY command — the one that happens to
+start the server must carry the config or it comes up on the user's own; the outer
+terminal loses `smcup`/`rmcup`, because in xterm.js's alternate buffer there is no
+scrollback at all; and it loses `indn` (CSI S, "scroll N lines"), because xterm.js
+drops what that scrolls off rather than keeping it — with it, `seq 1 200` left zero
+lines of scrollback, without it 187. `Ms` plus `set-clipboard on` carry OSC 52 (Claude's
+`/copy`) out to the pane; `bell-action any` carries the bell that turns the rail's dot
+blue; `escape-time 0` keeps Esc immediate and still lets Shift+Enter's ESC CR through
+as one key. `prefix None`, `status off`, `mouse off`: tmux draws and intercepts nothing.
+`display-message -t` takes a pane target, where the `=name` exact-match prefix answers
+nothing on 3.7; `name:` is used there and `=name` everywhere else.
+
+Teardown of a plain shell is a terminal's, not the runner's: SIGHUP the process group,
+SIGKILL it after a 2 s grace, and stop. No orphan sweep, no port sweep — this is the
+user's own shell and anything it started is theirs.
+
+A shell is invisible to `runner.js`: it has its own session (forkpty calls setsid) and
+therefore its own pgid, which is the only thing `Session.sweepOrphans` treats as "ours",
+so `Stop` and the dev-server teardown can never reach it. The reverse also holds.
+
+### M5 `ports.js`
+`probe(links)` → marks each link live via a fast TCP connect (150 ms timeout).
+`ngrokUrl()` → `http://127.0.0.1:4040/api/tunnels`, null when ngrok is not running.
+The runner polls every 2 s while a workspace is starting, then every 10 s while running,
+and emits `sb:evt:links`.
+
+### M7 `usage.js`
+`start()` / `stop()` the once-a-minute poll; `get()` — the last answer, or the one in
+flight; `refresh()` — ask now, deduped while one is in flight; `poke()` — a window
+focus, which re-asks only past 20s; and `events`, emitting `usage` with every answer.
+`normalize(body, plan)` and `planName(subscription, tier)` are exported for tests.
+Never rejects; see §4.11 for what it reads and the one place it sends it.
+
+---
+
+## 6. Renderer
+
+### R1 `index.html`
+Load order, all classic scripts, no `type=module`:
+`icons.js`, `dom.js`, `term-theme.js`, `markdown.js`, `diffview.js`, `views/workspace.js`,
+`views/logs.js`, `views/terminal.js`, `views/usage.js`, `views/grid.js`, `views/files.js`,
+`views/diff.js`, `views/pr.js`, `views/prs.js`, `app.js` (last — it boots). `term-theme.js`
+must precede the two views that build `Terminal`s: both read the palette at construction;
+`markdown.js` must precede `diffview.js` and the two PR screens, which render every
+comment body through it; `prs.js` follows `pr.js`, whose gh failure bars it borrows.
+Body skeleton:
+`<div class="win noanim"><aside id="side"></aside><main id="main"></main><div class="drag"></div><button id="rail"></button></div>`.
+The toggle is a child of `.win`, not of the aside, because it has to outlive the rail —
+closed, it slides over to sit beside the traffic lights. **It is last for a reason.**
+Electron builds the window's draggable region by walking the document in order — union
+for `drag`, subtract for `no-drag` — so a `no-drag` element that precedes a `drag` one
+has its hole punched first and then covered over. With the button before the `.drag`
+strip, closing the rail worked and a real click on the button to reopen it moved the
+window instead; a programmatic `click()` in the smoke never noticed, because it bypasses
+the native hit test. Every drag region has to precede the button. `noanim` is in the markup rather
+than added by script: a window that opens with the rail already closed would otherwise
+slide it shut in front of the user, and by the time a script could add the class the first
+paint has happened. `app.js` drops it one task after the stored state has been applied,
+forcing a style recalculation first — in the same task the browser folds both changes into
+one recalc whose after-change style has the transition back, and it animates anyway.
+The top 52 px of the sidebar is the drag region holding the real traffic lights
+(`titleBarStyle: 'hiddenInset'`, `trafficLightPosition: {x: 18, y: 18}`).
+
+### R1 `dom.js`
+```js
+SB.dom = { h(tag, attrs, ...children), frag(...), esc(s), clear(el), on(el, ev, fn),
+           fmtAgo(ms), plural(n, word) }
+```
+`h('div.repo', {onclick}, …)` supports a `tag.class.class` selector string and an
+`html: '<svg…>'` attr for trusted icon markup. Everything else is escaped.
+
+### R9 `term-theme.js`
+```js
+SB.termTheme = { palette(name), current(), set(name) /* -> changed */, onChange(fn) }
+```
+The **one** definition of the terminal's sixteen ANSI colours, for both consumers that
+need them: `Terminal.options.theme`, and the `--term-*` / `--t-*` CSS tokens, which
+`set()` writes onto `:root` from the same object. They used to be hand-kept copies in
+three files. `set()` also stamps `data-term-theme` on `:root` for the handful of rules
+that are not a colour swap — in light the pane needs an edge and the scrollbar has to
+stop being white.
+
+The light palette is not the dark one inverted: those are pastels chosen to glow on
+near-black and they wash out on a light ground. Every light slot clears WCAG 4.5:1
+against its background (floor: `cyan`, 4.52), which is a better floor than the dark set
+manages (3.77, at `brightBlack`). Two conventions that look wrong written down and are
+right on screen: on a light ground `white` becomes a mid grey or it is invisible, and
+`brightWhite` — the slot programs reach for to emphasise — becomes the darkest ink.
+
+The light pane's edge is a `box-shadow`, never a `border`. FitAddon sizes the pty from
+`getComputedStyle('.term').height`, so a real 1px border would cost a row exactly the way
+the old padding cost two (see `.term` in `styles.css`). A shadow paints without touching
+the box — measured identical geometry in both appearances.
+
+### R2 `app.js`
+Holds the only mutable state:
+```js
+SB.state = { workspaces: [], byId: {}, route: {view:'workspace', wsId, tab:'changes'}, run: {}, loading:false }
+```
+`SB.go(route)` sets the route and re-renders; `SB.refresh(wsId, {fetch})` re-scans;
+`SB.render()` renders sidebar + the view for `route.view`; the rail's group headings are
+the workspaces' `section`s, in the order main hands them over. Views are pure functions
+`(state) => HTMLElement`; `app.js` swaps `#main`'s child. It subscribes to `onLog`,
+`onRunState`, `onLinks`, `onFocus`, `onAppearance`, `onUsage`, and owns keyboard shortcuts
+(⌘1–9 switch workspace, ⌘R refresh, Esc back, ⌘. stop). An appearance change never calls
+`render()`: `term-theme.js` repaints the live xterms itself, and rebuilding the view would
+throw away the terminal's focus and selection to repaint colours that already changed.
+
+It also owns the rail's visibility (§4.9) and `SB.layout.busy()`, the flag the two
+terminal views hold their fits behind while it moves. The settling period is a **timer**,
+not `transitionend`: under `prefers-reduced-motion` there is no transition at all, the
+event never arrives, and every terminal would stay frozen for good at its old size.
+
+Routes: `{view:'workspace', wsId, tab:'changes'|'logs'|'terminal'}`, `{view:'files', wsId, tab:'files'|'all'}`,
+`{view:'diff', wsId, repo, path}`, `{view:'pr', wsId, repo, tab:'overview'|'files'|'all'}`,
+`{view:'pr', owner, repo, number, tab}` (no workspace — a pull request opened from the
+list; its parent for the back caret and Esc is `prs`, not `workspace`),
+`{view:'grid'}` (no workspace; §4.10), `{view:'usage'}` (no workspace; §4.11),
+`{view:'prs'}` (no workspace; §4.12). A route with no workspace is `standalone()`:
+it renders with no workspaces at all and lights its own rail row — the Pull requests
+row stays lit while one of its pull requests is open.
+
+It also owns the rail's bottom row, Usage, drawn by `renderFoot()` behind its own
+signature like the nav; its dot is red only while the five-hour window is `critical`.
+
+### R3 `markdown.js`
+`SB.markdown.render(text)` → a DocumentFragment of block elements; `inline(text)` →
+nodes for one line; `parse(text)` → the block tree, for tests. GitHub-flavoured
+markdown as the text on a pull request actually uses it: headings, paragraphs (a single
+newline is a line break, as GitHub renders a comment box), bullet / numbered / task
+lists, fenced code, blockquotes, tables, rules, `<details>`; inline code, bold, italic,
+strike, links, bare addresses, images to their alt text. No engine and no innerHTML —
+every string reaches the document as a text node — and raw HTML is read only for the
+tags that carry meaning (`<a href>`, `<br>`, `<details>`, `<code>`, bold/italic); every
+other tag is stripped to its text, which is what Codex's `<sub>` badge wrappers and the
+Linear bot's `<p><a>` need. Every comment body in the app — in a diff, on the Overview
+— goes through it; the `.md` class is what the stylesheet sizes the blocks by.
+
+### R3 `diffview.js`
+`SB.diffview.render(patch, {comments: PrComment[], collapsedContext: false})` → DOM node
+using the mock-up's `.diff`/`.h`/`.a`/`.r` classes, inserting `.cmt` comment cards after
+the line a comment anchors to. Pure; no IPC. Comment bodies are `SB.markdown`'s.
+
+### R8 `views/terminal.js`
+The Terminal tab. Same header as Changes and Logs (`SB.views.workspace.header`), a
+`.bd.pane` below it holding one xterm per workspace. Opens the shell on first render.
+
+Keyboard, matching what `claude /terminal-setup` installs elsewhere:
+* **Shift+Enter** sends `ESC CR` (`\x1b\r`) — the newline sequence Claude Code expects.
+* `macOptionIsMeta: true`, so **Option+Enter** sends the same thing and Option+B/F do
+  word motion.
+* **⌘K** clears the screen and scrollback.
+* OSC 52 (`ESC ] 52 ; c ; <base64> BEL`) writes to the system clipboard, which is how
+  Claude Code's `/copy` works. Registered with `term.parser.registerOscHandler(52, …)`;
+  no addon.
+* `term.onBell` marks the workspace so the sidebar can show it; see §7.
+
+**Drops.** A file dropped on the pane is typed at the cursor as its escaped path with
+a space after it — every file, space-separated — which is exactly what iTerm2 and
+Terminal.app do, and all that "drag an image into Claude Code" ever was: Claude reads
+the image from the path. Escaping is a backslash before whitespace and shell
+metacharacters, never quotes, because that is the form those terminals type and so the
+form Claude Code's path detection was built against. The renderer takes the Files off
+the DataTransfer synchronously, asks the preload for each one's path (`sb.pathForFile`,
+§4.5) and reads the bytes of any File that has none, then hands the lot to main
+(`sb.dropFiles`, §4.5), which answers the text to type; it goes through `term.paste()` —
+the ⌘V route — so bracketed paste applies and the composer takes it as inserted text.
+Main (`main/drops.js`) knows three kinds of File, and only the first is a file on disk:
+a Finder drop, whose path exists and is typed as it is; a File built in memory (an image
+dragged out of a browser), whose bytes are written under `$TMPDIR/switchboard-pastes/`
+and that path typed; and a file *promise* — an unsaved macOS screenshot dragged off its
+floating thumbnail — which Chromium 152 hands the page as a File whose path is the
+screenshot tool's own temporary copy, `$TMPDIR/TemporaryItems/NSIRD_screencaptureui_*/`
+(it keeps the promise's file URL, discards the PNG bytes that ride alongside it, and
+never fulfils a promise; `web_drag_dest_mac.mm`,
+`FileURLAndFilePromiseContentDoNotDuplicate`). That file exists at the instant of the
+drop, so existence proves nothing; it is unreadable to every other process and is
+deleted when the thumbnail goes. Typed as-is that is a dead path and Claude Code sees
+text (`zsh: permission denied` in a plain shell). The bytes are still on the macOS drag pasteboard, which
+Electron's clipboard module cannot read (no drag buffer) but `/usr/bin/osascript -l
+JavaScript` can, in ~90 ms — so on `dragenter` the renderer calls `sb.dragBegan()` and
+main snapshots the pasteboard's promised files into the paste folder *while the drag is
+live* (the pasteboard may be cleared by the time the DOM `drop` has crossed IPC), and
+the drop types the snapshot's files, renamed to the screenshot's own name, in
+preference to any path whenever the drag carried promised content at all; a Finder
+drag promises nothing, so its paths are typed as they are. A drop with no file (a URL
+or selection dragged out of a browser)
+is pasted as its text. The listeners are on the pane's host, so the Grid's squares get
+them too. Without them, Chromium's answer to a dropped file is to navigate the window
+to its `file://` URL, which main's `will-navigate` cancels and `openExternal` refuses
+(http(s) only): the drop vanished silently, and `dragover` has to `preventDefault` or
+`drop` never fires at all.
+
+Exports `render(state)`, `write(wsId, chunk)`, `onState(shell)`, `dispose(wsId)`,
+`relayout()` (every pane refits — §4.9), `mount(wsId, into)` and `focus(wsId)` (the Grid's
+squares — §4.10), `editAction(action, text)` → `true` when the focused terminal
+consumed a menu Edit action, and `xterm(wsId)` (the live Terminal, for the smoke harness
+only). A pane whose shell is still alive is **never** disposed: replaying a full-screen
+TUI's ring buffer into a fresh xterm paints garbage. The one time a fresh pane meets a
+live shell — the window closed and opened again — the replay it asks for is a repaint
+by tmux (§4.6), which is why that case is not garbage either.
+
+### R10 `views/grid.js`
+The Grid screen (§4.10). Header: one row — the views as the same segmented control the
+workspace screen switches tabs with, plus a `+` that becomes the name field in place, and
+a `⋯` at the right edge holding Rename, Edit terminals and a Delete that asks once (the
+item turns red and names the view; a second click deletes). No title and no count line: the selected
+segment is the title, and the squares show their own state. The menu is in-page (`.more`
+> `.menu`, hanging from the `⋯`, after the header in the DOM so its no-drag holds — §4.9);
+it closes on Escape (focus back on the `⋯`), on a mousedown anywhere outside it, and when
+focus leaves it; the arrow keys move between its items.
+
+The menu's "focus left" and the name field's blur are both decided a tick later, never
+from the event: Chromium blurs a focused element *before* a rebuild detaches it, so the
+handler sees a connected element and no relatedTarget. Decided synchronously, the render
+that opens the menu (the `⋯` has focus from the press) closed it again, and the next
+render's landing focus put the user in a terminal; a bell mid-word would likewise have
+committed half a name. After the tick, focus is back in the new element — `app.js`
+restores it by position — or it has really left. A hidden window fires no focus events
+at all, which is why the smoke harness gives its window page focus (`scripts` — R1).
+Body: four `.cell`s — a filled one is a 30px strip (the workspace's
+name, which opens its Terminal tab; its run dot; and, only while the terminals are being
+edited, a `×` to take it out) over `terminal.mount()`; an empty one is an `Add workspace`
+button that turns into a picker of the workspaces not already in this view, headed by a
+`Folder` › `Choose a folder…` row — first, because the list already overflows a square
+and a row under ten workspaces is one nobody scrolls to — that raises the system's folder sheet
+(`sb.chooseFolder()`, §4.10) — a cancel leaves the picker up, a choice fills the square
+with the folder's path, or with the workspace that lives there when one does; a gone one
+explains itself and offers Clear. A folder square's strip is the folder's name as a plain
+label (the path is its tooltip), no dot and no jump: nothing runs there and no screen
+sits behind it.
+
+**Edit terminals** is the only way a workspace leaves a square. The `×` used to sit on
+every square all the time, one slip away on the screen the hand is busiest in; now it
+exists only while the view is being edited — a mode entered from the `⋯` and left with
+the Done that takes the `⋯`'s place in the header, beside a line saying what the mode is
+for. In it a square can lose its workspace and gain nothing: the empty squares say
+`empty` instead of offering Add, the filled squares' heads are tinted (`.cell.arr`) and
+their `×` drawn as a button, and the landing focus stays out of the terminals — Done
+gets it on entry. Removing a workspace keeps the mode, so several can go in one visit.
+Switching view or leaving the screen ends it, as it ends everything mid-flight.
+
+What it keeps between rebuilds is only what a rebuild would lose: the name being typed,
+the square that is choosing, the open menu, the armed Delete, the view whose terminals
+are being edited, and the workspace just placed — whose terminal gets focus, because the picker row the user clicked no longer
+exists and `app.js`'s path-based focus restore would land on whatever now sits at that
+position. All of it is dropped when the Grid is rendered after another screen: `render()`
+asks whether `#main` still holds a `.gridhd` from the previous rebuild. Landing on the
+Grid otherwise focuses the first filled square, and only when nothing in the main column
+has focus already.
+
+### R11 `views/usage.js`
+The Usage screen (§4.11). Header: `Usage`, the plan at the right (`Max 5x`) with the
+one action beside it — an `.ib` ↻ that asks again now and spins while it waits
+(`SB.busy('usage')`; ⌘R on this screen does the same through the View menu's Refresh
+and `handleFocus`) — and one line of state under it — `updated 40s ago`, ticking in place the way the workspace
+header's `running 14s` does, or `not available` when there is no answer. Body: one
+`.ulim` row per limit — name (the 150px repo-name column), bar, percent, `resets Thu
+2:00 PM` — and, when there is no answer, the sentence with a single Try again.
+
+The header's one action is the ↻ (`.ib`, `SB.busy('usage')` spins it; ⌘R on this
+screen does the same). A failed refresh with good numbers still up shows them and adds
+"· couldn't refresh" to the updated-ago line rather than blanking the screen; the
+full-screen sentence with Try again is only for the never-answered case.
+
+It also exports `gauge()`, the Grid header's session bar (`.gauge`: the bar, the
+percent, when it resets; a button to this screen; nothing at all when there is no good
+answer yet — a later failure keeps the last good gauge), and `refresh()`, which brings every
+gauge on screen up to date in place and answers whether the document now agrees with
+`state.usage` — `false` means only a rebuild can make it, and `app.js` renders then and
+only then.
+
+### R4 `views/workspace.js`
+The Changes tab and the shared header the Logs and Terminal tabs borrow (§6 R8). The
+header's title (`h1.jump`) is a shortcut into this workspace's Terminal — the tab the
+user lives in — no-drag so the click is not eaten by the drag region, and the workspace
+name in the Files, Diff and Pull request breadcrumbs jumps there too. The repo name and
+the back caret keep the conventional step up to Changes.
+
+The sub line tells the truth about a folder git has never seen: a workspace with no
+repos reads `not a git repo` in place of `main · clean`, and the body says the same
+at more length. The workspace that is this app (`self`) has a Publish button in
+place of Start and no `no dev script` bar. During a publish the button reads
+`Publishing…`; a verified update changes it to `Published`, with a one-line prompt
+to close and reopen Switchboard. Failures appear in the same status line and allow
+retry. Other workspaces retain their existing Start/Stop actions.
+
+### R5–R7 views
+Each exports `SB.views.<name>.render(state)` returning a DOM node and nothing else —
+they call `window.sb.*` for their own data through the helpers `app.js` provides
+(`SB.load(key, fn)` memoises an in-flight promise and re-renders on resolve).
+
+### R7 `views/pr.js`
+The Pull request screen, reached two ways — a branch pill (`sb.pr`, keyed by the local
+repo) or a row of the Pull requests screen (`sb.prByNumber`, no workspace) — and the
+same screen either way but for the breadcrumb: `sample-2 › sample-api › Pull request`
+or `Pull requests › sample-api › Pull request`. Segmented `Overview | Files | All
+diffs`, **Overview first and the default**, because the diffs are the part looked at
+least. The Overview is two halves, each a column scrolling on its own: on the left the
+description as a card — author, when it was opened, the text at the full width of the
+half, its reactions at its foot — and on the right the conversation: every `PrEvent` as
+a card, a review's verdict as a chip when it is one (Approved / Changes requested;
+"commented" says nothing), its inline comments nested under it with the file and line
+as a link that jumps into All diffs and scrolls to that comment's card. Under 900px of
+body width (a container query) the halves stack and scroll as one. Reactions are chips
+(`👍 1`) with who left them in the tooltip. The header's one action is **Squash and
+merge** (`.btn.pri`, between the state pill and Open on GitHub), shown only while the
+pull request is open: one click runs `SB.mergePr` with the head on screen, the button
+reads `Merging…` until gh answers, an ok bar says `squashed and merged #218 into main ·
+deleted TASK-352 on GitHub` (a warning instead when the branch could not be deleted, the
+merge having happened either way) and the screen asks GitHub again, so the pill reads
+Merged and the button goes. A draft
+or a conflicting pull request shows the button disabled with the reason in its tooltip.
+Exports `render`, `refresh(hard)` (app.js: a focus revalidates a
+listed PR softly, ⌘R asks GitHub again for either flavour) and `failure(error, {retry})`,
+the gh failure bars the list borrows.
+
+### R12 `views/prs.js`
+The Pull requests screen (§4.12), the rail's row under Grid. Header: `Pull requests`,
+the login at the right, the ↻ (`.ib`, spinning while gh answers), `3 open pull requests
+· updated 40s ago` ticking under it. Body: one `.prr` row per pull request — the repo
+in the name column (widened to the longest, as the workspace screen does), `#81` and
+the title, then only the state worth a glance: `Draft`, the review verdict, a dot for
+the last commit's checks, `3 comments`, `1d ago`, a chevron. Sorted by activity, newest
+first. A row opens the pull request by number with its Overview up; Esc comes back.
+A refresh keeps the rows on screen while gh answers, and a refresh that fails keeps the
+last good list up under a one-line "couldn't refresh" bar rather than blanking it; the
+full-width `brew install gh` / `gh auth login` bars are only for a list that never
+loaded. Empty: `no open pull requests`, with Open on GitHub. Exports `render` and
+`refresh(hard)`.
+
+---
+
+## 7. Screens (from the mock-up — `out/01.html` … `out/07.html`)
+
+1. **Workspace / Changes** — header: name, sub line (`TASK-352 · 6 changes · 1 repo behind main`
+   `· ● running 14s`), `Pull main`, `Start`/`Stop`. Segmented `Changes | Logs`. One row per
+   repo: name (150px), branch pill (`⎇ TASK-352 #218`), refresh icon button (only when on
+   main), summary button (`4 files +84 −3 ›`) when it has changes else plain state text
+   (`up to date` / `2 behind`), and — when running — its link(s) right-aligned.
+2. **Logs** — the same header, a dark terminal filling the body.
+3. **Files** — breadcrumb `‹ sample-2 › Files`, `6 files changed · +131 −24`, segmented
+   `Files | All diffs`, rows grouped by repo with status letter, path, `+n −n`, five-block bar.
+4. **Diff** — breadcrumb `‹ sample-2 › Files › src/services/filters.ts`, sub line
+   `sample-api · TASK-352 · +9 −2`, the diff.
+5. **All diffs** — stacked file cards, each with a header (path, `+n −n`) and its diff.
+6. **Pull request** — breadcrumb `‹ sample-2 › sample-api › Pull request` (or `‹ Pull
+   requests › sample-api › Pull request` from the list), title + `#218`, `Open` pill,
+   `Squash and merge` (while open), `Open on GitHub`, sub line `TASK-352 → main · 3 commits · 3 files · +22 −3 · 3 comments ·
+   approved · pushed 2h ago`, segmented `Overview | Files | All diffs`. Overview: two
+   halves — left, the description as a card with its reactions at its foot; right, the
+   conversation — comments, reviews with their verdict, each review's inline comments
+   nested under it with `path:line` linking into All diffs. All diffs: the diffs with review comments inline under the
+   lines they sit on.
+
+8. **Terminal** — the same header, segmented `Changes | Logs | Terminal`, and a dark
+   terminal filling the body: a login shell in the workspace directory. When the shell
+   has exited, the `.exit` footer from screen 2 with a single `New shell` button. A bell
+   from a background workspace's shell (Claude finishing a turn) turns that workspace's
+   sidebar dot blue until its Terminal is looked at — the same one dot the row already
+   has, never a second one.
+
+9. **Usage** — header `Usage` with the plan at the right and `updated 40s ago` under it;
+   one row per limit: `Session`, `This week`, `Fable this week` — name, bar, percent,
+   `resets 5:00 PM`. Reached from the row pinned to the bottom of the rail, or from the
+   session gauge in the Grid's header. When there is no answer: the sentence and Try again.
+
+10. **Pull requests** — the rail's row under Grid. Header `Pull requests`, the login at
+    the right, ↻, `3 open pull requests · updated 40s ago`; one row per open pull request
+    of yours in any repository: repo, `#81 title`, `Draft` / `Approved` / `Changes
+    requested` when so, a checks dot, `3 comments`, `1d ago`, chevron. A row opens the
+    pull request's Overview; Esc comes back.
+
+Clicking the branch pill opens the PR screen on its Overview. Clicking a summary button
+opens Files. Clicking a file row opens Diff. The workspace name — the header title, the
+breadcrumb crumb, and the name strip on a Grid square — opens that workspace's Terminal.
+The back caret and Esc go back.
+
+---
+
+## 8. Definition of done
+
+- `npm start` opens the window on the last-used workspace with real data from the real repos.
+- Start actually runs the workspace's dev script; Logs shows its coloured output live;
+  Stop leaves no surviving child (verified with `pgrep`).
+- Links appear as each port starts listening and open in the default browser.
+- Pull main fast-forwards every repo sitting on main and reports per-repo results.
+- Files/Diff/All diffs render the real working tree, including untracked files.
+- The PR screen shows the real PR for the repo's branch with its review comments, and a
+  clear one-line message when there is no PR or `gh` is unavailable. Its Overview shows
+  the description, the conversation and the reactions — a 👍 from the Codex connector
+  on the description reads as such, with the login in the chip's tooltip.
+- The Pull requests screen lists every open PR of the signed-in user, in every
+  repository, and a row opens that PR's Overview whether or not the repo is cloned here.
+- Every screen matches the mock-up's spacing, type and colour.

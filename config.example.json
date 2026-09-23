@@ -1,0 +1,17 @@
+{
+  "root": "~/Projects",
+  "exclude": ["archive", "node_modules"],
+  "terminal": { "appearance": "light" },
+  "sidebar": { "visible": true },
+  "grid": { "views": [] },
+  "projects": {},
+  "workspaces": {
+    "demo-web": {
+      "dir": "demo-web",
+      "devCommand": "npm run dev",
+      "links": [
+        { "repo": "demo-web", "url": "http://localhost:3000" }
+      ]
+    }
+  }
+}

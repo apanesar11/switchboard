@@ -1,0 +1,854 @@
+/* ============================================================================
+   Switchboard — production stylesheet
+   Ported from the approved mock-up "2 · Sidebar". The fake desktop chrome
+   (.desk / .win / .tb / .lights / .caption) is gone: the real app IS the window.
+   Light-only by design. Pair with BrowserWindow({ titleBarStyle:'hiddenInset',
+   trafficLightPosition:{x:18,y:18}, backgroundColor:'#ffffff',
+   minWidth:940, minHeight:560 }).
+   ========================================================================== */
+
+/* ── tokens ──────────────────────────────────────────────────────────────── */
+:root{
+  color-scheme: light;
+
+  /* type */
+  --ui:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;
+  --mono:"SF Mono",Menlo,Consolas,monospace;
+  --fs-h1:22px; --fs-h2:20px; --fs-item:13.5px; --fs-base:13px;
+  --fs-sm:12.5px; --fs-xs:12px; --fs-pill:11.5px; --fs-micro:11px; --fs-av:9.5px;
+  --lh:1.45; --lh-code:1.6; --lh-term:1.65;
+
+  /* ink */
+  --ink:#1d1d1f;      /* primary text, primary button fill */
+  --ink-2:#3a3a3c;    /* file-row text, icon button glyph */
+  --ink-3:#5a5a5f;    /* inactive segment, resolved pill */
+  --sec:#86868b;      /* muted / secondary line */
+  --faint:#6f6f78;    /* diff hunk header text */
+  --chev:#b0b0b5;     /* disclosure chevrons */
+
+  /* surfaces */
+  --surface:#fff;
+  --sidebar:#f5f5f7;
+  --sel:#dcdce1;          /* selected sidebar row */
+  --sel-hover:#d5d5da;
+  --fill:rgba(0,0,0,.06); /* pill + segmented track */
+  --fill-2:#ececef;
+  --head-bg:#f7f7f9;      /* diff-file header */
+  --hunk-bg:#f5f5f7;      /* @@ hunk row */
+  --tint:rgba(0,0,0,.025);/* row hover */
+  --tint-2:rgba(0,0,0,.05);
+  --tint-3:rgba(0,0,0,.08);
+
+  /* strokes */
+  --hair:rgba(0,0,0,.06); /* row rules */
+  --line:rgba(0,0,0,.08); /* sidebar edge, card border */
+  --edge:rgba(0,0,0,.13); /* button border */
+  --edge-2:rgba(0,0,0,.1);/* comment card border */
+
+  /* diff + counts */
+  --add:#1a7f37; --del:#cf222e;
+  --add-bg:#e6f6e9; --add-fg:#1e6b2e;
+  --del-bg:#fbe9e9; --del-fg:#a02c2c;
+
+  /* change bar */
+  --blk:#e3e3e7; --blk-g:#2da44e; --blk-r:#e5534b;
+
+  /* status */
+  --run:#30b350; --chg:#f0a020; --fail:#e5534b;
+  --ok-bg:#dff2e2;   --ok-fg:#2f7f3f;    /* A badge, success tint */
+  --warn-bg:#fbefd3; --warn-fg:#b7791f;  /* M badge, warning tint */
+  --err-bg:#fbe9e9;  --err-fg:#a02c2c;   /* error tint */
+  --info-bg:#f0f0f2; --info-fg:#5a5a5f;  /* neutral tint */
+  --open-bg:#dafbe1; --open-fg:#1a7f37;  /* PR "Open" pill */
+  --link:#0969da;
+  --avatar:#5b6ee1;
+
+  /* terminal — term-theme.js owns these and REWRITES them on :root whenever the
+     appearance changes. What is declared here is the dark set, which is only ever
+     what a window sees before main has answered sb:term:appearance. */
+  --term-bg:#1c1c1e; --term-fg:#d4d4d8;
+  --t-green:#8ad07e; --t-blue:#7cb7ff; --t-yellow:#f0c674;
+  --t-dim:#76767c;   --t-magenta:#c99cff; --t-red:#ff8a80;
+
+  /* geometry */
+  --r-xs:1.5px; --r-sm:3px; --r-code:4px; --r-pill:5px; --r-seg:6px;
+  --r-md:7px; --r-btn:8px; --r-cmt:9px; --r-card:10px; --r-cap:11px;
+  --gutter:34px;      /* main horizontal padding */
+  --rail:220px;       /* sidebar width */
+  --repo-name:150px;  /* repo name column on the workspace screen */
+  --titlebar:38px;    /* reserved height for the real traffic lights */
+  --rail-ms:.22s;     /* the rail slide; app.js holds the terminals for this long */
+  --ease:cubic-bezier(.4,0,.2,1);
+
+  --sh-seg:0 1px 3px rgba(0,0,0,.12);
+  --sh-cmt:0 1px 2px rgba(0,0,0,.04);
+
+  --spin:.9s linear infinite;
+}
+
+/* ── reset / shell ───────────────────────────────────────────────────────── */
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;width:100%}
+body{
+  display:flex;overflow:hidden;background:var(--surface);color:var(--ink);
+  font:var(--fs-base)/var(--lh) var(--ui);
+  -webkit-font-smoothing:antialiased;
+  -webkit-user-select:none;user-select:none;cursor:default;
+}
+/* .win is the ARCHITECTURE body skeleton's wrapper. It is NOT the mock-up's fake
+   window: no size, no radius, no shadow -- just the row that holds aside + main. */
+#root,#app,.win{display:flex;flex:1;min-width:0;min-height:0}
+button{font:inherit;color:inherit;background:none;border:0}
+a{color:inherit;text-decoration:none}
+.mono{font-family:var(--mono)}
+.sec{color:var(--sec)}
+.bad{color:var(--err-fg)}      /* "git failed", "exited 1" */
+.warned{color:var(--warn-fg)}  /* "detached head", "conflicts" */
+.sp{flex:1}
+/* SB.dom.icon()/spinner() wrap a raw SVG string in this span. inline-flex so the
+   wrapper is exactly the glyph's box and never adds line-box height to a flex row. */
+.ic{display:inline-flex;align-items:center;flex:none}
+.hide{display:none!important}
+::selection{background:#b9d5f7}
+/* only code, log and comment text is selectable */
+.diff,.term,.cmt .cb,.fr .p,.dfile .fh .p{-webkit-user-select:text;user-select:text}
+
+/* focus — the mock-up had none; this is the added, restrained ring */
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.it:focus-visible,.sumb:focus-visible,.ib:focus-visible{border-radius:var(--r-md)}
+.btn:focus-visible{border-radius:var(--r-btn)}
+.pill:focus-visible{border-radius:var(--r-pill)}
+
+/* ── window drag regions (replaces .tb / .lights / .ttl) ─────────────────── */
+.titlebar{height:var(--titlebar);flex:none;-webkit-app-region:drag}
+.hd{-webkit-app-region:drag}
+.hd button,.hd .btn,.hd .seg,.hd .pill,.hd .ib,.hd .open,.hd .back,.hd a,
+.hd .crumb span[data-nav]{-webkit-app-region:no-drag}
+
+/* ── sidebar ─────────────────────────────────────────────────────────────── */
+aside{
+  width:var(--rail);flex:none;display:flex;flex-direction:column;
+  background:var(--sidebar);border-right:1px solid var(--line);
+  padding:18px 12px;
+}
+aside .ws{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden}
+aside > *:first-child:not(.titlebar){margin-top:var(--titlebar)}
+aside .grp{
+  padding:14px 10px 6px;font-size:var(--fs-micro);font-weight:600;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--sec);
+}
+aside .it{
+  display:flex;align-items:center;gap:8px;width:100%;
+  height:32px;padding:0 10px;border-radius:var(--r-md);
+  font-size:var(--fs-item);text-align:left;
+}
+aside .it span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+aside .it:hover{background:var(--tint-2)}
+aside .it:active{background:var(--tint-3)}
+aside .it.on,aside .it.on:hover{background:var(--sel)}
+aside .it.on:active{background:var(--sel-hover)}
+aside .it .sp{flex:1}
+
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+.dot.run{background:var(--run)}
+.dot.chg{background:var(--chg)}
+.dot.fail{background:var(--fail)}
+/* a background shell rang — see app.js dotFor(): it outranks the other three */
+.dot.bell{background:var(--link)}
+
+/* ── hiding the rail (View > Hide Sidebar, and the button) ───────────────── */
+/* The rail leaves on a negative margin rather than a width, so nothing inside it
+   reflows: it keeps its 220px and slides out whole, the way Notes does it, instead
+   of the labels squashing against the edge on the way. Everything here is timed to
+   --rail-ms because app.js freezes the terminals for exactly that long: a width
+   transition fires their ResizeObserver every frame, and every frame would resize
+   the pty underneath whatever is running in it. */
+.win{position:relative}
+aside{transition:margin-left var(--rail-ms) var(--ease)}
+.win.norail aside{
+  margin-left:calc(var(--rail) * -1);
+  /* Discrete, and deliberately only at the END of the slide: this is what takes the
+     hidden rows out of the tab order, and doing it up front blanks the rail
+     mid-animation, leaving an empty grey panel sliding away. */
+  visibility:hidden;
+  transition:margin-left var(--rail-ms) var(--ease),visibility 0s linear var(--rail-ms);
+}
+
+/* With the rail gone the traffic lights sit over the main column, so it grows the
+   same strip the sidebar reserves for them: 18px of padding plus a 38px titlebar is
+   the 56px the rail's own first row starts at. The header's 26px is inside that. */
+main{transition:padding-top var(--rail-ms) var(--ease)}
+.win.norail main{padding-top:30px}
+
+.rail{
+  position:absolute;top:10px;left:calc(var(--rail) - 40px);z-index:5;
+  display:flex;align-items:center;justify-content:center;
+  width:28px;height:28px;border-radius:var(--r-md);color:var(--sec);
+  -webkit-app-region:no-drag;
+  transition:left var(--rail-ms) var(--ease),background .12s linear,color .12s linear;
+}
+/* Clear of the lights, which end at x=70: 18px in, three 12px buttons 8px apart. */
+.win.norail .rail{left:82px}
+.rail:hover{background:var(--tint-2);color:var(--ink)}
+.rail:active{background:var(--tint-3)}
+/* A background shell rang while the rail was closed. Its dots are the only place
+   that shows, so the button carries one rather than the signal going missing. */
+.win.norail .rail.rang::after{
+  content:"";position:absolute;top:2px;right:2px;width:7px;height:7px;
+  border-radius:50%;background:var(--link);box-shadow:0 0 0 2px var(--surface);
+}
+
+.drag{display:none;position:absolute;top:0;left:0;right:0;height:var(--titlebar);
+  z-index:4;-webkit-app-region:drag}
+.win.norail .drag{display:block}
+
+@media (prefers-reduced-motion:reduce){
+  aside,main,.rail,.win.norail aside{transition:none}
+}
+/* The first paint must not animate. A window that comes up with the rail already
+   closed would otherwise slide it shut in front of the user, and a terminal would
+   be frozen through a transition nobody asked for. app.js drops this class one task
+   after it has applied the stored state. */
+.win.noanim aside,.win.noanim main,.win.noanim .rail{transition:none}
+
+/* ── main column ─────────────────────────────────────────────────────────── */
+main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+
+/* header — always fixed, never scrolls */
+.hd{padding:26px var(--gutter) 0;flex:none}
+.hd.tight{padding-bottom:18px}
+.hd .top{display:flex;align-items:center;gap:10px}
+.hd h1{font-size:var(--fs-h1);font-weight:700;flex:1;letter-spacing:-.01em;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hd h1.pr{font-size:var(--fs-h2)}
+.hd h1 .sec{font-weight:400;margin-left:8px}
+/* the workspace title, a shortcut into its Terminal (views/workspace.js) */
+.hd h1.jump{cursor:pointer;-webkit-app-region:no-drag;width:-webkit-fit-content;width:fit-content;max-width:100%}
+.hd h1.jump:hover{text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1.5px}
+/* The PR's #number must survive the title's ellipsis — screen 07 is "title #218",
+   and the ellipsis on .hd h1 eats an inline child whole, so a long title takes the
+   number with it and nothing on screen says which pull request this is. Only the
+   title shrinks. min-height holds the loading header at the height a text line
+   gives it: as a flex box that h1 holds only the 11px skeleton bar and would
+   otherwise collapse, jolting the sub line when the data lands. */
+.hd h1.pr{display:flex;align-items:baseline;min-width:0;
+  min-height:calc(var(--fs-h2) * var(--lh))}
+.hd h1.pr .t{flex:0 1 auto;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hd h1.pr .sec{flex:none}
+.hd .sub{margin-top:4px;font-size:var(--fs-base)}
+.hd .sub .dot{margin:0 5px 1px 0}
+/* nowrap keeps the dot with its phrase: they are two inline boxes, so a wrapping
+   sub line can leave "●" alone at the end of one line and "running 1m" on the next. */
+.hd .sub .live{color:var(--ink);white-space:nowrap}
+.hd .seg{margin-top:20px}
+
+/* breadcrumb */
+.crumb{display:flex;align-items:center;gap:8px;font-size:var(--fs-base);color:var(--sec)}
+.crumb .cur{color:var(--ink);font-weight:600}
+.crumb .back{display:inline-flex;align-items:center;color:var(--sec);border-radius:var(--r-sm)}
+.crumb .back:hover{color:var(--ink)}
+.crumb [data-nav]:hover{color:var(--ink);text-decoration:underline}
+.crumb .cur.mono{display:flex;min-width:0}
+
+/* body — the only vertically scrolling region */
+.bd{
+  padding:22px var(--gutter) 26px;flex:1;min-height:0;
+  display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;
+}
+.bd.flush{padding-top:0}
+.bd.pane{overflow:hidden;padding-bottom:26px}   /* logs: .term scrolls instead */
+
+/* ── buttons ─────────────────────────────────────────────────────────────── */
+.btn{
+  display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 12px;
+  border-radius:var(--r-btn);font-weight:500;font-size:var(--fs-base);
+  border:1px solid var(--edge);background:var(--surface);color:var(--ink);
+  white-space:nowrap;
+}
+.btn:hover{background:var(--sidebar)}
+.btn:active{background:var(--fill-2)}
+.btn.pri{background:var(--ink);color:#fff;border-color:var(--ink)}
+.btn.pri:hover{background:#333336;border-color:#333336}
+.btn.pri:active{background:#000;border-color:#000}
+.btn.sm{height:26px;padding:0 10px;font-size:var(--fs-xs)}
+.btn[disabled],.btn.off{opacity:.4;pointer-events:none}
+.btn .spin{animation:spin var(--spin)}
+
+/* icon button (per-repo refresh) */
+.ib{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:var(--r-md);
+  border:1px solid var(--edge);background:var(--surface);color:var(--ink-2);flex:none;
+}
+.ib:hover{background:var(--sidebar);color:var(--ink)}
+.ib:active{background:var(--fill-2)}
+.ib[disabled],.ib.off{opacity:.4;pointer-events:none}
+.ib.busy svg{animation:spin var(--spin)}
+.ic.spin{animation:spin var(--spin)}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── segmented control ───────────────────────────────────────────────────── */
+.seg{display:inline-flex;background:var(--fill);border-radius:var(--r-btn);padding:2px}
+.seg span,.seg button{
+  padding:4px 14px;border-radius:var(--r-seg);
+  font-size:var(--fs-sm);font-weight:500;color:var(--ink-3);
+}
+.seg span:hover:not(.on),.seg button:hover:not(.on){color:var(--ink)}
+.seg span.on,.seg button.on{background:var(--surface);color:var(--ink);box-shadow:var(--sh-seg)}
+
+/* ── pills ───────────────────────────────────────────────────────────────── */
+.pill{
+  display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 7px;
+  border-radius:var(--r-pill);background:var(--fill);
+  font:var(--fs-pill) var(--mono);color:var(--ink-2);white-space:nowrap;flex:none;
+}
+.pill .prn{color:var(--sec);margin-left:2px}
+.pill.link:hover{background:rgba(0,0,0,.1)}
+.pill.link:active{background:rgba(0,0,0,.14)}
+.pill.warn{background:var(--warn-bg);color:var(--warn-fg)}
+.pill.warn svg{opacity:.8}
+
+/* PR state pill */
+.open{
+  display:inline-flex;align-items:center;height:22px;padding:0 9px;
+  border-radius:var(--r-cap);background:var(--open-bg);color:var(--open-fg);
+  font-size:var(--fs-xs);font-weight:600;flex:none;
+}
+.open.draft{background:var(--info-bg);color:var(--info-fg)}
+.open.merged{background:#efe1ff;color:#6639ba}
+.open.closed{background:var(--err-bg);color:var(--err-fg)}
+
+/* ── workspace screen: repo rows ─────────────────────────────────────────── */
+.repo{
+  display:flex;align-items:center;gap:12px;height:34px;flex:none;
+  border-top:1px solid transparent;padding:0 8px;margin:0 -8px;position:relative;
+}
+.repo:first-child{border-top:0}
+.repo:first-child::before{display:none}
+.repo .rn{width:var(--repo-name);font-weight:600;flex:none;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.repo .sp{flex:1}
+.repo.busy .rn,.repo.busy .pill{opacity:.55}
+
+/* The branch name and the served host are the only unbounded strings in a row.
+   Let them ellipsise instead of pushing the row's summary button and links past
+   the window edge, which .bd{overflow-x:hidden} then clips with no scrollbar to
+   reach them. Scoped to .repo: the PR screen's pills sit in a header of their own.
+   A bare text node is an anonymous flex item and cannot take text-overflow, which
+   is why dom.pill() and linkButton() wrap their label in .lbl.
+   The pill gives way FIRST (shrink 1000 against the links' 1): the branch is
+   repeated in the header sub line and in the pill's own title, while an address
+   shrunk to "loca…" is the one thing on this row the running state exists to show.
+   min-width:0 is what allows the shrink at all — a flex item's automatic minimum
+   is its content, and the label's one unbreakable "word" is the whole branch name.
+   overflow:hidden is its safety net: without it a chip squeezed past its own fixed
+   parts spills them, and the #number paints over the button beside it. A pill that
+   carries a #number keeps room for the glyph, an ellipsis and the number. */
+.repo .pill,.repo .lk{flex:0 1 auto;min-width:0;overflow:hidden}
+.repo .pill{flex-shrink:1000}
+.repo .pill:has(.prn){min-width:80px}
+.repo .pill .lbl,.repo .lk .lbl{
+  flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.repo .pill .prn{flex:none}
+
+/* summary button — "4 files +84 −3 ›" */
+.sumb{
+  display:inline-flex;align-items:center;gap:7px;height:26px;
+  padding:0 7px 0 10px;border-radius:var(--r-md);
+  border:1px solid var(--edge);background:var(--surface);
+  font-size:var(--fs-xs);font-weight:500;color:var(--ink);white-space:nowrap;flex:none;
+}
+.sumb .cv{color:var(--chev);display:inline-flex;margin-left:-2px}
+.sumb:hover{background:var(--sidebar)}
+.sumb:hover .cv{color:var(--sec)}
+.sumb:active{background:var(--fill-2)}
+
+.add{color:var(--add);font-weight:600}
+.del{color:var(--del);font-weight:600}
+
+/* served addresses */
+.lk{
+  display:inline-flex;align-items:center;gap:5px;
+  font:var(--fs-sm) var(--mono);color:var(--link);white-space:nowrap;
+}
+.lk svg{opacity:.65}
+.lk+.lk{margin-left:18px}
+.lk:hover{text-decoration:underline}
+.lk:hover svg{opacity:1}
+.lk:active{opacity:.7}
+
+/* ── files screen ────────────────────────────────────────────────────────── */
+.fsec{display:flex;align-items:center;gap:12px;height:36px;margin-top:14px;flex:none}
+.fsec:first-child{margin-top:0}
+.fsec .rn{font-weight:600}
+
+/* The 8px bleed is what lets a hover tint run past the text without moving the
+   150px name column or the right-aligned blocks. The row RULE must still line up
+   with the 34px gutter, so it is drawn as a band inset by that same 8px instead of
+   as a border on the bled box — measured against the mock-up, a plain border here
+   renders 16px wider than the approved design. The transparent border stays so the
+   content box keeps the 1px offset the mock-up gives it. */
+.repo::before,.fr::before{
+  content:"";position:absolute;left:8px;right:8px;height:1px;
+  background:var(--hair);pointer-events:none;
+}
+.repo::before{top:-1px}
+.fr::before{bottom:-1px}
+
+.fr{
+  display:flex;align-items:center;gap:10px;height:34px;flex:none;
+  border-bottom:1px solid transparent;
+  font-size:var(--fs-sm);color:var(--ink);
+  padding:0 8px;margin:0 -8px;position:relative;
+}
+.fr:hover{background:var(--tint)}
+.fr:active{background:var(--tint-2)}
+.fr .p{flex:1;min-width:0;display:flex}
+.fr .n{width:84px;text-align:right;font-size:var(--fs-xs);flex:none}
+.fr .cv{color:var(--chev);display:inline-flex;margin-left:8px;flex:none}
+.fr:hover .cv{color:var(--sec)}
+
+/* status letter badge */
+.st{
+  display:inline-block;width:16px;flex:none;
+  font:var(--fs-micro) var(--mono);font-weight:700;text-align:center;
+  border-radius:var(--r-sm);line-height:16px;
+}
+.st.M{color:var(--warn-fg);background:var(--warn-bg)}   /* modified */
+.st.A{color:var(--ok-fg);background:var(--ok-bg)}       /* added */
+.st.D{color:var(--del-fg);background:var(--del-bg)}     /* deleted */
+.st.R{color:#5a4bb5;background:#e8e5fa}                 /* renamed */
+.st.Q{color:var(--ink-3);background:var(--fill-2)}      /* untracked (?) */
+
+/* five-block change bar */
+.blocks{display:inline-flex;gap:2px;flex:none}
+.blocks i{width:8px;height:8px;display:block;border-radius:var(--r-xs);background:var(--blk)}
+.blocks i.g{background:var(--blk-g)}
+.blocks i.r{background:var(--blk-r)}
+
+/* long paths: the directory half shrinks, the filename never does.
+   Markup: <span class="p mono"><span class="dir">a/b/c/</span><span class="base">file.ts</span></span> */
+.dir{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.base{flex:none;white-space:nowrap}
+.dfile .fh .rp{color:var(--sec);flex:none;white-space:nowrap}
+
+/* ── diff ────────────────────────────────────────────────────────────────── */
+.diff{font:var(--fs-sm)/var(--lh-code) var(--mono);overflow-x:auto}
+.diff div{padding:0 18px;white-space:pre}
+.diff .h{color:var(--faint);background:var(--hunk-bg);padding:6px 18px;margin-bottom:6px}
+.diff .h:not(:first-child){margin-top:14px}
+.diff .a{background:var(--add-bg);color:var(--add-fg)}
+.diff .r{background:var(--del-bg);color:var(--del-fg)}
+.diffwrap{border:1px solid var(--line);border-radius:var(--r-card);overflow:hidden;
+  padding:0 0 12px;flex:none}
+
+/* one diff-file card (All diffs / Pull request) */
+.dfile{
+  border:1px solid var(--line);border-radius:var(--r-card);overflow:hidden;
+  margin-bottom:16px;padding-bottom:12px;flex:none;
+}
+.dfile .fh{
+  display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;
+  background:var(--head-bg);border-bottom:1px solid var(--hair);
+  font-size:var(--fs-sm);margin-bottom:6px;
+}
+.dfile .fh:hover{background:#f2f2f5}
+.dfile .fh .p{flex:1;min-width:0;display:flex}
+.dfile .fh .rp{color:var(--sec)}
+.dfile .fh .cc{color:var(--sec);margin-right:4px}
+.dfile .fh .cv{color:var(--sec);display:inline-flex;transform:rotate(90deg);flex:none;
+  transition:transform .12s ease}
+.dfile.folded .fh .cv{transform:rotate(0deg)}
+.dfile.folded .fh{border-bottom:0;margin-bottom:0}
+.dfile.folded{padding-bottom:0}
+.dfile.folded .diff{display:none}
+.dfile .diff .h:first-child{margin-top:0}
+
+/* diff notes: too large, binary, no preview */
+.diff .note{
+  white-space:normal;font:var(--fs-sm)/var(--lh) var(--ui);color:var(--sec);
+  padding:14px 18px;display:flex;align-items:center;gap:12px;
+}
+.diff .note .btn{-webkit-app-region:no-drag}
+
+/* ── inline PR review comment ────────────────────────────────────────────── */
+.diff .cmt{
+  white-space:normal;font:var(--fs-base)/var(--lh) var(--ui);
+  margin:8px 18px 10px;padding:10px 12px 9px;
+  border:1px solid var(--edge-2);border-radius:var(--r-cmt);
+  background:var(--surface);box-shadow:var(--sh-cmt);
+}
+.diff .cmt div{white-space:normal;padding:0}
+.cmt .ch{display:flex;align-items:center;gap:8px;font-size:var(--fs-sm)}
+.cmt .ch .sp{flex:1}
+.cmt .av{
+  width:20px;height:20px;border-radius:50%;background:var(--avatar);color:#fff;
+  font-size:var(--fs-av);font-weight:700;flex:none;
+  display:inline-flex;align-items:center;justify-content:center;
+}
+.cmt .cb{margin-top:6px;max-width:780px}
+.cmt .cb code{font:var(--fs-xs) var(--mono);background:var(--fill);
+  padding:1px 4px;border-radius:var(--r-code)}
+.cmt .cf{margin-top:8px;display:flex;gap:14px;font-size:var(--fs-xs);color:var(--sec)}
+.cmt .cf span:hover,.cmt .cf button:hover{color:var(--ink);text-decoration:underline}
+.cmt .cf .res{color:var(--ink);font-weight:500}
+.cmt .rsv{
+  display:inline-flex;align-items:center;height:20px;padding:0 8px;
+  border-radius:var(--r-card);background:var(--info-bg);color:var(--info-fg);
+  font-size:var(--fs-pill);font-weight:500;
+}
+
+/* ── terminal / logs ─────────────────────────────────────────────────────── */
+.term{
+  background:var(--term-bg);color:var(--term-fg);
+  font:var(--fs-sm)/var(--lh-term) var(--mono);
+  white-space:pre;margin:4px 0 0;border-radius:var(--r-card);
+  /* xterm scrolls inside itself; letting .term scroll too puts a second,
+     light-coloured scrollbar along the bottom and right of the dark panel. */
+  flex:1;min-height:0;overflow:hidden;
+  /* The inset lives on .xterm below, NOT here, and that is load-bearing rather
+     than a matter of taste. FitAddon sizes the pty from
+     getComputedStyle(term.element.parentElement).height — this box — and then
+     subtracts the padding of term.element, the .xterm child. With box-sizing:
+     border-box that height INCLUDES padding declared here, so padding on .term was
+     counted in and never taken out: the pty was told 27 rows x 116 columns for a
+     pane that can show 25 x 110. The overflow is hidden, not wrapped, so the
+     bottom row — the line you type into — was sliced in half and the last six
+     columns were simply off the edge. Measured, not theorised: .term 577.133px
+     tall, .xterm 541.133px, 27 rows of 21px = 567px of screen in a 541px viewport.
+     Moving the padding onto .xterm makes FitAddon's two readings agree, and the
+     pane looks identical because the total inset is unchanged. */
+  padding:0;
+}
+/* the Logs process picker — only a multi-process workspace (demo) shows one */
+.bd.pane .seg.procs{flex:none;align-self:flex-start;margin:0 0 2px}
+.term .xterm{height:100%;padding:18px 22px;box-sizing:border-box}
+.term .xterm-viewport{background:transparent!important;scrollbar-width:thin;
+  scrollbar-color:rgba(255,255,255,.22) transparent}
+.term .xterm-viewport::-webkit-scrollbar{width:10px}
+.term .xterm-viewport::-webkit-scrollbar-track{background:transparent}
+.term .xterm-viewport::-webkit-scrollbar-thumb{
+  background:rgba(255,255,255,.2);border-radius:5px;
+  border:3px solid transparent;background-clip:content-box}
+
+/* Light terminal (View > Terminal appearance). The sixteen ANSI colours and the
+   term/accent tokens above are swapped from term-theme.js, which is the single
+   source for both; only what is NOT a token swap belongs here.
+   (Deliberately not naming those tokens with a star here: the glob spelling ends
+   in a slash, which closes this comment and silently eats the first rule below.)
+
+   The edge is a box-shadow and not a border ON PURPOSE. FitAddon sizes the pty from
+   getComputedStyle(.term).height, so a real 1px border would take a row off the same
+   way the old padding took two — see the note on .term. A shadow paints without
+   touching the box. The scrollbar is here because it was written in raw white for the
+   dark slab, and on a near-white pane an invisible scrollbar reads as a missing one. */
+:root[data-term-theme="light"] .term{box-shadow:inset 0 0 0 1px var(--line)}
+:root[data-term-theme="light"] .term .xterm-viewport{
+  scrollbar-color:rgba(0,0,0,.22) transparent}
+:root[data-term-theme="light"] .term .xterm-viewport::-webkit-scrollbar-thumb{
+  background:rgba(0,0,0,.2)}
+
+.term .g{color:var(--t-green)}
+.term .b{color:var(--t-blue)}
+.term .y{color:var(--t-yellow)}
+.term .d{color:var(--t-dim)}
+.term .m{color:var(--t-magenta)}
+.term .e{color:var(--t-red)}
+.term.blank{
+  display:flex;align-items:center;justify-content:center;
+  white-space:normal;color:var(--t-dim);font:var(--fs-base)/var(--lh) var(--ui);
+  padding:18px 22px;   /* no .xterm child to carry it */
+}
+.term.blank .stack{display:flex;flex-direction:column;align-items:center;gap:12px;
+  max-width:52ch;text-align:center}
+
+/* exit footer under the log */
+.exit{
+  display:flex;align-items:center;gap:10px;flex:none;
+  height:38px;margin-top:10px;padding:0 12px;border-radius:var(--r-cmt);
+  background:var(--err-bg);color:var(--err-fg);font-size:var(--fs-sm);
+}
+.exit.ok{background:var(--info-bg);color:var(--info-fg)}
+.exit .sp{flex:1}
+
+/* ── the grid (views/grid.js) ─────────────────────────────────────────────── */
+/* the rail's row above the groups */
+aside .it.top{margin-bottom:4px}
+aside .it .ic{color:var(--ink-3)}
+aside .it.on .ic{color:var(--ink)}
+
+/* 2x2, each square a quarter of the body, and the body itself never scrolls. */
+.bd.gridbd{overflow-y:auto;overflow-x:hidden;padding-bottom:26px;container-type:inline-size}
+.grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:12px;
+  flex:1;min-height:0}
+.grid > *{min-height:0;min-width:0}
+/* Narrow: one square per row and the page scrolls. The rows are a FIXED height, not
+   auto: an auto row takes its height from the terminal, the terminal takes its rows
+   from the height, and the pair settle wherever xterm's default 24 rows happened to
+   put them — measured at 556px, which is an accident, not a size. */
+@container (max-width:860px){
+  .grid{grid-template-columns:1fr;grid-template-rows:none;
+    grid-auto-rows:clamp(320px,55vh,560px);flex:none}
+}
+.cell{display:flex;flex-direction:column;
+  border:1px solid var(--line);border-radius:var(--r-card);overflow:hidden;background:var(--surface)}
+/* .free, not .empty: that is the app's empty-state class and it would centre and grey
+   everything in the square, the picker's rows included. */
+.cell.free,.cell.gone{align-items:center;justify-content:center;border-style:dashed;background:transparent}
+.cell.gone .stack{display:flex;flex-direction:column;align-items:center;gap:12px;
+  color:var(--sec);text-align:center;padding:0 22px}
+.cellhd{display:flex;align-items:center;gap:8px;flex:none;height:30px;padding:0 6px 0 12px;
+  background:var(--head-bg);border-bottom:1px solid var(--hair);font-size:var(--fs-xs)}
+.cellhd .name{font-weight:600;color:var(--ink-2);border-radius:var(--r-sm);padding:0 2px;
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cellhd .name:hover{color:var(--ink);text-decoration:underline}
+/* A folder square's name (§4.10) is a label, not a way anywhere: no screen sits behind it. */
+.cellhd .name.folder{cursor:default}
+.cellhd .name.folder:hover{color:var(--ink-2);text-decoration:none}
+.cellhd .x{display:inline-flex;align-items:center;justify-content:center;flex:none;
+  width:22px;height:22px;border-radius:var(--r-md);color:var(--sec);font-size:15px;line-height:1}
+.cellhd .x:hover{background:var(--tint-2);color:var(--ink)}
+/* While the terminals are being edited (the only time a × exists) it reads as the
+   button it is, and the square's head says the square is up for it. */
+.cell.arr .cellhd{background:var(--tint-2)}
+.cell.arr .cellhd .x{border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+.cell.arr .cellhd .x:hover{background:var(--err-bg);border-color:var(--err-fg);color:var(--err-fg)}
+.cell.free .sec{font-size:var(--fs-sm);color:var(--sec)}
+/* The square carries the edge and the radius, so the pane inside drops its own —
+   and takes a smaller inset, since four of them share the room. The inset is still
+   on .xterm, never on .term (see the terminal block for why). */
+.cell .term{margin:0;border-radius:0;box-shadow:none!important}
+.cell .term .xterm{padding:10px 12px}
+.cell .exit{margin:0;border-radius:0;height:32px}
+/* choosing a workspace, inside the empty square */
+.pick{display:flex;flex-direction:column;align-self:stretch;flex:1;min-height:0;
+  overflow-y:auto;padding:14px 16px;gap:2px}
+.pick .pt{padding:0 10px 6px;font-size:var(--fs-sm);font-weight:600;color:var(--ink)}
+.pick .grp{padding:10px 10px 4px;font-size:var(--fs-micro);font-weight:600;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--sec)}
+.pick .it{display:flex;align-items:center;gap:8px;width:100%;height:30px;padding:0 10px;
+  border-radius:var(--r-md);font-size:var(--fs-base);text-align:left;flex:none}
+.pick .it:hover{background:var(--tint-2)}
+.pick .it:active{background:var(--tint-3)}
+.pick p{padding:6px 10px;font-size:var(--fs-sm)}
+.pick .btn{align-self:flex-start;margin:10px 10px 0}
+/* the view's name being typed, standing where its segment goes */
+.seg input.vname{height:26px;width:150px;padding:0 10px;border:0;outline:none;
+  border-radius:var(--r-seg);background:var(--surface);box-shadow:var(--sh-seg);
+  font:500 var(--fs-sm)/1 var(--ui);color:var(--ink);-webkit-user-select:text;user-select:text}
+.seg input.vname::placeholder{color:var(--sec);font-weight:400}
+.seg .add{padding:4px 11px;font-size:15px;line-height:1;color:var(--sec)}
+.seg .add:hover{color:var(--ink)}
+/* The header is one row: the segment, and a ⋯ beside it for the view showing. No
+   h1 — the selected segment is the title — and no count line under it. */
+.hd.gridhd{display:flex;align-items:center;gap:6px}
+.hd.gridhd .seg{margin-top:0}
+.more{position:relative;display:flex;flex:none;margin-left:auto}
+/* Editing the terminals: a note and Done where the ⋯ was. The note gives way first. */
+.more.arr{flex:0 1 auto;min-width:0;align-items:center;gap:10px}
+.more.arr .note{font-size:var(--fs-xs);color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.ib.dots{width:28px;height:28px;border-color:transparent;background:transparent;color:var(--sec)}
+.ib.dots:hover,.ib.dots.on{background:var(--tint-2);color:var(--ink)}
+/* The menu hangs from the ⋯ at the right edge. It is a descendant of the header's drag region and
+   comes after it in the DOM, so no-drag holds (see index.html on region order). */
+.menu{position:absolute;top:calc(100% + 4px);right:0;z-index:20;min-width:168px;padding:4px;
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);
+  box-shadow:0 8px 24px rgba(0,0,0,.12),0 1px 3px rgba(0,0,0,.08);-webkit-app-region:no-drag}
+.menu .mi{display:flex;align-items:center;width:100%;height:28px;padding:0 10px;
+  border-radius:var(--r-md);font-size:var(--fs-sm);color:var(--ink);text-align:left;white-space:nowrap}
+.menu .mi:hover,.menu .mi:focus-visible{outline:none;background:var(--tint-2)}
+.menu .mi.bad{color:var(--err-fg)}
+.menu .mi.bad:hover,.menu .mi.bad:focus-visible{background:var(--err-bg)}
+
+/* ── Claude usage (views/usage.js) ───────────────────────────────────────── */
+/* A limit as a bar: the track is the change bar's grey, the fill the link blue
+   until the window is nearly spent — amber from 75, red from 90, the colours the
+   rail's dots already mean. */
+.track{display:block;position:relative;height:5px;border-radius:3px;background:var(--blk);
+  overflow:hidden;flex:none}
+.track .fill{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:var(--link);
+  transition:width .3s var(--ease)}
+.warning .track .fill{background:var(--chg)}
+.critical .track .fill{background:var(--fail)}
+.critical .pct{color:var(--err-fg)}
+/* the Grid header's one line about Claude — bar, percent, when it resets — and a
+   button to the screen. Between the views and the ⋯, which stays on the gutter. */
+.gauge{display:inline-flex;align-items:center;gap:8px;height:28px;padding:0 8px;
+  border-radius:var(--r-md);font-size:var(--fs-sm);color:var(--ink);white-space:nowrap;flex:none}
+.gauge .track{width:96px}
+.gauge .pct{font-weight:600}
+.gauge:hover{background:var(--tint-2)}
+.gauge:active{background:var(--tint-3)}
+.hd.gridhd .gauge{margin-left:auto}
+.hd.gridhd .gauge + .more{margin-left:0}
+/* the screen: one row per limit — name, bar, percent, when it resets */
+.hd .top .plan{flex:none;font-size:var(--fs-base)}
+.ulist{display:flex;flex-direction:column;flex:none}
+.ulim{display:flex;align-items:center;gap:16px;height:44px;flex:none;
+  padding:0 8px;margin:0 -8px;position:relative}
+.ulim+.ulim::before{content:"";position:absolute;left:8px;right:8px;top:0;height:1px;
+  background:var(--hair);pointer-events:none}
+.ulim .rn{width:var(--repo-name);font-weight:600;flex:none;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ulim .track{flex:1 1 auto;max-width:460px}
+.ulim .pct{width:44px;text-align:right;font-weight:600;flex:none}
+.ulim .when{width:170px;flex:none;font-size:var(--fs-sm)}
+/* the rail's last row, pinned under the groups */
+aside .foot{flex:none;margin-top:8px;padding-top:8px;border-top:1px solid var(--hair)}
+
+/* ── inline notice bar (errors, conflicts, hints) ────────────────────────── */
+.bar{
+  display:flex;align-items:center;gap:10px;flex:none;
+  min-height:38px;padding:8px 12px;margin-bottom:14px;
+  border-radius:var(--r-cmt);font-size:var(--fs-sm);
+  background:var(--info-bg);color:var(--info-fg);
+}
+.bar .sp{flex:1}
+.bar b{font-weight:600}
+.bar code{font:var(--fs-xs) var(--mono);background:rgba(0,0,0,.06);
+  padding:1px 5px;border-radius:var(--r-code)}
+.bar.warn{background:var(--warn-bg);color:var(--warn-fg)}
+.bar.err{background:var(--err-bg);color:var(--err-fg)}
+.bar.ok{background:var(--ok-bg);color:var(--ok-fg)}
+.bar .btn{height:26px;padding:0 10px;font-size:var(--fs-xs);
+  background:rgba(255,255,255,.7);border-color:rgba(0,0,0,.1)}
+.bar .btn:hover{background:#fff}
+
+/* ── empty / first-run / loading ─────────────────────────────────────────── */
+.empty{
+  flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:6px;text-align:center;color:var(--sec);padding-bottom:40px;
+}
+.empty h2{font-size:var(--fs-h2);font-weight:600;color:var(--ink);letter-spacing:-.01em}
+.empty p{max-width:380px;font-size:var(--fs-base)}
+.empty .btn{margin-top:12px}
+aside .empty{padding:0 10px;gap:4px}
+aside .empty p{font-size:var(--fs-xs)}
+
+/* skeletons for the initial scan */
+.sk{background:var(--fill);border-radius:var(--r-code);height:11px;display:inline-block}
+.sk.w1{width:96px}
+.sk.w2{width:58px}
+.sk.w3{width:132px}
+.repo .sk,.fr .sk,aside .it .sk{animation:pulse 1.1s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+/* ── scrollbars ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-thumb{background:rgba(0,0,0,.18);border-radius:5px;
+  border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.3);background-clip:content-box}
+::-webkit-scrollbar-track{background:transparent}
+.term::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);background-clip:content-box}
+
+/* ── motion ──────────────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+}
+/* links inside a review comment body */
+.cmt .cb a{color:var(--link);text-decoration:none}
+.cmt .cb a:hover{text-decoration:underline}
+.cmt .cb strong{font-weight:600}
+
+/* ── pull requests list (views/prs.js) ───────────────────────────────────── */
+/* One row per pull request, the shape of a file row: the repo in the name column,
+   the number and title, then only the state worth a glance. */
+.prr{
+  display:flex;align-items:center;gap:10px;height:36px;flex:none;
+  padding:0 8px;margin:0 -8px;position:relative;border-bottom:1px solid transparent;
+  font-size:var(--fs-base);color:var(--ink);
+}
+.prr::before{content:"";position:absolute;left:8px;right:8px;bottom:-1px;height:1px;
+  background:var(--hair);pointer-events:none}
+.prr:hover{background:var(--tint)}
+.prr:active{background:var(--tint-2)}
+.prr:focus-visible{border-radius:var(--r-md)}
+.prr .rn{width:var(--repo-name);font-weight:600;flex:none;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prr .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prr .n{flex:none;font-size:var(--fs-xs);white-space:nowrap}
+.prr .open{height:20px;font-size:var(--fs-pill)}
+.prr .cv{color:var(--chev);display:inline-flex;flex:none;margin-left:2px}
+.prr:hover .cv{color:var(--sec)}
+.prr .sk{animation:pulse 1.1s ease-in-out infinite}
+
+/* ── the Overview tab (views/pr.js) ──────────────────────────────────────── */
+/* Two halves: the description on the left, the conversation on the right, each a
+   column that scrolls on its own, so a long description never pushes what was said
+   below the fold and neither half is a narrow strip in a field of white on a wide
+   window. .bd.ov is the container; under 900px of it the halves stack and scroll as
+   one. A container query cannot style its own container, hence .cols. */
+.bd.ov{overflow:hidden;padding-bottom:0;container-type:inline-size}
+.bd.ov .cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 24px;flex:1;min-height:0}
+.bd.ov .col{min-height:0;overflow-y:auto;overflow-x:hidden;padding-bottom:26px}
+@container (max-width:900px){
+  .bd.ov .cols{display:block;overflow-y:auto;padding-bottom:26px}
+  .bd.ov .col{overflow:visible;padding-bottom:0}
+  .bd.ov .col + .col{margin-top:20px}
+}
+/* The description and the conversation as cards — the same card a review comment
+   gets inside a diff, standing on its own — each the full width of its half. */
+.bd.ov .cmt{
+  margin:0 0 12px;padding:11px 14px 10px;flex:none;
+  border:1px solid var(--edge-2);border-radius:var(--r-cmt);
+  background:var(--surface);box-shadow:var(--sh-cmt);
+  font:var(--fs-base)/var(--lh) var(--ui);
+}
+.bd.ov .cmt.desc{margin-bottom:0}
+.bd.ov .cmt .cb{max-width:none}
+/* the description's reactions, at its foot rather than in the header's far corner */
+.bd.ov .cmt.desc .cf.rxs{margin-top:12px}
+.bd.ov .cmt.desc .cf.rxs .rx{margin-left:0}
+.bd.ov .ovh{font-size:var(--fs-micro);font-weight:600;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--sec);margin:0 0 10px;flex:none}
+/* a review's inline comments, nested under its body */
+.bd.ov .ics{margin-top:10px;display:flex;flex-direction:column;gap:8px}
+.bd.ov .ics .cmt{margin:0;box-shadow:none;background:var(--head-bg)}
+.cmt .cb.none{font-style:italic}
+.cmt .at{margin-top:5px}
+.cmt .loc{font:var(--fs-xs) var(--mono);color:var(--link);padding:0;border-radius:var(--r-sm)}
+.cmt .loc:hover{text-decoration:underline}
+/* reactions — 👍 1, with who left it in the tooltip */
+.rx{display:inline-flex;gap:4px;flex:none;margin-left:6px}
+.rxc{
+  display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 7px;
+  border-radius:var(--r-card);border:1px solid var(--edge-2);background:var(--surface);
+  font-size:var(--fs-pill);font-weight:500;color:var(--ink-2);white-space:nowrap;
+}
+.rxc .em{font-size:12px;line-height:1}
+
+/* ── markdown (SB.markdown) — comment bodies and the PR description ───────── */
+.md p,.md ul,.md ol,.md pre,.md blockquote,.md table,.md details{margin:0 0 8px}
+.md > :last-child{margin-bottom:0}
+.md h1,.md h2,.md h3,.md h4,.md h5,.md h6{font-weight:600;line-height:1.3;margin:14px 0 6px}
+.md > h1:first-child,.md > h2:first-child,.md > h3:first-child,.md > h4:first-child{margin-top:0}
+.md h1{font-size:16px}
+.md h2{font-size:15px}
+.md h3{font-size:14px}
+.md h4,.md h5,.md h6{font-size:var(--fs-base)}
+.md ul,.md ol{padding-left:22px}
+.md li{margin:2px 0}
+.md li > ul,.md li > ol{margin:2px 0 0}
+.md li.task{list-style:none;margin-left:-18px}
+.md li.task input{margin:0 6px 0 0;vertical-align:-1px}
+.md code{font:var(--fs-xs) var(--mono);background:var(--fill);padding:1px 4px;border-radius:var(--r-code)}
+.md pre{padding:10px 12px;background:var(--hunk-bg);border-radius:var(--r-md);overflow-x:auto;
+  font:var(--fs-xs)/var(--lh-code) var(--mono);white-space:pre}
+.md pre code{background:none;padding:0;font:inherit}
+.md blockquote{padding:0 0 0 12px;border-left:3px solid var(--edge);color:var(--sec)}
+.md hr{border:0;border-top:1px solid var(--line);margin:12px 0}
+.md table{border-collapse:collapse;font-size:var(--fs-sm);display:block;max-width:100%;overflow-x:auto}
+.md th,.md td{border:1px solid var(--line);padding:5px 9px;text-align:left;vertical-align:top}
+.md th{background:var(--head-bg);font-weight:600}
+.md a{color:var(--link);text-decoration:none}
+.md a:hover{text-decoration:underline}
+.md strong{font-weight:600}
+.md em{font-style:italic}
+.md del{text-decoration:line-through}
+.md summary{cursor:pointer;color:var(--sec);-webkit-user-select:none;user-select:none}
+.md summary:hover{color:var(--ink)}
+.md details[open] > summary{margin-bottom:6px}
+.md .imgalt{color:var(--sec)}

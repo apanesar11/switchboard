@@ -1,0 +1,33 @@
+# Dependencies and generated desktop apps
+node_modules/
+dist/
+*.app/
+
+# Local configuration, credentials, and terminal/app state
+.env
+.env.*
+!.env.example
+!.env.sample
+.npmrc
+.netrc
+.switchboard/
+.claude/
+.codex/
+.credentials.json
+config.json
+config.local.json
+*.local.json
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*.log
+
+# OS/editor files and local smoke-test captures
+.DS_Store
+.idea/
+.vscode/
+/dv.png
+coverage/

@@ -1,0 +1,28 @@
+{
+  "name": "switchboard",
+  "productName": "Switchboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local control panel for development workspaces",
+  "main": "src/main/index.js",
+  "scripts": {
+    "start": "electron .",
+    "install:desktop": "node scripts/install-desktop.js",
+    "postinstall": "node scripts/fix-node-pty.js",
+    "check": "node scripts/check.js",
+    "test:publish": "node --test scripts/test-publish.js",
+    "package": "node scripts/package.js",
+    "test:config": "node --test scripts/test-config.js"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-unicode11": "0.9.0",
+    "@xterm/addon-web-links": "0.12.0",
+    "@xterm/xterm": "6.0.0",
+    "node-pty": "1.1.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "44.4.2"
+  }
+}

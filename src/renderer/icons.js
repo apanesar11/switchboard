@@ -1,0 +1,80 @@
+// SB.icons — the inline SVG strings, lifted verbatim from the approved mock-up's
+// generator (gen.mjs `I`). Every glyph is viewBox="0 0 16 16"; the per-use width/
+// height, stroke-width and linecap are part of the design and must not be changed.
+// These strings are the ONLY markup this app ever feeds to innerHTML.
+window.SB = window.SB || {};
+
+(function (SB) {
+  'use strict';
+
+  // The branch/merge glyph inside .pill. 13x13, stroke-width 1.5, no linejoin.
+  var branch = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="4" cy="3.5" r="1.6"/><circle cx="4" cy="12.5" r="1.6"/><circle cx="12" cy="8" r="1.6"/><path d="M4 5.1v5.8M4 5.5c0 2.6 6.4 1.2 6.4 2.5"/></svg>';
+
+  // Start button. 11x11, solid fill.
+  var play = '<svg viewBox="0 0 16 16" width="11" height="11"><path d="M4.5 2.6v10.8l8.6-5.4z" fill="currentColor"/></svg>';
+
+  // Stop button. 10x10, solid fill.
+  var stop = '<svg viewBox="0 0 16 16" width="10" height="10"><rect x="3" y="3" width="10" height="10" rx="1.5" fill="currentColor"/></svg>';
+
+  // Pull main AND the per-repo .ib refresh. 12x12, stroke-width 1.6.
+  var sync = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 8.9A5.3 5.3 0 1 1 11.75 4.25"/><path d="M11.75 1.4v2.85H8.9"/></svg>';
+
+  // Disclosure chevron: .sumb .cv, .fr .cv, and .dfile .fh .cv (that one is rotated
+  // 90deg by CSS when the card is open, which is why there is no separate down glyph
+  // in screens 01-07). 11x11, stroke-width 1.8.
+  var chev = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5l4.5 4.5L6 12.5"/></svg>';
+
+  // Chevron pointing down — unused by the mock-up, kept for a real glyph swap.
+  var chevD = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6l4.5 4.5L12.5 6"/></svg>';
+
+  // Breadcrumb back caret. 12x12, stroke-width 1.8.
+  var caret = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5L5.5 8 10 12.5"/></svg>';
+
+  // .lk port links (at opacity .65 via CSS) and the "Open on GitHub" button (full
+  // opacity). Same 11x11 glyph in both places, stroke-width 1.6.
+  var ext = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3H3v10h10v-3M9 3h4v4M13 3L7.5 8.5"/></svg>';
+
+  // The rail toggle beside the traffic lights — macOS's own glyph: a rounded panel
+  // with the rail marked off down its left third. 15x15 so it carries next to the
+  // 12px lights, and stroke-width 1.3 rather than the 1.6 the other outlines use:
+  // at 1.6 a 12px-wide rectangle reads as a filled button instead of a hint.
+  var sidebar = '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><rect x="1.9" y="3.4" width="12.2" height="9.2" rx="2.2"/><path d="M6.3 3.4v9.2"/></svg>';
+
+  // The Grid row at the top of the rail: four squares, the shape of the screen.
+  // 14x14 at 1.4, the same weight as the branch glyph on the rows beneath it.
+  var grid = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="5" height="5" rx="1.2"/><rect x="9" y="2" width="5" height="5" rx="1.2"/><rect x="2" y="9" width="5" height="5" rx="1.2"/><rect x="9" y="9" width="5" height="5" rx="1.2"/></svg>';
+
+  // ⋯ — the Grid's view menu. Three dots on a row, the way macOS draws "more".
+  var more = '<svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor"><circle cx="3.4" cy="8" r="1.45"/><circle cx="8" cy="8" r="1.45"/><circle cx="12.6" cy="8" r="1.45"/></svg>';
+
+  // The rail's Usage row: a dial — the arc of a meter and its needle. 14x14 at 1.4,
+  // the weight of the grid glyph on the row above the groups.
+  var gauge = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M3 11.8a5.5 5.5 0 1 1 10 0"/><path d="M8 9.5l3-3.2"/></svg>';
+
+  // The rail's Pull requests row: GitHub's own pull-request shape — a branch line
+  // with the merge arrow curling into it. 14x14 at 1.4, the weight of the grid glyph.
+  var pr = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="3.5" r="1.6"/><circle cx="4" cy="12.5" r="1.6"/><circle cx="12" cy="12.5" r="1.6"/><path d="M4 5.1v5.8"/><path d="M12 10.9V7.2a2 2 0 0 0-2-2H8.6"/><path d="M10.2 3.4L8.4 5.2l1.8 1.8"/></svg>';
+
+  // Page glyph — defined by the mock-up, unused by screens 01-07.
+  var file = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 1.75h5.5L13 5.25v9H4z"/><path d="M9.5 1.75v3.5H13"/></svg>';
+
+  SB.icons = {
+    publish: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10V2m-3 3 3-3 3 3M3 10v3h10v-3"/></svg>',
+    branch: branch,
+    merge: branch,   // the mock-up's generator calls it "merge"; same glyph
+    play: play,
+    stop: stop,
+    sync: sync,
+    chev: chev,
+    chevD: chevD,
+    caret: caret,
+    back: caret,     // the breadcrumb caret, under the mock-up's own name
+    ext: ext,
+    file: file,
+    sidebar: sidebar,
+    grid: grid,
+    more: more,
+    gauge: gauge,
+    pr: pr
+  };
+})(window.SB);

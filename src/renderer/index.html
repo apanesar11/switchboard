@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Switchboard</title>
+<!-- xterm's own stylesheet first so styles.css always wins. -->
+<link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<!-- noanim is here rather than added by app.js: a window that opens with the rail
+     already closed would otherwise slide it shut in front of the user. app.js drops the
+     class one task after the stored state has been applied. -->
+<div class="win noanim">
+  <aside id="side">
+    <!-- 38px drag strip. The mock-up's painted lights were 12px tall with a 26px
+         margin, so 38px puts the first group label on exactly the same baseline
+         while the real macOS traffic lights sit in the gap via
+         trafficLightPosition:{x:18,y:18}. -->
+    <div class="titlebar"></div>
+    <nav class="ws"></nav>
+    <!-- Pinned under the groups: the Usage row. app.js fills it and owns its dot. -->
+    <div class="foot" hidden></div>
+  </aside>
+  <main id="main"></main>
+
+  <!-- Draggable only while the rail is closed, when the traffic lights sit over the
+       main column and .hd's own drag region has moved 56px down. Over an OPEN rail
+       this strip would cover the top third of the Start button and swallow its clicks,
+       so styles.css keeps it display:none there.
+
+       ORDER IS LOAD-BEARING: this strip must come BEFORE the button below. Electron
+       builds the window's draggable region by walking the document in order — union
+       for drag, subtract for no-drag — so a no-drag element that precedes a drag one
+       has its hole punched first and then covered over. That is exactly what happened:
+       with the rail closed the button sat inside this strip's region and a real click
+       on it moved the window instead. (A programmatic click() never noticed — it
+       bypasses the native hit test entirely.) -->
+  <div class="drag" aria-hidden="true"></div>
+
+  <!-- The rail toggle. It is a child of .win rather than of the aside because it has
+       to outlive the rail: with the sidebar closed the same button slides over to sit
+       beside the traffic lights, which is where macOS keeps it. app.js fills in the
+       glyph, owns the click, and owns the .norail class on .win. Last on purpose: its
+       no-drag hole has to be subtracted after every drag region has been added. -->
+  <button id="rail" class="rail" type="button" aria-controls="side" aria-expanded="true"></button>
+</div>
+
+<!-- xterm's UMD bundles. The wrapper falls through to its global branch in a
+     contextIsolated, sandboxed renderer (no module/exports), defining
+     window.Terminal, window.FitAddon and window.WebLinksAddon. The addons are
+     NAMESPACED: `new FitAddon.FitAddon()`, not `new FitAddon()`. -->
+<script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+<script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+<script src="../../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
+<script src="../../node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js"></script>
+
+<!-- Classic scripts, fixed order, no modules and no bundler. Everything hangs off
+     window.SB; app.js is last because it boots. -->
+<script src="icons.js"></script>
+<script src="dom.js"></script>
+<!-- Before the two views that build Terminals: both read the palette at construction. -->
+<script src="term-theme.js"></script>
+<!-- Before diffview.js and the PR screens: every comment body is rendered by it. -->
+<script src="markdown.js"></script>
+<script src="diffview.js"></script>
+<script src="views/workspace.js"></script>
+<script src="views/logs.js"></script>
+<script src="views/terminal.js"></script>
+<!-- Before grid.js: the Grid's header carries the five-hour gauge this file draws. -->
+<script src="views/usage.js"></script>
+<!-- After terminal.js: a Grid cell is that workspace's Terminal, mounted here. -->
+<script src="views/grid.js"></script>
+<script src="views/files.js"></script>
+<script src="views/diff.js"></script>
+<script src="views/pr.js"></script>
+<!-- After pr.js: the list borrows its gh failure bars. -->
+<script src="views/prs.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

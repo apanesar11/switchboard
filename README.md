@@ -1,0 +1,192 @@
+# Switchboard
+
+<img width="1728" height="1080" alt="Screenshot 2026-09-22 at 12 36 14 PM" src="https://github.com/user-attachments/assets/9feaaa41-7904-4f93-b1ae-38a2ac76818f" />
+
+A local control panel for your development workspaces.
+
+One window for terminals, dev servers, repository changes, and pull requests.
+Group your own projects in the sidebar and arrange up to four terminals per grid
+view. Switchboard ships with no workspaces or personal configuration.
+
+## Run it
+
+```bash
+cd switchboard
+npm install
+npm start
+```
+
+Switchboard currently targets macOS. Install Node.js/npm and Git on each Mac;
+GitHub features also need `gh` signed in with `gh auth login`. Install and sign in
+to whichever coding CLI you use on that machine, then run `codex` or `claude` in a
+Switchboard terminal. Claude is optional, and there is no Codex usage meter yet.
+Install tmux if you want terminal sessions to survive quitting Switchboard.
+
+## Set up your workspaces
+
+The shipped `src/main/default-config.json` is `{}`. On first launch, Switchboard
+creates an empty `~/.switchboard/config.json`; it does not scan any folder until
+you configure one. Your real settings belong in that local file, outside Git.
+
+Open this checkout in Codex and ask:
+
+> Use $switchboard-setup to configure Switchboard for my projects.
+
+The repository includes the [workspace setup skill](.agents/skills/switchboard-setup/SKILL.md).
+It helps select folders and dev commands, preserves existing settings, and writes
+only your local config. It does not require Claude.
+
+For manual setup, use [config.example.json](config.example.json) as a starting
+point and replace its fictional folder, command, and port with your own. Set
+`root` to a folder such as `~/Projects` to discover multi-repo workspaces, or add
+absolute `workspaces.<id>.dir` paths to select individual folders. Relative
+`dir` values need a `root`. Refresh or reopen Switchboard after saving.
+
+## Install the desktop app
+
+To build and install the macOS desktop app, run this after installing dependencies:
+
+```bash
+npm run install:desktop
+```
+
+Then double-click **Switchboard** on the Desktop. This is a standalone
+`~/Desktop/Switchboard.app` bundle with its own runtime and four-pane grid icon.
+Drag it to the app section of the Dock, or right-click its running Dock icon and
+choose **Options → Keep in Dock**. It needs no Terminal, npm, or source checkout to
+launch. The installer replaces the earlier shortcut and removes its old helper
+from `~/Applications`.
+
+The installed app is a snapshot of the source. After code changes, select
+**switchboard** in the sidebar and click **Publish**. Wait for **Published**, then
+close Switchboard and reopen it using the same desktop or Dock icon. The new app
+is built while you work and installed when you close or quit; failed builds leave
+the installed app untouched. Keep the source checkout and its development
+dependencies available for publishing. The build's output appears in the workspace's
+**Logs** tab as it runs, and is saved in `publish.log` under Switchboard's Application
+Support folder.
+
+`npm run install:desktop` remains available for installing from Terminal while the
+desktop app is quit. `npm start` runs the source directly during development. Both
+use your existing configuration and terminal sessions. To build without installing,
+use `npm run package`; the result
+is under `dist/Switchboard-darwin-<architecture>/Switchboard.app`. The grid icon's
+editable source is `assets/switchboard.svg`; packaging generates its PNG and ICNS
+versions. To uninstall, delete the desktop app and remove it from the Dock.
+
+## What it does
+
+- **Start / Stop** — runs the workspace's own `npm run dev` and kills the whole tree on
+  stop, so nothing is left holding a port. Only one copy of a project runs at a time.
+- **Logs** — the live output of that dev script, colours and all.
+- **Terminal** — a real login shell in the workspace folder, for running `codex`, `claude` or
+  anything else. It reads your `.zshrc`, so the prompt, aliases and `PATH` are the ones
+  iTerm2 gives you. Shift+Enter and Option+Enter both send the newline Claude Code
+  expects, `/copy` reaches the system clipboard, and ⌘K clears. It is not the dev server:
+  Stop never touches it, and it keeps running while you look at other workspaces. When a
+  shell rings the bell — Claude finishing a turn — that workspace's dot in the sidebar
+  turns blue until you look at it. Quitting Switchboard does not end them: each shell
+  runs inside tmux on the app's own private server, so the next launch brings every
+  terminal back where it was, Claude mid-turn and all; `exit` ends one for good. That
+  needs tmux (`brew install tmux`). Without it, quitting hangs the shells up the way
+  closing a terminal window does, and `claude --continue` picks the conversation back up.
+- **Terminal appearance** — light by default, so a Claude Code set to its light theme is
+  actually readable and the terminal belongs to the rest of the app. **View ▸ Terminal
+  appearance** switches between Light, Dark and Match system; the choice is remembered in
+  `~/.switchboard/config.json` and applies to Logs too. Panes repaint where they stand —
+  nothing restarts and no scrollback is lost.
+- **Jump to a terminal** — the workspace name is a link to its Terminal: the big title
+  on the workspace page, the workspace name in any breadcrumb, and the name on a Grid
+  square. It is the tab you spend the most time in, so it is one click from wherever
+  you are.
+- **Grid** — the row above the workspaces (⌘0): four terminals side by side, in views you
+  make. Press **+**, name it, then put a workspace in each square; "Sample" for
+  sample-1 to sample-4, "Everything else" for the rest, and switch between them the way
+  you switch tabs. The ⋯ at the right renames or deletes a view, and its **Edit
+  terminals** is the only place a square's × shows — so a slip of the hand cannot empty
+  one — with Done to finish; the bar beside the ⋯ is this session's Claude usage. A
+  square *is* that workspace's Terminal — the same shell, the same scrollback, whether
+  you look at it here or on its own tab — and taking it out of a square leaves the shell
+  running. A square can also hold **any folder** rather than a workspace: the picker's
+  first row, **Choose a folder…**, opens the Mac's folder chooser, and the square becomes
+  a shell in that folder — the apps folder itself, a repo outside it, anything — on no
+  rail and with no screen of its own. Views are remembered in the config; the window
+  comes back to the Grid if that is where you left it.
+- **Usage** — how much of your Claude plan is used, read through Claude Code's own
+  sign-in. The sidebar row and Grid gauge only appear after a local Claude OAuth
+  sign-in is found; a machine with only Codex shows neither. Removing the Claude
+  sign-in clears the cached numbers and hides the display on the next check.
+  The five-hour session is the bar at the top of the Grid; the **Usage** row at
+  the bottom of the sidebar has all of it — the session, the week and the per-model
+  week, each with when it resets — and its dot turns red when the session is nearly
+  spent. It refreshes every few minutes on its own, when the window comes back to the
+  front, and on demand with the ↻ on the Usage screen (or ⌘R there); if Anthropic is
+  briefly rate-limiting, the last numbers stay up with a quiet "couldn't refresh" note
+  rather than the screen going blank. Switchboard reads Claude Code's credential
+  from macOS Keychain (falling back to `~/.claude/.credentials.json`) and makes a
+  direct HTTPS request to Anthropic's usage endpoint. This does not run the Claude
+  CLI. Switchboard never saves the token or sends it to the renderer, and makes no
+  Anthropic request when that credential is absent.
+- **Sidebar** — the rail of workspaces closes, for when you want the whole window for a
+  terminal or a diff. The button beside the traffic lights, or **View ▸ Hide Sidebar**
+  (⌃⌘S); it is remembered, ⌘1–9 still switch workspace without it, and if a shell rings
+  while it is closed the button carries the blue dot. Nothing reloads — the terminal keeps
+  its scrollback, its focus and its shell.
+- **Single-repo apps** — a workspace is usually a folder of repos, but an app that is one
+  repository with nothing nested — Switchboard is one — is a workspace too. List it in
+  `~/.switchboard/config.json` under `workspaces` as `"name": { "dir": "folder" }` and it
+  joins the rail, the folder itself being its one repo. Projects with a single workspace
+  share the **Other** group; a project gets a group of its own as soon as it has two.
+- **Links** — once a server is listening, its address shows on the repo's row. Click it
+  and it opens in your default browser. Configured ngrok tunnels can appear beside a repo.
+- **Changes** — per repo, a GitHub-style summary (`4 files +84 −3`). Tap it for the file
+  list, tap a file for its diff, or read them all on one page.
+- **Pull main** — fast-forwards every repo that is sitting on `main`, one repo or all of
+  them.
+- **Pull request** — tap a branch and the pull request opens on its **Overview**: the
+  description on the left, and on the right everything said on it — comments, each
+  review with its verdict and the inline comments it came with, and the reactions on all
+  of them (a 👍 from `chatgpt-codex-connector` under the description is Codex saying it
+  found nothing; hover the chip to see who reacted). A comment's `path:line` jumps into **All diffs**, where
+  the review comments sit under the lines they were left on; **Files** is the list.
+  **Squash and merge** in the header does what GitHub's own button does — the commits
+  become one on `main` — and then the Delete branch click you would have made next, in
+  one click and on GitHub only: your checkout and its local branch are left exactly as
+  they were. If the branch was pushed to after the screen loaded, GitHub refuses and says
+  so; ⌘R and look before merging again.
+- **Pull requests** — the row under Grid in the sidebar: every open pull request you
+  authored, in any repository, newest activity first — repo, number and title, then
+  Draft / Approved / Changes requested, a dot for the checks, how many comments, when it
+  last moved. Tap one to open it (its Overview, as above), whether or not that repo is
+  cloned under `~/Projects`; Esc comes back to the list. It refreshes when the
+  window comes back to the front, and ⌘R or the ↻ asks GitHub again now. It uses the
+  `gh` sign-in the rest of the app already uses — no token to set up.
+
+Configuration lives in `~/.switchboard/config.json` (created on first run): the root
+folder to scan, folders to ignore, the single-repo folders to show, and each workspace's
+dev command and links.
+
+`ARCHITECTURE.md` is the contract the code is written against.
+
+## Local data and publishing the source
+
+GitHub operations run through `gh`, and repository status, diffs, fetches and pulls
+run through `git`. Terminals use xterm.js and node-pty to run your login shell,
+optionally inside tmux. Dev commands also run in local shells. Claude usage uses
+the direct request described above; local port checks use sockets and system
+utilities, and ngrok discovery calls its local HTTP API.
+
+The source does not need account credentials. Each computer uses its own Git/GitHub
+and coding CLI sign-ins. Switchboard's configuration stays in
+`~/.switchboard/config.json`; window state, browser storage and publish logs live in
+Electron's Application Support folder. Terminal programs can save their own history
+and credentials outside this checkout. Pasted images are saved in a temporary
+Switchboard folder.
+
+Commit the source and `package-lock.json`. The `.gitignore` excludes dependencies,
+built apps, environment files, common credential files, logs and local app state.
+Keep personal paths, project names, and configuration backups out of tracked files.
+The default config stays empty; documentation and the example use fictional names.
+Review the staged files before publishing.
+`"private": true` in `package.json` prevents accidental npm publication; it does not
+prevent hosting the Git repository publicly.
