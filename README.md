@@ -1,6 +1,7 @@
 # Switchboard
 
-<img width="1728" height="1080" alt="Screenshot 2026-09-22 at 12 36 14 PM" src="https://github.com/user-attachments/assets/9feaaa41-7904-4f93-b1ae-38a2ac76818f" />
+<img width="1728" height="1080" alt="Screenshot 2026-09-22 at 12 36 14 PM" src="https://github.com/user-attachments/assets/78488342-25df-4459-8398-9d348960ffe5" />
+
 
 A local control panel for your development workspaces.
 
