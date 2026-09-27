@@ -502,7 +502,7 @@ repo-relative with `/` separators.
 
 | `window.sb` | channel | returns |
 |---|---|---|
-| `sb.codeTree(id)` | `sb:code:tree` | `{ ok, repos: [{ name, files: [path…], truncated, error }] }` — every file git would show: tracked plus untracked-not-ignored, minus tracked files deleted from the worktree, deduplicated — three listings run side by side (`git ls-files -z -c`, `-o --exclude-standard`, `-d`), tracked files first, so the cap of 100 000 per repo (`truncated: true`) costs untracked files before any tracked one: one `-c -o` call printed every untracked path before the first tracked one, and an un-ignored `node_modules` filled the tree with nothing else. An untracked listing that fails or times out is that same cut, not a failed repo. An untracked nested repo or linked worktree is one `-o` entry, `vendor/lib/`; it loses the slash and is a row like any file, whose read says it is a folder. One entry per repo in the order `workspaces.scan` gives them, the folder itself for a single-repo workspace. A repo git cannot list gets `files: []` and an `error` sentence; it never fails the call |
+| `sb.codeTree(id)` | `sb:code:tree` | `{ ok, repos: [{ name, files: [path…], ignored: [path…], truncated, error }] }` — `files` is every file git would show: tracked plus untracked-not-ignored, minus tracked files deleted from the worktree, deduplicated; `ignored` is every file `.gitignore` keeps out of git — `.env.local`, a `config.json`, a `debug.log` — which the tree shows too, dimmed, because being kept out of git is the usual reason someone needs to open a file. Ignored *folders* stay out whole (`node_modules/`, `dist/`, `.next/`: git prints each as one entry with `--directory` rather than walking it, and every such entry is dropped, so a file inside one is in neither list), and `.DS_Store` / `Thumbs.db` are dropped from the ignored list, as VS Code hides them. Four listings run side by side (`git ls-files -z -c`, `-o --exclude-standard`, `-d`, `-o -i --exclude-standard --directory`), tracked files first and ignored ones last, so the cap of 100 000 per repo over both lists (`truncated: true`) costs ignored files before untracked ones and those before any tracked one: one `-c -o` call printed every untracked path before the first tracked one, and an un-ignored `node_modules` filled the tree with nothing else. An untracked or ignored listing that fails or times out is that same cut, not a failed repo. An untracked nested repo or linked worktree is one `-o` entry, `vendor/lib/`; it loses the slash and is a row like any file, whose read says it is a folder. One entry per repo in the order `workspaces.scan` gives them, the folder itself for a single-repo workspace. A repo git cannot list gets `files: []` and an `error` sentence; it never fails the call. Find in files (`sb.codeSearch`) still searches only `files`: `git grep --untracked --exclude-standard` does not read ignored files |
 | `sb.codeRead(id, repoName, path)` | `sb:code:read` | `{ ok, text, mtimeMs, size, bom }` for UTF-8 text up to 5 MB (a BOM is stripped from `text` and reported as `bom: true`); `{ ok, binary: true, mtimeMs, size }` when the first 8 KB hold a NUL or the bytes are not valid UTF-8; `{ ok, tooLarge: true, mtimeMs, size }` over 5 MB; `{ ok:false, missing: true, error: '<path> is not there any more' }`; `{ ok:false, error: '<path> is a folder' }` — a submodule's gitlink, an untracked nested repo and a linked worktree each list as one path |
 | `sb.codeWrite(id, repoName, path, text, {mtimeMs, bom, force})` | `sb:code:write` | Save. `{ ok, mtimeMs, size }` from a fresh stat, or `{ ok:false, conflict: true, missing, mtimeMs, error: '<name> changed on disk since it was opened' }` (`… was deleted on disk`) — see below. `text` is a string of at most 20 MB |
 | `sb.codeBase(id, repoName, path, oldPath?)` | `sb:code:base` | The `HEAD` version, for the markers: `git cat-file blob HEAD:<oldPath or path>`. `{ ok, text }` when the blob exists, holds no NUL and is at most 3 MB; `{ ok, text: null }` when `HEAD` has no such path or there is no `HEAD` yet (every line is then "added"); `{ ok, text: null, skip: true }` for a binary or oversize blob (no markers at all). `oldPath` is a rename's, from `FileChange.oldPath`. A path that goes through a symlink (`CLAUDE.md -> AGENTS.md`, or a file in a linked folder) is asked for by where it really is in the repo, since the read shows the target's text and `HEAD`'s blob for the link is only the target's name — diffed against each other, an unchanged file was all modified. A path with no link in it keeps git's spelling, which is what `HEAD` knows it by after a case-only rename not yet committed |
@@ -956,9 +956,11 @@ untracked, NUL-separated parsing), `fileDiff(dir, path, {untracked})`, `allDiffs
 `origin/main`, detached HEAD, renames, binary files, paths with spaces and unicode.
 
 For the Editor (§4.14), three readers that never write: `lsFiles(dir, {max})` → `{ ok,
-files, truncated, error }` (tracked first, then untracked-not-ignored, less what the
-worktree has deleted — three `ls-files` calls side by side — cut at `LS_FILES_MAX`,
-100 000), `headBlob(dir, relPath)` → `{ ok, text, skip }` (`git cat-file blob HEAD:…`,
+files, ignored, truncated, error }` (`files`: tracked first, then untracked-not-ignored,
+less what the worktree has deleted; `ignored`: the files `.gitignore` excludes, by name,
+with ignored folders left out whole and `.DS_Store` / `Thumbs.db` dropped — four
+`ls-files` calls side by side — the two lists together cut at `LS_FILES_MAX`, 100 000,
+ignored files first), `headBlob(dir, relPath)` → `{ ok, text, skip }` (`git cat-file blob HEAD:…`,
 `HEAD_BLOB_MAX_BYTES`, 3 MB, as its `maxBuffer`) and `grep(dir, query, {caseSensitive,
 regex, max})` → `{ ok, matches: [{path, line, text, offset, ranges}], truncated, error }`
 (`GREP_MAX_MATCHES`, 2 000; `GREP_MAX_PER_FILE`, 200; the 400/80-character window; and
@@ -1200,17 +1202,23 @@ It also owns the rail's bottom row, Usage, drawn by `renderFoot()` behind its ow
 signature like the nav; its dot is red only while the five-hour window is `critical`.
 
 ### R3 `markdown.js`
-`SB.markdown.render(text)` → a DocumentFragment of block elements; `inline(text)` →
-nodes for one line; `parse(text)` → the block tree, for tests. GitHub-flavoured
-markdown as the text on a pull request actually uses it: headings, paragraphs (a single
-newline is a line break, as GitHub renders a comment box), bullet / numbered / task
+`SB.markdown.render(text, { breaks })` → a DocumentFragment of block elements;
+`inline(text)` → nodes for one line; `parse(text)` → the block tree, for tests.
+GitHub-flavoured markdown as the text on a pull request and a README actually use it:
+headings (`#` and the `===` / `---` underline), paragraphs, bullet / numbered / task
 lists, fenced code, blockquotes, tables, rules, `<details>`; inline code, bold, italic,
-strike, links, bare addresses, images to their alt text. No engine and no innerHTML —
-every string reaches the document as a text node — and raw HTML is read only for the
-tags that carry meaning (`<a href>`, `<br>`, `<details>`, `<code>`, bold/italic); every
-other tag is stripped to its text, which is what Codex's `<sub>` badge wrappers and the
-Linear bot's `<p><a>` need. Every comment body in the app — in a diff, on the Overview
-— goes through it; the `.md` class is what the stylesheet sizes the blocks by.
+strike, links — inline and reference-style, `[text][name]` with `[name]: url` anywhere in
+the text — bare addresses, images to their alt text. `breaks` is what a single newline
+inside a paragraph means: `true`, the default and every comment's, is a line break, as
+GitHub renders a comment box; `false`, the Editor's preview of a file, is the soft break
+of a document, folded into a space, as GitHub renders a README — a line ending in two
+spaces or a backslash is a hard break either way. No engine and no innerHTML — every
+string reaches the document as a text node — and raw HTML is read only for the tags that
+carry meaning (`<a href>`, `<br>`, `<details>`, `<code>`, bold/italic); every other tag is
+stripped to its text, which is what Codex's `<sub>` badge wrappers and the Linear bot's
+`<p><a>` need. Every comment body in the app — in a diff, on the Overview — goes through
+it, and so does the Editor's preview (R13); the `.md` class is what the stylesheet sizes
+the blocks by, re-coloured under `.edprev` for the slab.
 
 ### R3 `diffview.js`
 `SB.diffview.render(patch, {comments: PrComment[], collapsedContext: false})` → DOM node
@@ -1482,17 +1490,41 @@ menu's ⌘V would otherwise never reach; Copy with nothing selected copies the w
 as Sublime and VS Code do, and pasting that same text puts it on a line of its own —
 and Close when a file tab is open and focus is in the Editor or nowhere at all.
 
-**The tree** is `sb.codeTree` — one top folder per repo, `git ls-files` with
-`.gitignore` honoured, where a submodule, an untracked nested repo or a linked worktree
-is a single row like a file's, and opening it says it is a folder — drawn lazily (only
-expanded folders' children, at most 2 000 in one folder with a "⌘P to find them" row
-after). One focusable element with a roving
-active row, not a button per row: a repo can hold tens of thousands of files. The git
-letters (`M` `A` `D` `R`) and the amber dot on a folder holding changes come from the
-scan the app already refreshes (`Repo.files`), not from a git call of its own. Its width
-is remembered in `localStorage`, as are each workspace's open tabs (at most 30) and the
-active one, reopened lazily the first time that workspace's Editor is shown; a file that
+**The tree** is `sb.codeTree` — one top folder per repo, `git ls-files`: the files git
+shows, plus the files `.gitignore` keeps out of it (`.env.local`, a local config)
+drawn dim with "ignored by git" in their tooltip, ignored folders left out whole
+(§4.14); a submodule, an untracked nested repo or a linked worktree is a single row
+like a file's, and opening it says it is a folder — drawn lazily (only expanded
+folders' children, at most 2 000 in one folder with a "⌘P to find them" row after).
+One focusable element with a roving active row, not a button per row: a repo can hold
+tens of thousands of files. The git letters (`M` `A` `D` `R`) and the amber dot on a
+folder holding changes come from the scan the app already refreshes (`Repo.files`),
+not from a git call of its own. Its width is remembered in `localStorage`, as are each
+workspace's open tabs (at most 30), the active one and which of them are previewing
+(below), reopened lazily the first time that workspace's Editor is shown; a file that
 no longer reads is dropped quietly.
+
+**Markdown preview.** A tab whose file name Monaco's markdown language would claim
+(`.md`, `.markdown`, `.mdown`, `.mkdn`, `.mkd`, `.mdwn`, `.mdtxt`, `.mdtext`) gets an
+eye beside the full-screen button, and the eye (or ⇧⌘V) swaps the source for
+`SB.markdown.render(text, { breaks: false })` (R3) in a scrolling pane that stands
+where Monaco does — `visibility`, not `display`, so the model stays attached
+underneath and the switch back is instant; ⌘S still saves it, ⌘W still asks. It is per
+tab, remembered with the tab, and off by default: this is an editor. The pane renders
+the buffer, unsaved edits included, 250 ms after the last keystroke while it is on
+screen and again whenever the text moves (a reload in place); an activate that finds
+the same model version repaints nothing, so a README is not re-rendered for a bell. Its
+scroll position is the tab's own. Links: `http(s)` opens the browser (markdown.js's
+own click); `#a-heading` scrolls to the heading whose GitHub-style slug matches; a
+relative path opens that file in a tab when the tree lists it (`/docs/x.md` from the
+repo's root, as GitHub reads it); any other scheme does nothing — decided in the capture
+phase, before Chromium could navigate the window to a relative URL. Images stay their
+alt text, as in a comment: the renderer has no road to a file on disk, and none is
+being opened for this. A file over 1 MB is not rendered (`too long to preview`). Opening
+a file at a line (a find result, `name:42`) turns the preview off for that tab — a line
+is a place in the source. The pane is focusable and its text selectable, so ⌘C copies a
+selection through `handleEdit`'s document fallback (R2); the status bar reads `Preview
+· Markdown` in place of the cursor position.
 
 **Saving and the disk.** ⌘S writes through `sb.codeWrite` with the mtime the file was
 opened at; a conflict asks in the Editor's own one-line bar — `x.ts changed on disk since
@@ -1637,7 +1669,11 @@ The back caret and Esc go back.
 - The Pull requests screen lists every open PR of the signed-in user, in every
   repository, and a row opens that PR's Overview whether or not the repo is cloned here.
 - The Editor's tree is `git ls-files` for every repo of the workspace: untracked files
-  in, ignored files out, one top folder per repo.
+  in, ignored files in but dimmed (`.env.local` opens), ignored folders out, one top
+  folder per repo.
+- A markdown tab's eye (⇧⌘V) shows the file rendered as GitHub would render a README —
+  soft breaks folded, setext headings, reference-style links — following unsaved edits,
+  and the eye again shows the source; a relative link in it opens that file.
 - Save in the Editor writes exactly the file that was edited, in place — mode and
   inode unchanged — and nothing else: no git, no formatting, no other file. ⌘S on a
   file nobody edited writes nothing, and one that mixes line endings asks first.

@@ -896,6 +896,8 @@ aside .empty p{font-size:var(--fs-xs)}
   --ed-err-bg:rgba(255,138,128,.13);  --ed-err-fg:#ff8a80;
   --ed-btn:rgba(255,255,255,.08); --ed-btn-edge:rgba(255,255,255,.12); --ed-btn-hover:rgba(255,255,255,.14);
   --ed-pri:#d4d4d8; --ed-pri-fg:#1c1c1e; --ed-pri-hover:#f2f2f5;
+  /* the markdown preview: code, a code block, a link, a quote's bar */
+  --ed-code:rgba(255,255,255,.09); --ed-pre:#26262a; --ed-link:#7cb7ff; --ed-quote:rgba(255,255,255,.18);
 }
 :root[data-term-theme="light"]{
   --ed-side:#efeff2;
@@ -926,6 +928,7 @@ aside .empty p{font-size:var(--fs-xs)}
   --ed-err-bg:var(--err-bg);     --ed-err-fg:var(--err-fg);
   --ed-btn:rgba(255,255,255,.7); --ed-btn-edge:rgba(0,0,0,.1); --ed-btn-hover:#fff;
   --ed-pri:#1d1d1f; --ed-pri-fg:#fff; --ed-pri-hover:#333336;
+  --ed-code:rgba(0,0,0,.06); --ed-pre:#f0f0f3; --ed-link:var(--link); --ed-quote:rgba(0,0,0,.14);
 }
 
 /* The slab. color-scheme follows the appearance so the native bits inside it — the
@@ -984,6 +987,11 @@ aside .empty p{font-size:var(--fs-xs)}
 .edrow .mk.R{color:var(--ed-R)}
 .edrow .mk.dot{width:6px;height:6px;padding:0;margin-right:2px;border-radius:50%;background:var(--ed-M)}
 .edrow.note{color:var(--t-dim);padding-left:14px}
+/* A file .gitignore keeps out of git — .env.local, a config.json — listed all the same,
+   dimmed the way VS Code dims one, so the tree says which files git has and which it
+   does not. Its open-tab row keeps a readable colour. */
+.edrow.ign{color:var(--t-dim)}
+.edrow.ign.on,.edrow.ign.on:hover{color:var(--ed-fg-2)}
 .edtry{padding:6px 14px}
 .edtree::-webkit-scrollbar-thumb,.edres::-webkit-scrollbar-thumb,.edpl::-webkit-scrollbar-thumb{
   background:var(--ed-thumb);background-clip:content-box}
@@ -1031,11 +1039,17 @@ aside .empty p{font-size:var(--fs-xs)}
 .edtab:hover .edx .dd{display:none}
 .edtab .edx:hover{background:var(--ed-press);color:var(--ed-hi)}
 
-/* The full-screen button: the quiet .ib.dots look, in the slab's colours. */
-.ed .ib.edfull{width:26px;height:26px;border-color:transparent;background:transparent;color:var(--t-dim)}
-.ed .ib.edfull:hover{background:var(--ed-press);color:var(--ed-fg)}
-.ed .ib.edfull:active{background:var(--ed-on)}
+/* The full-screen button and the markdown Preview eye beside it: the quiet .ib.dots
+   look, in the slab's colours. The eye is only there for a markdown tab (`hidden`,
+   which .ib's display would otherwise override), and pressed while the preview is on. */
+.ed .ib.edfull,.ed .ib.edeye{width:26px;height:26px;border-color:transparent;background:transparent;color:var(--t-dim)}
+.ed .ib.edfull:hover,.ed .ib.edeye:hover{background:var(--ed-press);color:var(--ed-fg)}
+.ed .ib.edfull:active,.ed .ib.edeye:active{background:var(--ed-on)}
+.ed .ib.edeye.on,.ed .ib.edeye.on:hover{background:var(--ed-press);color:var(--ed-hi)}
+.ed .ib.edeye[hidden]{display:none}
 .edtabs .edfull{align-self:center;margin:0 5px 0 6px}
+.edtabs .edeye{align-self:center;margin:0 0 0 6px}
+.win.edfull .edtabs .edeye{margin-right:5px}
 
 /* The Editor's own one-line bar, inside the slab (never the app's .bar). */
 .edbar{display:flex;align-items:center;gap:8px;flex:none;min-height:36px;padding:5px 8px 5px 14px;
@@ -1065,6 +1079,44 @@ aside .empty p{font-size:var(--fs-xs)}
   padding:18px 22px;text-align:center;color:var(--t-dim);font:var(--fs-base)/var(--lh) var(--ui)}
 .edhost.blank .edph{display:flex}
 .edph .stack{display:flex;flex-direction:column;align-items:center;gap:12px;max-width:52ch}
+
+/* The markdown preview (views/editor.js paintPreview): SB.markdown's blocks under the
+   `.md` rules, re-coloured for the slab — those rules are sized and tinted for a comment
+   card on the app's paper, and a paper-grey code block on the dark slab is a white box —
+   and set a size up, the way a README reads on GitHub. It stands over Monaco, which stays
+   attached underneath (visibility, not display, so its layout is ready for the switch
+   back), and its text can be selected, unlike the rest of the slab's chrome. */
+.edprev{position:absolute;inset:0;display:none;overflow:auto;outline:none;
+  -webkit-user-select:text;user-select:text;
+  scrollbar-width:thin;scrollbar-color:var(--ed-thumb) transparent}
+.edprev::-webkit-scrollbar-thumb{background:var(--ed-thumb);background-clip:content-box}
+.edhost.preview .edprev{display:block}
+.edhost.preview .edmonaco{visibility:hidden}
+.edhost.preview .edph{display:none}
+.edprevin{max-width:880px;margin:0 auto;padding:30px 44px 72px;color:var(--ed-fg);font:14px/1.6 var(--ui)}
+.edprevin.note{color:var(--t-dim);text-align:center;padding-top:40px}
+.edprev .md p,.edprev .md ul,.edprev .md ol,.edprev .md pre,.edprev .md blockquote,.edprev .md table,.edprev .md details{margin:0 0 14px}
+.edprev .md h1,.edprev .md h2,.edprev .md h3,.edprev .md h4,.edprev .md h5,.edprev .md h6{margin:24px 0 12px;line-height:1.25;color:var(--ed-hi)}
+.edprev .md > h1:first-child,.edprev .md > h2:first-child,.edprev .md > h3:first-child,.edprev .md > h4:first-child{margin-top:0}
+.edprev .md h1{font-size:26px;padding-bottom:8px;border-bottom:1px solid var(--ed-line)}
+.edprev .md h2{font-size:20px;padding-bottom:6px;border-bottom:1px solid var(--ed-line)}
+.edprev .md h3{font-size:16px}
+.edprev .md h4,.edprev .md h5,.edprev .md h6{font-size:14px}
+.edprev .md ul,.edprev .md ol{padding-left:26px}
+.edprev .md li{margin:4px 0}
+.edprev .md li.task{margin-left:-20px}
+.edprev .md code{font:12.5px var(--mono);background:var(--ed-code);padding:2px 5px;border-radius:var(--r-code)}
+.edprev .md pre{padding:12px 14px;background:var(--ed-pre);border-radius:var(--r-md);font:12.5px/1.65 var(--mono)}
+.edprev .md pre code{background:none;padding:0;font:inherit}
+.edprev .md blockquote{padding:0 0 0 14px;border-left:3px solid var(--ed-quote);color:var(--ed-fg-3)}
+.edprev .md hr{border-top:1px solid var(--ed-line);margin:20px 0}
+.edprev .md table{font-size:13px}
+.edprev .md th,.edprev .md td{border:1px solid var(--ed-line);padding:6px 11px}
+.edprev .md th{background:var(--ed-side)}
+.edprev .md a{color:var(--ed-link)}
+.edprev .md .imgalt{color:var(--t-dim);font-size:12px}
+.edprev .md summary{color:var(--ed-fg-3)}
+.edprev .md summary:hover{color:var(--ed-hi)}
 
 /* the status bar */
 .edstatus{display:flex;align-items:center;gap:14px;height:26px;flex:none;padding:0 14px;
@@ -1122,6 +1174,7 @@ aside .empty p{font-size:var(--fs-xs)}
 .edpr.on{background:var(--ed-on);color:var(--ed-hi)}
 .edpr .nm{flex:none;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--fs-sm) var(--mono)}
 .edpr .nm b{font-weight:600;color:var(--ed-match)}
+.edpr.ign .nm{color:var(--t-dim)}
 .edpr .dr{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font-size:var(--fs-xs);color:var(--t-dim)}
 .edpn{padding:8px 14px;color:var(--t-dim)}
@@ -1192,7 +1245,11 @@ aside .empty p{font-size:var(--fs-xs)}
 .edband{display:none;align-items:center;gap:10px;height:var(--titlebar);flex:none;padding:10px 8px 0 0;
   background:var(--ed-side);border-bottom:1px solid var(--ed-line);
   font-size:var(--fs-xs);color:var(--t-dim);-webkit-app-region:drag}
-.edgap{width:68px;flex:none}          /* plus the 10px gap: clear of the lights, which end at x=70 */
+/* Plus the 10px gap: the text starts at x=92. The lights end at x=70 on paper (18px in,
+   three 12px buttons 8px apart) and a little past that on macOS 26, which draws them
+   larger; at 78 the workspace name sat against the green one. 92 is the breath macOS
+   itself leaves between the lights and the first toolbar item. */
+.edgap{width:82px;flex:none}
 .edbt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .edbell{display:none;width:7px;height:7px;flex:none;border-radius:50%;background:var(--link)}
 .edbell.on{display:inline-block}

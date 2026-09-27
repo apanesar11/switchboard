@@ -517,23 +517,39 @@ function wholeFields(r) {
   return fields;
 }
 
+// Ignored files nobody opens: the Finder's and Explorer's own droppings, which .gitignore
+// files list almost universally and which would otherwise sit in every folder of the tree.
+// VS Code hides exactly these by default (files.exclude). Only the IGNORED listing is
+// filtered — one that is tracked, or untracked and not ignored, is the user's business.
+const JUNK = new Set(['.DS_Store', 'Thumbs.db']);
+
 /**
- * lsFiles(dir, { max }) → { ok, error, files: [path], truncated }
+ * lsFiles(dir, { max }) → { ok, error, files: [path], ignored: [path], truncated }
  *
- * Every file the Editor's tree shows: the files git would show you — tracked, plus
+ * Every file the Editor's tree shows. `files` is what git would show you — tracked, plus
  * untracked ones .gitignore does not exclude — minus tracked files already deleted from
- * the worktree, which `-c` still lists because the index still has them. Three listings,
- * run alongside: `-c`, `-o --exclude-standard`, and `-d`, which cannot be subtracted inside
- * one ls-files call. Deduplicated because an unmerged path is listed once per conflict stage.
+ * the worktree, which `-c` still lists because the index still has them. `ignored` is the
+ * files .gitignore excludes — `.env.local`, a `config.json`, a stray `debug.log` — which
+ * the tree shows too, dimmed: a file being kept out of git is the usual reason someone
+ * needs to open it. Four listings, run alongside: `-c`, `-o --exclude-standard`, `-d`, and
+ * `-o -i --exclude-standard --directory`, which cannot be told apart inside one ls-files
+ * call. Deduplicated because an unmerged path is listed once per conflict stage.
+ *
+ * Ignored FOLDERS stay out. `--directory` makes git print an ignored folder as one entry
+ * with a trailing slash instead of walking it — node_modules/, dist/, .next/ are hundreds
+ * of thousands of files that no one browses here and that git itself never descends into
+ * for status — and every such entry is dropped, so a file inside an ignored folder is not
+ * in the tree at all. An ignored file in a folder that is not ignored is listed by name.
  *
  * A repo with an un-ignored node_modules can hold hundreds of thousands of files. The
- * list is cut at LS_FILES_MAX (`max`, for tests) with truncated:true, and an overflow of
- * the buffer is the same truncation rather than a failure: every complete path before the
- * cut is good. Tracked and untracked are asked for APART so that the tracked ones come
- * first: one `-c -o` call prints every untracked path before the first tracked one, and a
- * cut there left a tree of nothing but node_modules — none of the repo's own source. So a
- * cut only ever costs untracked files, and an untracked listing that fails or times out is
- * that same cut (truncated:true), never a repo with no tree at all.
+ * lists together are cut at LS_FILES_MAX (`max`, for tests) with truncated:true, and an
+ * overflow of the buffer is the same truncation rather than a failure: every complete path
+ * before the cut is good. Tracked and untracked are asked for APART so that the tracked
+ * ones come first: one `-c -o` call prints every untracked path before the first tracked
+ * one, and a cut there left a tree of nothing but node_modules — none of the repo's own
+ * source. Ignored files come last of all. So a cut costs ignored files first, then untracked
+ * ones, and never a tracked one before either; a listing of untracked or ignored files that
+ * fails or times out is that same cut (truncated:true), never a repo with no tree at all.
  *
  * A submodule is one gitlink path here — a folder on disk, which editor.read() reports.
  * An untracked nested repo or linked worktree (a clone in vendor/, a worktree under
@@ -545,23 +561,26 @@ async function lsFiles(dir, opts) {
   const o = opts || {};
   const max = o.max || LS_FILES_MAX;
   const runOpts = { maxBuffer: LS_FILES_MAX_BUFFER };
-  const [cached, others, deleted] = await Promise.all([
+  const [cached, others, deleted, excluded] = await Promise.all([
     run(dir, ['ls-files', '-z', '-c'], runOpts),
     run(dir, ['ls-files', '-z', '-o', '--exclude-standard'], runOpts),
     run(dir, ['ls-files', '-z', '-d'], runOpts),
+    run(dir, ['ls-files', '-z', '-o', '-i', '--exclude-standard', '--directory'], runOpts),
   ]);
   // Overflow first: maxBuffer kills git, so a cut stream also reads as killed and exit 1.
   if (!cached.overflow && cached.timedOut) {
-    return { ok: false, error: 'Listing the files in ' + path.basename(dir) + ' took too long.', files: [], truncated: false };
+    return { ok: false, error: 'Listing the files in ' + path.basename(dir) + ' took too long.', files: [], ignored: [], truncated: false };
   }
   if (!cached.overflow && cached.code !== 0) {
-    return { ok: false, error: sentence(cached, 'git could not list the files in ' + path.basename(dir) + '.'), files: [], truncated: false };
+    return { ok: false, error: sentence(cached, 'git could not list the files in ' + path.basename(dir) + '.'), files: [], ignored: [], truncated: false };
   }
   const othersOk = others.overflow || (!others.timedOut && others.code === 0);
+  const excludedOk = excluded.overflow || (!excluded.timedOut && excluded.code === 0);
   const gone = new Set(deleted.code === 0 || deleted.overflow ? wholeFields(deleted) : []);
   const seen = new Set();
   const files = [];
-  let truncated = cached.overflow || others.overflow || !othersOk;
+  const ignored = [];
+  let truncated = cached.overflow || others.overflow || !othersOk || excluded.overflow || !excludedOk;
   for (let p of wholeFields(cached).concat(othersOk ? wholeFields(others) : [])) {
     if (p.endsWith('/')) p = p.slice(0, -1);
     if (!p || gone.has(p) || seen.has(p)) continue;
@@ -569,7 +588,14 @@ async function lsFiles(dir, opts) {
     seen.add(p);
     files.push(p);
   }
-  return { ok: true, error: null, files, truncated };
+  for (const p of excludedOk ? wholeFields(excluded) : []) {
+    // A trailing slash is an ignored folder, left out whole (above).
+    if (!p || p.endsWith('/') || seen.has(p) || JUNK.has(path.posix.basename(p))) continue;
+    if (files.length + ignored.length >= max) { truncated = true; break; }
+    seen.add(p);
+    ignored.push(p);
+  }
+  return { ok: true, error: null, files, ignored, truncated };
 }
 
 // How git says "HEAD has no such blob" (LC_ALL is pinned in GIT_ENV, so the English is

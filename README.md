@@ -94,12 +94,16 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   closing a terminal window does, and `claude --continue` picks the conversation back up.
 - **Editor** — the fourth tab, for when you want to look at or fix a file without
   opening another app: something like Sublime Text, with no extensions and no setup.
-  The tree on the left has a folder for each repo, lists what `git` would (ignored
-  files stay out) and marks changed files with their letter. Open files as tabs, save
-  with ⌘S, and close a tab with ⌘W (⌘W anywhere else still closes the window). ⌘P goes
-  to any file by a few letters of its name (`name:42` lands on line 42); ⇧⌘F searches
-  every repo and lists the matches by file. Bars beside the line numbers show what you
-  changed since the last commit. A file changed on disk — by Claude, a formatter, a
+  The tree on the left has a folder for each repo, lists what `git` would plus the
+  files your `.gitignore` keeps out of it — `.env.local` and the like, dimmed so you
+  can tell — leaves ignored folders such as `node_modules` out, and marks changed files
+  with their letter. Open files as tabs, save with ⌘S, and close a tab with ⌘W (⌘W
+  anywhere else still closes the window). ⌘P goes to any file by a few letters of its
+  name (`name:42` lands on line 42); ⇧⌘F searches every repo and lists the matches by
+  file. Bars beside the line numbers show what you changed since the last commit. A
+  markdown file gets an eye next to the full-screen button: it shows the file the way
+  GitHub shows a README, following what you type, and shows the source again (⇧⌘V does
+  the same); a relative link in it opens that file. A file changed on disk — by Claude, a formatter, a
   checkout — reloads into its tab by itself; if you have unsaved edits there, you are
   asked instead, and closing Switchboard with unsaved edits asks first. The button at
   the editor's top right makes it full screen, hiding the sidebar and the header; the

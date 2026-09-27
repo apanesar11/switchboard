@@ -85,7 +85,7 @@ before(() => {
   // sample-api-2: tracked files of every kind, then untracked, ignored and deleted ones.
   fs.mkdirSync(api, { recursive: true });
   git(api, 'init', '-q');
-  put(api, '.gitignore', 'build/\n*.log\n');
+  put(api, '.gitignore', 'build/\n*.log\n.env\n.env.*\n!.env.example\n.DS_Store\n');
   put(api, 'README.md', '# Sample API\n');
   put(api, 'src/index.js', INDEX_JS);
   put(api, 'src/with space.js', '// answer, with a space in the name\n');
@@ -102,6 +102,11 @@ before(() => {
   put(api, 'notes.txt', 'untracked answer\n');
   put(api, 'long.txt', LONG_LINE + '\n');
   put(api, 'debug.log', 'answer in a log\n');
+  // Ignored files the tree still shows: a secret, and one in a folder git does show.
+  put(api, '.env.local', 'SAMPLE_TOKEN=answer\n');
+  put(api, 'src/trace.log', 'answer in a nested log\n');
+  put(api, '.env.example', 'SAMPLE_TOKEN=\n');          // un-ignored by the ! rule: untracked
+  put(api, '.DS_Store', Buffer.from([0, 0, 0, 1]));        // ignored AND junk: in neither list
   put(api, 'build/out.js', 'answer in a build\n');
   // Sparse 6 MB files: text as far as the first 8 KB goes, and binary.
   put(api, 'build/big.txt', 'x'.repeat(9000) + '\n');
@@ -173,7 +178,8 @@ before(() => {
     hasPcre = err.status === 1;                // exit 1 is "no match": -P itself was fine
   }
 
-  // cap: two tracked files, twenty untracked ones.
+  // cap: two tracked files, twenty untracked ones, two ignored ones (by info/exclude, so
+  // that no .gitignore joins the untracked list).
   fs.mkdirSync(cap, { recursive: true });
   git(cap, 'init', '-q');
   put(cap, 'package.json', '{}\n');
@@ -181,6 +187,9 @@ before(() => {
   git(cap, 'add', '-A');
   git(cap, 'commit', '-q', '-m', 'initial');
   for (let i = 0; i < 20; i++) put(cap, `node_modules/pkg-${i}/index.js`, '\n');
+  put(cap, '.git/info/exclude', '*.tmp\n');
+  put(cap, 'a.tmp', '\n');
+  put(cap, 'b.tmp', '\n');
 
   // A git that is this one, except where FAKE_GIT says to fail the way another git would.
   fs.mkdirSync(fakeBin);
@@ -223,11 +232,11 @@ test('tree lists tracked and untracked-not-ignored files, per repo, under displa
   assert.deepEqual(r.repos.map(x => x.name), ['sample-api', 'sample-new', 'sample-web']);
   const files = nfc(r.repos[0].files);
   for (const want of ['.gitignore', 'README.md', 'src/index.js', 'src/with space.js', 'src/naïve.js',
-    'bom.txt', 'image.bin', 'script.sh', 'notes.txt', 'long.txt', 'link-in.js']) {
+    'bom.txt', 'image.bin', 'script.sh', 'notes.txt', 'long.txt', 'link-in.js', '.env.example']) {
     assert.ok(files.includes(want), `${want} is listed`);
   }
-  for (const hidden of ['gone.txt', 'debug.log', 'build/out.js', 'build/big.txt']) {
-    assert.ok(!files.includes(hidden), `${hidden} is not listed`);
+  for (const hidden of ['gone.txt', 'debug.log', '.env.local', 'src/trace.log', '.DS_Store', 'build/out.js', 'build/big.txt']) {
+    assert.ok(!files.includes(hidden), `${hidden} is not among the files git shows`);
   }
   assert.equal(new Set(files).size, files.length, 'no path twice');
   assert.equal(r.repos[0].truncated, false);
@@ -236,10 +245,26 @@ test('tree lists tracked and untracked-not-ignored files, per repo, under displa
   assert.ok(r.repos[2].files.includes('odd\nname.txt'), 'a newline in a name survives -z');
 });
 
+test('tree lists ignored files apart, without ignored folders or OS junk, and they open', async () => {
+  const r = await editor.tree(WS);
+  const ignored = r.repos[0].ignored;
+  assert.deepEqual(ignored.slice().sort(), ['.env.local', 'debug.log', 'src/trace.log'],
+    'the ignored files, and none from inside build/');
+  assert.ok(!ignored.some(p => p.endsWith('/')), 'no ignored folder entry');
+  assert.ok(!r.repos[0].files.some(p => ignored.includes(p)), 'no path in both lists');
+  assert.deepEqual(r.repos[1].ignored, []);
+  assert.deepEqual(r.repos[2].ignored, []);
+  const secret = await editor.read(WS, 'sample-api', '.env.local');
+  assert.equal(secret.ok, true);
+  assert.equal(secret.text, 'SAMPLE_TOKEN=answer\n');
+  // Inside an ignored folder: not listed, but nothing stops a path the guard allows.
+  assert.equal((await editor.read(WS, 'sample-api', 'build/out.js')).text, 'answer in a build\n');
+});
+
 test('tree of a single-repo workspace is the folder itself, named after it', async () => {
   const r = await editor.tree('demo-app');
   assert.equal(r.ok, true);
-  assert.deepEqual(r.repos, [{ name: 'demo-app', files: ['main.txt'], truncated: false, error: null }]);
+  assert.deepEqual(r.repos, [{ name: 'demo-app', files: ['main.txt'], ignored: [], truncated: false, error: null }]);
 });
 
 test('tree refuses an absolute-path id and an unknown workspace', async () => {
@@ -257,21 +282,27 @@ test('an untracked nested repo or worktree is one plain path in the tree, and re
   assert.deepEqual(await editor.read(WS, 'sample-web', 'vendor/lib'), { ok: false, error: 'vendor/lib is a folder' });
 });
 
-test('the tree cap keeps tracked files first, so a cut only costs untracked ones', async () => {
+test('the tree cap keeps tracked files first, so a cut costs ignored files, then untracked ones', async () => {
   const cut = await gitjs.lsFiles(cap, { max: 3 });
   assert.equal(cut.ok, true);
   assert.equal(cut.truncated, true);
   assert.deepEqual(cut.files.slice(0, 2), ['package.json', 'src/app.js']);
   assert.equal(cut.files.length, 3);
   assert.match(cut.files[2], /^node_modules\/pkg-\d+\/index\.js$/);
+  assert.deepEqual(cut.ignored, []);
+  const some = await gitjs.lsFiles(cap, { max: 23 });
+  assert.equal(some.truncated, true);
+  assert.equal(some.files.length, 22, 'every tracked and untracked file');
+  assert.deepEqual(some.ignored, ['a.tmp'], 'and the ignored ones are what the cut costs');
   const whole = await gitjs.lsFiles(cap);
   assert.equal(whole.truncated, false);
   assert.equal(whole.files.length, 22);
+  assert.deepEqual(whole.ignored, ['a.tmp', 'b.tmp']);
 });
 
 test('an untracked listing that fails is a cut tree, never a repo with no tree', () => {
   assert.deepEqual(childGit({ FAKE_GIT: 'no-others' }, 'lsFiles', [cap]),
-    { ok: true, error: null, files: ['package.json', 'src/app.js'], truncated: true });
+    { ok: true, error: null, files: ['package.json', 'src/app.js'], ignored: [], truncated: true });
 });
 
 // ---------------------------------------------------------------------------

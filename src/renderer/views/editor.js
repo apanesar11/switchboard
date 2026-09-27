@@ -50,6 +50,12 @@ window.SB = window.SB || {};
   var STAT_MAX = 200;            // main reads no more than this per sb:code:stat
   var DIFF_SPAN = 5000;          // a middle this long either side is "all modified"
   var DIFF_D = 2000;             // …and so is one that needs this many edits
+  var PREVIEW_MS = 250;          // the markdown preview follows typing this far behind
+  var PREVIEW_MAX = 1024 * 1024; // past this a markdown file is shown as source only
+  // The extensions Monaco's own markdown language claims: a tab with one of these can
+  // be previewed. By name, not the model's language id, so a file read before Monaco
+  // has loaded — or after it failed to — can be previewed all the same.
+  var MD_EXT = /\.(?:md|markdown|mdown|mkdn|mkd|mdwn|mdtxt|mdtext)$/i;
 
   var eds = new Map();           // wsId -> ed
   var serial = 0;                // tells two editors' row ids apart
@@ -206,6 +212,7 @@ window.SB = window.SB || {};
       if (tab.kind === 'find' || list.length >= SAVED_TABS) return;
       var item = { repo: tab.repo, path: tab.path };
       if (tab.key === ed.active || (ed.active === FIND && tab.key === ed.lastFile)) item.active = true;
+      if (tab.preview) item.preview = true;
       list.push(item);
     });
     try { window.localStorage.setItem(TABS_KEY + ed.wsId, JSON.stringify(list)); } catch (e) { /* storage off */ }
@@ -586,6 +593,19 @@ window.SB = window.SB || {};
     }, D.icon(inBand ? 'collapse' : 'expand'));
   }
 
+  // The eye beside the full-screen button: Preview for a markdown tab, hidden for any
+  // other (paintEye). Its tooltip carries the key, as the full-screen button's does.
+  function eyeButton(ed) {
+    return h('button.ib.edeye', {
+      type: 'button',
+      hidden: true,
+      title: 'Preview markdown  ⇧⌘V',
+      'aria-label': 'Preview markdown',
+      'aria-pressed': 'false',
+      onClick: function () { togglePreview(ed, activeTab(ed)); },
+    }, D.icon('eye'));
+  }
+
   function build(wsId) {
     var ed = {
       wsId: wsId,
@@ -624,7 +644,8 @@ window.SB = window.SB || {};
     // The tab list itself is the strip's flexible part (styles.css): a separate spacer
     // beside it was measured to shrink it by a pixel per tab, and it scrolled with room
     // to spare.
-    ed.tabsEl = h('div.edtabs', null, ed.tabList, fullButton(ed, false));
+    ed.eye = eyeButton(ed);
+    ed.tabsEl = h('div.edtabs', null, ed.tabList, ed.eye, fullButton(ed, false));
     ed.bar = h('div.edbar.hide', { role: 'status' });
     // `monaco-component` is Monaco's own class, borrowed for one reason: the theme's
     // colours are CSS variables declared on `.monaco-editor, .monaco-diff-editor,
@@ -632,8 +653,15 @@ window.SB = window.SB || {};
     // this container — outside the editor's own element, where no variable reaches.
     // Without the class the menu painted with no background at all (measured, 0.57).
     ed.codeHost = h('div.edmonaco.monaco-component');
+    // The markdown preview stands where Monaco does while a .md tab's eye is on. It is
+    // focusable so that the keys scroll it and ⌘C copies a selection made in it (the
+    // document fallback of app.js's handleEdit), and it keeps Monaco's model attached
+    // underneath, so the switch back is instant and ⌘S still saves.
+    ed.prev = h('div.edprev', { tabindex: '0', 'aria-label': 'Markdown preview' });
+    ed.prevKey = null;             // the tab the preview was last painted for…
+    ed.prevVer = null;             // …and the model version it showed
     ed.ph = h('div.edph');
-    ed.host = h('div.edhost.blank', null, ed.codeHost, ed.ph);
+    ed.host = h('div.edhost.blank', null, ed.codeHost, ed.prev, ed.ph);
     ed.find = buildFind(ed);
     ed.statusL = h('span.edsl');
     ed.statusR = h('span.edsr');
@@ -652,6 +680,7 @@ window.SB = window.SB || {};
     wireSash(ed);
     wireTabs(ed);
     wireDrops(ed);
+    wirePreview(ed);
 
     eds.set(wsId, ed);
     return ed;
@@ -805,6 +834,10 @@ window.SB = window.SB || {};
   function focusEditor(ed) {
     var tab = activeTab(ed);
     if (tab && tab.kind === 'find') { ed.find.input.focus(); return; }
+    if (inPreview(tab)) {
+      try { ed.prev.focus({ preventScroll: true }); } catch (e) { ed.prev.focus(); }
+      return;
+    }
     if (tab && tab.model && ed.monaco) { ed.monaco.focus(); return; }
     try { ed.tree.focus({ preventScroll: true }); } catch (e) { ed.tree.focus(); }
   }
@@ -929,6 +962,9 @@ window.SB = window.SB || {};
       focus: false,               // true: take the keyboard once shown; 'soft': unless the user is elsewhere in the slab
       closed: false,
       el: null,
+      preview: false,             // a markdown tab showing its rendering, not its source
+      prevScroll: 0,              // where that rendering was scrolled to
+      prevTimer: null,
     };
   }
 
@@ -942,7 +978,10 @@ window.SB = window.SB || {};
       ed.tabs.push(tab);
       readInto(ed, tab, o);
     }
-    if (o.line) tab.goto = { line: o.line, col: o.col || 1, len: o.len || 0 };
+    if (o.line) {
+      tab.goto = { line: o.line, col: o.col || 1, len: o.len || 0 };
+      tab.preview = false;        // a line is a place in the source: a find result, `name:42`
+    }
     tab.focus = !!o.focus;
     activate(ed, tab.key, { reveal: true });
     return tab;
@@ -996,13 +1035,15 @@ window.SB = window.SB || {};
     saveTabs(ed);
   }
 
-  // What the host shows for the active tab: the model, or one quiet sentence where it
-  // would be. The Find results tab keeps Monaco's model as it was, just out of sight.
+  // What the host shows for the active tab: the model, its markdown preview, or one
+  // quiet sentence where it would be. The Find results tab keeps Monaco's model as it
+  // was, just out of sight.
   function showActive(ed) {
     var tab = activeTab(ed);
     var finding = !!tab && tab.kind === 'find';
     ed.code.classList.toggle('findon', finding);
     var live = !!tab && tab.kind === 'text' && !!tab.model && !!ed.monaco;
+    var previewing = inPreview(tab);
     if (ed.monaco && !finding) {
       if (live && ed.monaco.getModel() !== tab.model) {
         ed.monaco.setModel(tab.model);
@@ -1012,16 +1053,144 @@ window.SB = window.SB || {};
       }
     }
     if (live && tab.goto) jump(ed, tab);
-    ed.host.classList.toggle('blank', !live);
+    ed.host.classList.toggle('blank', !live && !previewing);
+    ed.host.classList.toggle('preview', previewing);
+    if (previewing) paintPreview(ed, tab);
+    else ed.prevKey = null;
+    paintEye(ed, tab);
     placeholder(ed, tab);
     paintTabs(ed);
     paintTreeActive(ed);
     paintStatus(ed);
-    if (live && tab.focus && onScreen(ed)) {
+    if ((live || previewing) && tab.focus && onScreen(ed)) {
       var take = tab.focus === true || !ed.slab.contains(document.activeElement);
       tab.focus = false;
-      if (take) ed.monaco.focus();
+      if (take) focusEditor(ed);
     }
+  }
+
+  // ── markdown preview ──────────────────────────────────────────────────────
+
+  function isMarkdown(tab) {
+    return !!tab && tab.kind === 'text' && MD_EXT.test(tab.name);
+  }
+
+  // The tab is a markdown file whose eye is on, and there is text to render: the model's,
+  // or — before Monaco has loaded, or after it failed to — the text the read brought.
+  function inPreview(tab) {
+    return isMarkdown(tab) && !!tab.preview && (!!tab.model || typeof tab.text === 'string');
+  }
+
+  function previewText(tab) {
+    return tab.model && !tab.model.isDisposed() ? tab.model.getValue() : String(tab.text || '');
+  }
+
+  function paintEye(ed, tab) {
+    var md = isMarkdown(tab);
+    ed.eye.hidden = !md;
+    var on = md && !!tab.preview;
+    ed.eye.setAttribute('aria-pressed', on ? 'true' : 'false');
+    ed.eye.classList.toggle('on', on);
+    ed.eye.title = (on ? 'Show source' : 'Preview markdown') + '  ⇧⌘V';
+    ed.eye.setAttribute('aria-label', on ? 'Show source' : 'Preview markdown');
+  }
+
+  // The eye, ⇧⌘V. Only a markdown tab has a preview; anything else is left alone.
+  function togglePreview(ed, tab) {
+    if (!isMarkdown(tab)) return false;
+    tab.preview = !tab.preview;
+    if (tab.key === ed.active) showActive(ed);
+    saveTabs(ed);
+    if (onScreen(ed)) focusEditor(ed);
+    return true;
+  }
+
+  // The rendering of the tab's text, SB.markdown's, as a file rather than a comment
+  // (breaks: false, R3). Painted again only when the text has moved — every activate()
+  // lands here, and a README is not re-rendered for a bell. The scroll position is the
+  // tab's own, kept by wirePreview(), so two markdown tabs do not share one.
+  function paintPreview(ed, tab) {
+    var ver = tab.model && !tab.model.isDisposed() ? tab.model.getVersionId() : -1;
+    if (ed.prevKey === tab.key && ed.prevVer === ver) return;
+    // Read before the clear: emptying a scrolled pane is itself a scroll to 0.
+    var at = tab.prevScroll || 0;
+    ed.prevKey = tab.key;
+    ed.prevVer = ver;
+    D.clear(ed.prev);
+    var text = previewText(tab);
+    if (text.length > PREVIEW_MAX) {
+      ed.prev.appendChild(h('div.edprevin.note', null, 'too long to preview · ' + size(text.length) + ' — showing the source'));
+    } else {
+      var md = SB.markdown && typeof SB.markdown.render === 'function' ? SB.markdown.render(text, { breaks: false }) : D.text(text);
+      ed.prev.appendChild(h('div.edprevin.md', null, md));
+    }
+    ed.prev.scrollTop = at;
+    tab.prevScroll = ed.prev.scrollTop;
+  }
+
+  function schedulePreview(ed, tab) {
+    if (tab.prevTimer) clearTimeout(tab.prevTimer);
+    tab.prevTimer = setTimeout(function () {
+      tab.prevTimer = null;
+      if (!tab.closed && tab.key === ed.active && inPreview(tab)) paintPreview(ed, tab);
+    }, PREVIEW_MS);
+  }
+
+  // `docs/setup.md` from the README's own folder, `/docs/setup.md` from the repo's root
+  // (GitHub reads a leading slash that way), `..` and `.` folded — or null for a path
+  // that leaves the repo, which nothing here would open anyway.
+  function resolveRel(dir, href) {
+    var s = String(href || '');
+    try { s = decodeURIComponent(s); } catch (e) { /* a % that is not an escape: as typed */ }
+    var segs = (s.charAt(0) === '/' ? s.slice(1) : (dir ? dir + '/' + s : s)).split('/');
+    var out = [];
+    for (var i = 0; i < segs.length; i++) {
+      var seg = segs[i];
+      if (!seg || seg === '.') continue;
+      if (seg === '..') { if (!out.length) return null; out.pop(); continue; }
+      out.push(seg);
+    }
+    return out.length ? out.join('/') : null;
+  }
+
+  // GitHub's anchor for a heading: lowercase, punctuation dropped, spaces to hyphens.
+  function slug(text) {
+    return String(text || '').trim().toLowerCase().replace(/[^\w\- ]+/g, '').replace(/ /g, '-');
+  }
+
+  function wirePreview(ed) {
+    ed.prev.addEventListener('scroll', function () {
+      var tab = activeTab(ed);
+      if (tab && ed.prevKey === tab.key) tab.prevScroll = ed.prev.scrollTop;
+    });
+    // Links. An http(s) one is markdown.js's: its own click opens the browser. Anything
+    // else is decided here, in the capture phase, before that handler and before Chromium
+    // would navigate the window to a relative URL: `#a-heading` scrolls to the heading,
+    // a relative path opens that file in a tab when the tree has it, and any other
+    // scheme (mailto:, javascript:) does nothing at all.
+    ed.prev.addEventListener('click', function (e) {
+      var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+      if (!a || !ed.prev.contains(a)) return;
+      var href = a.getAttribute('href') || '';
+      if (/^https?:\/\//i.test(href)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      var tab = activeTab(ed);
+      if (!tab) return;
+      if (href.charAt(0) === '#') {
+        var want = href.slice(1);
+        try { want = decodeURIComponent(want); } catch (err) { /* as typed */ }
+        want = want.toLowerCase();
+        var heads = ed.prev.querySelectorAll('h1,h2,h3,h4,h5,h6');
+        for (var i = 0; i < heads.length; i++) {
+          if (slug(heads[i].textContent) === want) { ed.prev.scrollTop = Math.max(0, heads[i].offsetTop - 16); return; }
+        }
+        return;
+      }
+      if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return;
+      var target = resolveRel(dirName(tab.path), href.replace(/[?#].*$/, ''));
+      if (target && ed.byKey && ed.byKey[fileKey(tab.repo, target)]) openFile(ed, tab.repo, target, { focus: true });
+    }, true);
   }
 
   function placeholder(ed, tab) {
@@ -1056,6 +1225,7 @@ window.SB = window.SB || {};
     ed.tabs.splice(i, 1);
     tab.closed = true;
     if (tab.diffTimer) clearTimeout(tab.diffTimer);
+    if (tab.prevTimer) clearTimeout(tab.prevTimer);
     if (ed.active === tab.key) {
       // Closing Find results goes back to the file it was opened from. Closing a file
       // goes to its neighbour on the right, as a browser does, or on the left at the end
@@ -1188,6 +1358,7 @@ window.SB = window.SB || {};
       if (!s || typeof s.repo !== 'string' || typeof s.path !== 'string' || !s.path) return;
       if (tabOf(ed, fileKey(s.repo, s.path))) return;
       var tab = newTab(s.repo, s.path);
+      tab.preview = !!s.preview;
       ed.tabs.push(tab);
       if (s.active) want = tab.key;
       readInto(ed, tab, { quiet: true });
@@ -1207,6 +1378,8 @@ window.SB = window.SB || {};
     reportDirty();
     if (tab.diffTimer) clearTimeout(tab.diffTimer);
     tab.diffTimer = setTimeout(function () { tab.diffTimer = null; markers(tab); }, DIFF_MS);
+    // A reload in place, or typing before the switch: the preview on screen follows.
+    if (tab.preview && tab.key === ed.active) schedulePreview(ed, tab);
   }
 
   function settled(ed, tab) {
@@ -1629,23 +1802,34 @@ window.SB = window.SB || {};
     });
   }
 
+  // `files` and `ignored` (§4.14) into one tree: an ignored file is a row like any other,
+  // drawn dim, and a ⌘P hit like any other. Nothing here knows which folders git ignores:
+  // main leaves those out whole.
   function adoptTree(ed, repos) {
     var index = [];
+    function folder() {
+      return { dirs: Object.create(null), files: [], ign: Object.create(null), list: null };
+    }
     ed.repos = repos.filter(function (r) { return r && typeof r.name === 'string'; }).map(function (r) {
-      var root = { dirs: Object.create(null), files: [], list: null };
-      var files = Array.isArray(r.files) ? r.files : [];
-      files.forEach(function (p) {
+      var root = folder();
+      var count = 0;
+      function add(p, ign) {
         if (typeof p !== 'string' || !p) return;
         var segs = p.split('/');
         var node = root;
         for (var i = 0; i < segs.length - 1; i++) {
-          node = node.dirs[segs[i]] || (node.dirs[segs[i]] = { dirs: Object.create(null), files: [], list: null });
+          node = node.dirs[segs[i]] || (node.dirs[segs[i]] = folder());
         }
-        node.files.push(segs[segs.length - 1]);
+        var name = segs[segs.length - 1];
+        node.files.push(name);
+        if (ign) node.ign[name] = true;
+        count++;
         var full = r.name + '/' + p;
-        index.push({ repo: r.name, path: p, full: full, low: full.toLowerCase(), at: full.lastIndexOf('/') + 1 });
-      });
-      return { name: r.name, root: root, count: files.length, truncated: !!r.truncated, error: r.error || null };
+        index.push({ repo: r.name, path: p, full: full, low: full.toLowerCase(), at: full.lastIndexOf('/') + 1, ign: ign });
+      }
+      (Array.isArray(r.files) ? r.files : []).forEach(function (p) { add(p, false); });
+      (Array.isArray(r.ignored) ? r.ignored : []).forEach(function (p) { add(p, true); });
+      return { name: r.name, root: root, count: count, truncated: !!r.truncated, error: r.error || null };
     });
     ed.index = index;
     ed.byKey = Object.create(null);
@@ -1655,8 +1839,8 @@ window.SB = window.SB || {};
   // Folders first, then files, each in Finder's order (case-insensitive, numeric).
   function children(node) {
     if (node.list) return node.list;
-    var dirs = Object.keys(node.dirs).sort(compare).map(function (n) { return { name: n, node: node.dirs[n] }; });
-    var files = node.files.slice().sort(compare).map(function (n) { return { name: n, node: null }; });
+    var dirs = Object.keys(node.dirs).sort(compare).map(function (n) { return { name: n, node: node.dirs[n], ign: false }; });
+    var files = node.files.slice().sort(compare).map(function (n) { return { name: n, node: null, ign: !!node.ign[n] }; });
     node.list = dirs.concat(files);
     return node.list;
   }
@@ -1728,7 +1912,7 @@ window.SB = window.SB || {};
           rows.push({ kind: 'dir', repo: repo, path: p, name: c.name, depth: depth });
           if (ed.expanded[fileKey(repo, p)]) walk(c.node, repo, p, depth + 1);
         } else {
-          rows.push({ kind: 'file', repo: repo, path: p, name: c.name, depth: depth });
+          rows.push({ kind: 'file', repo: repo, path: p, name: c.name, depth: depth, ign: c.ign });
         }
       }
       if (list.length > cap) {
@@ -1797,13 +1981,13 @@ window.SB = window.SB || {};
       var st = ed.changes.letters[fileKey(row.repo, row.path)];
       if (st) mark = h('span.mk.' + (LETTER[st] || 'M'), null, LETTER[st] || st);
     }
-    return h('div.edrow' + (dir ? '.d' : '') + (row.top ? '.top' : '') + (key === activeKey ? '.on' : ''), {
+    return h('div.edrow' + (dir ? '.d' : '') + (row.top ? '.top' : '') + (row.ign ? '.ign' : '') + (key === activeKey ? '.on' : ''), {
       id: 'ed' + ed.id + 'r' + i,
       role: 'treeitem',
       'aria-level': String(row.depth + 1),
       'aria-expanded': dir ? (open ? 'true' : 'false') : null,
       'aria-selected': key === activeKey ? 'true' : 'false',
-      title: row.top ? row.name : row.repo + '/' + row.path,
+      title: row.top ? row.name : row.repo + '/' + row.path + (row.ign ? ' — ignored by git' : ''),
       style: 'padding-left:' + indent(row.depth) + 'px',
       dataset: { i: i },
     }, h('span.cv', null, dir ? D.icon(open ? 'chevD' : 'chev') : null), h('span.nm', null, row.name), mark);
@@ -1958,7 +2142,10 @@ window.SB = window.SB || {};
       var back = tabOf(ed, ed.lastFile);
       right = '↩ opens the line' + (back ? ' · esc back to ' + back.name : '');
     } else if (tab) {
-      if (tab.model && ed.monaco && ed.monaco.getModel() === tab.model) {
+      if (inPreview(tab)) {
+        left.push('Preview');
+        if (tab.model) left.push(languageName(tab.model));
+      } else if (tab.model && ed.monaco && ed.monaco.getModel() === tab.model) {
         var sel = ed.monaco.getSelection();
         var pos = sel ? sel.getPosition() : { lineNumber: 1, column: 1 };
         var picked = sel && !sel.isEmpty() ? tab.model.getValueInRange(sel).length : 0;
@@ -2192,10 +2379,10 @@ window.SB = window.SB || {};
       flush();
       var dir = dirName(e.path);
       var where = (multi ? e.repo + '/' : '') + (dir ? dir + '/' : '');
-      p.list.appendChild(h('div.edpr' + (i === p.sel ? '.on' : ''), {
+      p.list.appendChild(h('div.edpr' + (i === p.sel ? '.on' : '') + (e.ign ? '.ign' : ''), {
         role: 'option',
         'aria-selected': i === p.sel ? 'true' : 'false',
-        title: e.repo + '/' + e.path,
+        title: e.repo + '/' + e.path + (e.ign ? ' — ignored by git' : ''),
         dataset: { i: i },
         onMousemove: function () { if (p.sel !== i) { p.sel = i; paintSel(ed); } },
       }, nm, h('span.dr', null, where)));
@@ -2501,6 +2688,7 @@ window.SB = window.SB || {};
     if (k === 's' && !e.shiftKey) { save(ed, activeTab(ed), false); return true; }
     if (k === 'p' && !e.shiftKey) { openPalette(ed); return true; }
     if (k === 'f' && e.shiftKey) { openFind(ed); return true; }
+    if (k === 'v' && e.shiftKey) return togglePreview(ed, activeTab(ed));
     return false;
   }
 

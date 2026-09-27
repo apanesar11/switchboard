@@ -211,9 +211,11 @@ function missing(rel) {
 // ---------------------------------------------------------------------------
 
 /**
- * tree(id) → { ok, repos: [{ name, files: [path], truncated, error }] }
- * One entry per repo, in scan() order. A repo git cannot list gets files:[] and its
- * sentence; the rest of the tree still lands.
+ * tree(id) → { ok, repos: [{ name, files: [path], ignored: [path], truncated, error }] }
+ * One entry per repo, in scan() order. `files` are the files git shows (tracked and
+ * untracked-not-ignored); `ignored` the ones .gitignore keeps out of git, which the tree
+ * still shows, dimmed — a file inside an ignored FOLDER is in neither (git.lsFiles). A repo
+ * git cannot list gets files:[] and its sentence; the rest of the tree still lands.
  */
 async function tree(id) {
   const ws = await workspaceRepos(id);
@@ -223,6 +225,7 @@ async function tree(id) {
     return {
       name: repo.name,
       files: r.ok ? r.files : [],
+      ignored: r.ok ? r.ignored : [],
       truncated: !!(r.ok && r.truncated),
       error: r.ok ? null : r.error || `git could not list the files in ${repo.name}`,
     };

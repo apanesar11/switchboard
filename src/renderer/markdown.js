@@ -1,9 +1,10 @@
 // SB.markdown — GitHub-flavoured markdown → DOM, for the text people write on a pull
-// request: the description, the conversation, the reviews and the inline comments.
+// request — the description, the conversation, the reviews and the inline comments —
+// and for the Editor's preview of a markdown file (a README).
 //
-//   SB.markdown.render(text)  -> DocumentFragment of block elements (p, h1–h6, ul/ol,
-//                                pre, blockquote, table, hr, details); every string
-//                                from GitHub reaches the document as a text node
+//   SB.markdown.render(text, opts) -> DocumentFragment of block elements (p, h1–h6,
+//                                ul/ol, pre, blockquote, table, hr, details); every
+//                                string from GitHub reaches the document as a text node
 //   SB.markdown.inline(text)  -> [Node|string] for one line's worth of inline markup
 //   SB.markdown.parse(text)   -> the block tree, for tests
 //
@@ -11,9 +12,12 @@
 // in, so this walks the text and builds nodes for what the text on a pull request
 // actually uses. Raw HTML is read for the handful of tags that carry meaning — a link,
 // a line break, <details> — and every other tag is stripped to its text (Codex wraps
-// its severity badge in <sub>, the Linear bot writes <p><a href>). A single newline
-// inside a paragraph is a line break, which is how GitHub renders what is typed into
-// a comment box.
+// its severity badge in <sub>, the Linear bot writes <p><a href>).
+//
+// opts.breaks — what a single newline inside a paragraph means. true (the default, a
+// comment): a line break, which is how GitHub renders what is typed into a comment box.
+// false (a file): the soft break of a document, folded into a space, as GitHub renders
+// a README; a line that ends in two spaces or a backslash is still a hard break.
 window.SB = window.SB || {};
 
 (function (SB) {
@@ -21,6 +25,12 @@ window.SB = window.SB || {};
 
   var dom = SB.dom;
   var h = dom.h;
+
+  // The reference-style link definitions of the text being rendered (`[name]: url`),
+  // lowercased label -> url, for `[text][name]`, `[text][]` and `[name]` in it. Set by
+  // render() for its duration: inline() is reached from every block and carries no
+  // context of its own. A comment rarely has any; a README's badges are nothing else.
+  var defs = null;
 
   // ── inline ────────────────────────────────────────────────────────────────
 
@@ -67,8 +77,17 @@ window.SB = window.SB || {};
     // An image has nothing to show inline; its alt text is what it meant.
     { starts: '!', re: /!\[([^\]\n]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/y,
       make: function (m) { return alt(m[1], m[2]); } },
-    { starts: '[', re: /\[([^\]\n]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/y,
+    // A link's text may hold one level of brackets of its own — a badge is an image
+    // inside a link, `[![Build](img)](url)`, on the first line of most READMEs.
+    { starts: '[', re: /\[((?:[^\[\]\n]|\[[^\[\]\n]*\])*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/y,
       make: function (m) { return [link(inline(m[1]), m[2])]; } },
+    // Reference style, by a definition seen anywhere in the text: `![alt][ref]`,
+    // `[text][ref]`, `[text][]` and `[text]` alone. Without a definition the brackets
+    // are plain text, as they always were — `[ ]` in a sentence, `[x]` in a task.
+    { starts: '!', re: /!\[([^\]\n]*)\](?:\[([^\]\n]*)\])?/y,
+      make: function (m) { var u = def(m[2] || m[1]); return u === null ? null : alt(m[1], u); } },
+    { starts: '[', re: /\[((?:[^\[\]\n]|\[[^\[\]\n]*\])+)\](?:\[([^\]\n]*)\])?/y,
+      make: function (m) { var u = def(m[2] || m[1]); return u === null ? null : [link(inline(m[1]), u)]; } },
     { starts: '<', re: /<(https?:\/\/[^>\s]+)>/y,
       make: function (m) { return [link(m[1], m[1])]; } },
     // A bare address. Trailing punctuation belongs to the sentence, not the link.
@@ -98,6 +117,13 @@ window.SB = window.SB || {};
 
   function wordChar(c) { return /[A-Za-z0-9]/.test(c); }
 
+  // The url a reference label stands for, or null when the text defined none.
+  function def(label) {
+    if (!defs) return null;
+    var key = String(label || '').trim().toLowerCase();
+    return key && Object.prototype.hasOwnProperty.call(defs, key) ? defs[key] : null;
+  }
+
   // -> [Node | string]
   function inline(text) {
     var s = String(text === null || text === undefined ? '' : text);
@@ -119,7 +145,12 @@ window.SB = window.SB || {};
         rule.re.lastIndex = i;
         var m = rule.re.exec(s);
         if (!m) continue;
-        hit = { end: rule.re.lastIndex, nodes: rule.make(m) };
+        // The end is read BEFORE make(): make() recurses into inline() for the text
+        // inside, which runs these same sticky regexes and moves their lastIndex.
+        var end = rule.re.lastIndex;
+        var nodes = rule.make(m);
+        if (nodes === null) continue;               // matched the shape, but not this text: next rule
+        hit = { end: end, nodes: nodes };
         break;
       }
       if (!hit) { buf += c; i++; continue; }
@@ -135,6 +166,12 @@ window.SB = window.SB || {};
 
   var FENCE = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)\s*$/;
   var HEADING = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+  // The underline that makes the paragraph above it a heading: `===` an h1, `---` an h2.
+  var SETEXT = /^ {0,3}(=+|-+)\s*$/;
+  // `[name]: url "title"` on a line of its own, defining a reference for inline().
+  var DEF = /^ {0,3}\[([^\]]+)\]:\s*<?([^\s>]+)>?(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*$/;
+  // Two trailing spaces or a backslash: a hard line break inside a paragraph.
+  var HARD = /(?: {2,}|\\)$/;
   var HR = /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/;
   var QUOTE = /^ {0,3}>\s?(.*)$/;
   var ITEM = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
@@ -253,10 +290,11 @@ window.SB = window.SB || {};
   function blocks(lines) {
     var out = [];
     var para = null;
+    var hard = null;                 // per paragraph line: it ended in a hard break
     var i = 0;
 
     function endPara() {
-      if (para) { out.push({ t: 'p', lines: para }); para = null; }
+      if (para) { out.push({ t: 'p', lines: para, hard: hard }); para = null; hard = null; }
     }
 
     while (i < lines.length) {
@@ -264,6 +302,21 @@ window.SB = window.SB || {};
       var m;
 
       if (BLANK.test(line) || TAG_ALONE.test(line) || COMMENT_ONLY.test(line)) { endPara(); i++; continue; }
+
+      // A paragraph's underline makes it a heading, GitHub's way — and `---` right under
+      // a line of text is that, not a rule, for GitHub too.
+      if (para && SETEXT.test(line)) {
+        var level = line.trim().charAt(0) === '=' ? 1 : 2;
+        var text = para.join(' ');
+        para = null;
+        hard = null;
+        out.push({ t: 'h', level: level, text: text });
+        i++;
+        continue;
+      }
+
+      // A reference definition is read by parse() before this; it is not shown.
+      if (DEF.test(line)) { endPara(); i++; continue; }
 
       // <!-- … --> across lines: nothing in it is shown.
       if (/<!--/.test(line) && !/-->/.test(line)) {
@@ -325,12 +378,33 @@ window.SB = window.SB || {};
         continue;
       }
 
-      if (!para) para = [];
-      para.push(line.trim());
+      if (!para) { para = []; hard = []; }
+      var broken = HARD.test(line);
+      para.push(line.replace(HARD, '').trim());
+      hard.push(broken);
       i++;
     }
     endPara();
     return out;
+  }
+
+  // Every `[name]: url` line in the text, before the blocks are read: a reference may be
+  // used above the line that defines it. Not one inside a code fence, which is code.
+  function definitions(lines) {
+    var found = null;
+    var fence = null;
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (fence) { if (closes(line, fence)) fence = null; continue; }
+      var f = FENCE.exec(line);
+      if (f) { fence = f[1]; continue; }
+      var m = DEF.exec(line);
+      if (!m) continue;
+      var key = m[1].trim().toLowerCase();
+      if (!found) found = Object.create(null);
+      if (!(key in found)) found[key] = m[2];   // the first definition wins, as in GitHub
+    }
+    return found;
   }
 
   function parse(text) {
@@ -340,18 +414,30 @@ window.SB = window.SB || {};
 
   // ── render ────────────────────────────────────────────────────────────────
 
-  // Lines of one paragraph, a <br> between each — GitHub's own reading of a newline
-  // typed into a comment box.
-  function paragraph(lines, tag) {
+  // Lines of one paragraph. With breaks on (a comment) a <br> between each — GitHub's
+  // own reading of a newline typed into a comment box. With breaks off (a file) the
+  // lines run on, a space between, and only a hard break (two trailing spaces, a
+  // backslash) is a <br>.
+  function paragraph(lines, tag, o, hard) {
     var kids = [];
+    var run = '';
     for (var i = 0; i < lines.length; i++) {
-      if (i) kids.push(h('br'));
-      kids.push(inline(lines[i]));
+      if (o.breaks !== false) {
+        if (i) kids.push(h('br'));
+        kids.push(inline(lines[i]));
+        continue;
+      }
+      run += (run ? ' ' : '') + lines[i];
+      if (hard && hard[i] && i < lines.length - 1) {
+        kids.push(inline(run), h('br'));
+        run = '';
+      }
     }
+    if (run) kids.push(inline(run));
     return h(tag, null, kids);
   }
 
-  function listNode(b) {
+  function listNode(b, o) {
     var el = h(b.ordered ? 'ol' : 'ul', b.ordered && b.start !== 1 ? { start: String(b.start) } : null);
     for (var i = 0; i < b.items.length; i++) {
       var it = b.items[i];
@@ -361,8 +447,8 @@ window.SB = window.SB || {};
       }
       // A one-paragraph item keeps its text inline, so a plain list stays tight.
       var rest = it.blocks;
-      if (rest.length && rest[0].t === 'p') { li.appendChild(paragraph(rest[0].lines, 'span')); rest = rest.slice(1); }
-      if (rest.length) li.appendChild(renderBlocks(rest));
+      if (rest.length && rest[0].t === 'p') { li.appendChild(paragraph(rest[0].lines, 'span', o, rest[0].hard)); rest = rest.slice(1); }
+      if (rest.length) li.appendChild(renderBlocks(rest, o));
       el.appendChild(li);
     }
     return el;
@@ -380,28 +466,38 @@ window.SB = window.SB || {};
     return h('table', null, h('thead', null, tr), tbody);
   }
 
-  function node(b) {
+  function node(b, o) {
     switch (b.t) {
-      case 'p': return paragraph(b.lines, 'p');
+      case 'p': return paragraph(b.lines, 'p', o, b.hard);
       case 'h': return h('h' + Math.min(6, b.level), null, inline(b.text));
       case 'code': return h('pre', b.lang ? { dataset: { lang: b.lang } } : null, h('code', null, b.text));
       case 'hr': return h('hr');
-      case 'quote': return h('blockquote', null, renderBlocks(b.blocks));
+      case 'quote': return h('blockquote', null, renderBlocks(b.blocks, o));
       case 'table': return table(b);
-      case 'details': return h('details', null, h('summary', null, inline(b.summary)), renderBlocks(b.blocks));
-      case 'list': return listNode(b);
+      case 'details': return h('details', null, h('summary', null, inline(b.summary)), renderBlocks(b.blocks, o));
+      case 'list': return listNode(b, o);
       default: return h('p');
     }
   }
 
-  function renderBlocks(list) {
+  function renderBlocks(list, o) {
     var frag = dom.frag();
-    for (var i = 0; i < list.length; i++) frag.appendChild(node(list[i]));
+    for (var i = 0; i < list.length; i++) frag.appendChild(node(list[i], o));
     return frag;
   }
 
-  function render(text) {
-    return renderBlocks(parse(text));
+  // The parsed tree holds no nodes, so the reference definitions are needed again while
+  // it is rendered: inline() runs here, not in parse().
+  function render(text, opts) {
+    var o = opts || {};
+    var s = String(text === null || text === undefined ? '' : text).replace(/\r\n?/g, '\n');
+    var lines = s.split('\n');
+    defs = definitions(lines);
+    try {
+      return renderBlocks(blocks(lines), o);
+    } finally {
+      defs = null;
+    }
   }
 
   SB.markdown = { render: render, inline: inline, parse: parse };
