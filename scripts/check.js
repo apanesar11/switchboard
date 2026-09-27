@@ -29,6 +29,7 @@ const EXPECTED = [
   'src/main/shell.js',
   'src/main/drops.js',
   'src/main/usage.js',
+  'src/main/editor.js',
   'src/preload.js',
   'src/renderer/index.html',
   'src/renderer/styles.css',
@@ -47,6 +48,7 @@ const EXPECTED = [
   'src/renderer/views/diff.js',
   'src/renderer/views/pr.js',
   'src/renderer/views/prs.js',
+  'src/renderer/views/editor.js',
 ];
 
 function walk(dir, out) {

@@ -12,6 +12,7 @@
 const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 
 const GIT_ENV = Object.assign({}, process.env, {
   // A credential prompt inside an Electron child has no terminal and would hang forever.
@@ -30,6 +31,26 @@ const UNTRACKED_STAT_MAX_BYTES = 2 * 1024 * 1024;
 const UNTRACKED_STAT_MAX_FILES = 300;  // a stray un-ignored build dir must not stall a scan
 const ALL_DIFFS_MAX_FILES = 200;
 const ALL_DIFFS_CONCURRENCY = 8;
+
+// The Editor tab (ARCHITECTURE §4.14). A tree past this many files is cut and says so; the
+// listing gets its own buffer because 100 000 long paths do not fit in MAX_BUFFER.
+const LS_FILES_MAX = 100000;
+const LS_FILES_MAX_BUFFER = 64 * 1024 * 1024;
+// Modified-line markers diff the whole HEAD blob in the renderer; past this there are none.
+const HEAD_BLOB_MAX_BYTES = 3 * 1024 * 1024;
+// Find in files: matches per file (so one generated file cannot spend the whole budget),
+// matches per call, and the slice of a long line that is sent instead of all of it.
+const GREP_MAX_PER_FILE = 200;
+const GREP_MAX_MATCHES = 2000;
+const GREP_LINE_WINDOW = 400;
+const GREP_LINE_LEAD = 80;
+const GREP_TIMEOUT_MS = 15000;
+// …and its highlights: at most this many spans a line, and at most this long for the user's
+// regex to find them in a whole repo's answer — past it the lines come back unhighlighted.
+// A nested quantifier like `(a+)+b` can backtrack for hours in V8 on a line git matched in
+// milliseconds, and this is the main process (see matchSpans()).
+const GREP_MAX_RANGES = 50;
+const GREP_REGEX_MS = 250;
 
 // A warm fetch against github.com measures 0.55–0.76 s per repo. Ten seconds is ~13x that:
 // long enough that a slow link still succeeds, short enough that a dead one cannot make the
@@ -481,6 +502,308 @@ async function allDiffs(dir) {
 }
 
 // ---------------------------------------------------------------------------
+// the Editor tab — its tree, the HEAD side of its markers, find in files (§4.14).
+// All three are read-only; the one write the Editor makes (Save) is editor.js's
+// fs.writeFile and never a git command.
+// ---------------------------------------------------------------------------
+
+/**
+ * Complete NUL-terminated fields of a stream that may have been cut mid-path: when
+ * maxBuffer kills git, stdout ends wherever the limit fell, and the tail is half a name.
+ */
+function wholeFields(r) {
+  const fields = nulFields(r.stdout);
+  if (r.overflow && !r.stdout.endsWith('\0')) fields.pop();
+  return fields;
+}
+
+/**
+ * lsFiles(dir, { max }) → { ok, error, files: [path], truncated }
+ *
+ * Every file the Editor's tree shows: the files git would show you — tracked, plus
+ * untracked ones .gitignore does not exclude — minus tracked files already deleted from
+ * the worktree, which `-c` still lists because the index still has them. Three listings,
+ * run alongside: `-c`, `-o --exclude-standard`, and `-d`, which cannot be subtracted inside
+ * one ls-files call. Deduplicated because an unmerged path is listed once per conflict stage.
+ *
+ * A repo with an un-ignored node_modules can hold hundreds of thousands of files. The
+ * list is cut at LS_FILES_MAX (`max`, for tests) with truncated:true, and an overflow of
+ * the buffer is the same truncation rather than a failure: every complete path before the
+ * cut is good. Tracked and untracked are asked for APART so that the tracked ones come
+ * first: one `-c -o` call prints every untracked path before the first tracked one, and a
+ * cut there left a tree of nothing but node_modules — none of the repo's own source. So a
+ * cut only ever costs untracked files, and an untracked listing that fails or times out is
+ * that same cut (truncated:true), never a repo with no tree at all.
+ *
+ * A submodule is one gitlink path here — a folder on disk, which editor.read() reports.
+ * An untracked nested repo or linked worktree (a clone in vendor/, a worktree under
+ * .claude/worktrees/) is one `-o` entry with a trailing slash — git does not look inside
+ * another repository — and loses the slash, so it is the same kind of path: a named row
+ * whose read() says it is a folder, not a nameless file under it.
+ */
+async function lsFiles(dir, opts) {
+  const o = opts || {};
+  const max = o.max || LS_FILES_MAX;
+  const runOpts = { maxBuffer: LS_FILES_MAX_BUFFER };
+  const [cached, others, deleted] = await Promise.all([
+    run(dir, ['ls-files', '-z', '-c'], runOpts),
+    run(dir, ['ls-files', '-z', '-o', '--exclude-standard'], runOpts),
+    run(dir, ['ls-files', '-z', '-d'], runOpts),
+  ]);
+  // Overflow first: maxBuffer kills git, so a cut stream also reads as killed and exit 1.
+  if (!cached.overflow && cached.timedOut) {
+    return { ok: false, error: 'Listing the files in ' + path.basename(dir) + ' took too long.', files: [], truncated: false };
+  }
+  if (!cached.overflow && cached.code !== 0) {
+    return { ok: false, error: sentence(cached, 'git could not list the files in ' + path.basename(dir) + '.'), files: [], truncated: false };
+  }
+  const othersOk = others.overflow || (!others.timedOut && others.code === 0);
+  const gone = new Set(deleted.code === 0 || deleted.overflow ? wholeFields(deleted) : []);
+  const seen = new Set();
+  const files = [];
+  let truncated = cached.overflow || others.overflow || !othersOk;
+  for (let p of wholeFields(cached).concat(othersOk ? wholeFields(others) : [])) {
+    if (p.endsWith('/')) p = p.slice(0, -1);
+    if (!p || gone.has(p) || seen.has(p)) continue;
+    if (files.length >= max) { truncated = true; break; }
+    seen.add(p);
+    files.push(p);
+  }
+  return { ok: true, error: null, files, truncated };
+}
+
+// How git says "HEAD has no such blob" (LC_ALL is pinned in GIT_ENV, so the English is
+// stable): not in HEAD's tree, in the worktree but not HEAD's, no HEAD at all yet (an
+// unborn branch), and a folder or submodule where the file now is.
+const NO_BLOB = /does not exist in|exists on disk, but not in|invalid object name|not a valid object name|bad file|unknown revision|ambiguous argument/i;
+
+/**
+ * headBlob(dir, relPath) → { ok, error, text, skip }
+ *
+ * The file as HEAD has it, for the Editor's modified-line markers. The renderer diffs it
+ * against the live buffer, unsaved edits and all, so the markers are what `git diff HEAD`
+ * will show the moment the file is saved — the same base the Changes tab counts against.
+ *   text: '<blob>'           ≤ HEAD_BLOB_MAX_BYTES and no NUL
+ *   text: null               no such path at HEAD, or no HEAD yet: every line is new
+ *   text: null, skip: true   a binary or oversized blob: no markers at all
+ *
+ * The path travels inside the revision argument (`HEAD:<path>`), so nothing the user
+ * named can ever read as an option. There is no separate size query: maxBuffer IS the
+ * size test, and git is stopped at the cap instead of streaming a 200 MB blob to us.
+ */
+async function headBlob(dir, relPath) {
+  const r = await run(dir, ['cat-file', 'blob', 'HEAD:' + relPath], { maxBuffer: HEAD_BLOB_MAX_BYTES });
+  if (r.overflow) return { ok: true, error: null, text: null, skip: true };
+  if (r.code !== 0) {
+    if (!r.timedOut && NO_BLOB.test(r.stderr)) return { ok: true, error: null, text: null, skip: false };
+    return { ok: false, error: sentence(r, 'git could not read ' + relPath + ' at HEAD.'), text: null, skip: false };
+  }
+  if (r.stdout.indexOf('\0') !== -1) return { ok: true, error: null, text: null, skip: true };
+  return { ok: true, error: null, text: r.stdout, skip: false };
+}
+
+/**
+ * The records of `git grep -z -n`: `<path>\0<line>\0<text>\n`. -z prints a path verbatim,
+ * so a path may hold a newline; the text cannot (git splits on it) but may hold a NUL past
+ * the 8000 bytes -I looks at. So the first two fields end at NULs and only the third at \n.
+ * A record without its \n is the tail of a cut stream and is dropped. `text` is the WHOLE
+ * line here; matchSpans() decides which window of it is sent.
+ */
+function grepRecords(stdout, max) {
+  const out = [];
+  let at = 0;
+  while (at < stdout.length) {
+    const a = stdout.indexOf('\0', at);
+    const b = a === -1 ? -1 : stdout.indexOf('\0', a + 1);
+    const c = b === -1 ? -1 : stdout.indexOf('\n', b + 1);
+    if (c === -1) break;
+    const start = at;
+    at = c + 1;
+    const line = Number(stdout.slice(a + 1, b));
+    if (!Number.isInteger(line) || line < 1) continue;
+    if (out.length >= max) return { records: out, full: true };
+    // A CRLF file's lines arrive with their \r, which nothing wants to render.
+    let text = stdout.slice(b + 1, c);
+    if (text.endsWith('\r')) text = text.slice(0, -1);
+    // Nor its BOM: read() hands the Editor line 1 without it, and spans measured against a
+    // line that still starts with U+FEFF would select one character to the right.
+    if (line === 1 && text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    out.push({ path: stdout.slice(start, a), line, text });
+  }
+  return { records: out, full: false };
+}
+
+/**
+ * scanLines(hays, next, W, LEAD, MAX) → [{ offset, ranges }], one per hay.
+ *
+ * Where each matched line's window starts and where the query matches inside that window.
+ * `hays[i]` is what to search — the line itself, or its lowercase for a case-insensitive
+ * fixed string; null when there is nothing trustworthy to search. `next(hay, from)` is the
+ * next NON-EMPTY match at or after `from`, as [start, end], or null. A line longer than W
+ * gets a window that starts LEAD characters before its first match (0 when there is none),
+ * `offset` being that start; `ranges` are the matches that start inside the window, as
+ * [start, end] relative to it, clipped to its end, at most MAX of them. The pattern always
+ * runs over the whole line, never the window, so `^`, `\b` and lookbehinds read the line
+ * as git did.
+ *
+ * ES5 with no free variables, on purpose: regex mode runs it from its SOURCE inside the vm
+ * sandbox (REGEX_SCAN), fixed strings call it here — one algorithm for both modes.
+ */
+function scanLines(hays, next, W, LEAD, MAX) {
+  var out = [];
+  for (var i = 0; i < hays.length; i++) {
+    var hay = hays[i];
+    var m = hay === null ? null : next(hay, 0);
+    if (!m) { out.push({ offset: 0, ranges: [] }); continue; }
+    var offset = hay.length > W ? Math.min(m[0] > LEAD ? m[0] - LEAD : 0, hay.length - W) : 0;
+    var stop = offset + W;
+    var ranges = [];
+    for (;;) {
+      ranges.push([m[0] - offset, Math.min(m[1], stop) - offset]);
+      if (ranges.length >= MAX) break;
+      m = next(hay, m[1]);
+      if (!m || m[0] >= stop) break;
+    }
+    out.push({ offset: offset, ranges: ranges });
+  }
+  return out;
+}
+
+// Regex mode's half of matchSpans(), run in a fresh vm context under a timeout. The user's
+// pattern is compiled IN there from `src` and `flags`, handed in as data — it never becomes
+// part of any code. With `u` when it compiles that way (`\p{L}`, `.` over a whole emoji: the
+// closer reading of PCRE), without it when it does not (`\-` or a lone `{`, which PCRE takes
+// and `u` refuses). JSON out, so what comes back belongs to this realm, not the sandbox's.
+const REGEX_SCAN = [
+  'var re;',
+  "try { re = new RegExp(src, flags + 'u'); } catch (e) { re = new RegExp(src, flags); }",
+  'function next(hay, from) {',
+  '  re.lastIndex = from;',
+  '  for (var m = re.exec(hay); m; m = re.exec(hay)) {',
+  '    if (m[0].length) return [m.index, m.index + m[0].length];',
+  // Past an empty match by a whole code point: in `u` mode V8 moves a lastIndex that lands
+  // inside a surrogate pair back to the pair's start, so `+ 1` next to an emoji finds the
+  // same empty match forever — until the timeout, which blanks the whole repo's highlights.
+  "    var c = hay.charCodeAt(m.index);",
+  "    re.lastIndex = m.index + (re.unicode && c >= 0xd800 && c <= 0xdbff && m.index + 1 < hay.length ? 2 : 1);",
+  '  }',
+  '  return null;',
+  '}',
+  'JSON.stringify((' + scanLines.toString() + ')(lines, next, W, LEAD, MAX));',
+].join('\n');
+
+/**
+ * matchSpans(lines, query, { caseSensitive, regex }) → [{ offset, ranges }], one per line.
+ *
+ * ONE bounded pass over a repo's matched lines, after git has answered: the window each
+ * long line is cut to, and the highlights inside it. The renderer never runs the user's
+ * pattern at all — it paints these spans — and this process never runs it unbounded.
+ *
+ * Fixed strings are an indexOf loop: linear, nothing to bound. Case-insensitive compares
+ * lowercase with lowercase, which is only index-for-index while lowercasing keeps the
+ * line's length (`İ` becomes two code units); a line where it does not gets no spans.
+ *
+ * A regex runs in a vm context with a GREP_REGEX_MS timeout for the whole repo — V8
+ * interrupts a runaway backtrack there (measured: `(h+)+b` over 40 h's is stopped at ~252 ms
+ * of a 250 ms budget). git matched with PCRE and V8 is not PCRE: `\h` is whitespace to PCRE
+ * and the letter h to V8, so `(\h+)+b`, which git answers in 12 ms, backtracks 2^40 times in V8.
+ * A timeout, or a pattern V8 cannot compile at all, is every line of this repo with no
+ * spans and a window from 0: the lines still show, unhighlighted, and nothing was lost.
+ */
+function matchSpans(lines, query, o) {
+  const plain = () => lines.map(() => ({ offset: 0, ranges: [] }));
+  if (!o.regex) {
+    const needle = o.caseSensitive ? query : query.toLowerCase();
+    if (!needle) return plain();
+    const hays = lines.map((line) => {
+      if (o.caseSensitive) return line;
+      const low = line.toLowerCase();
+      return low.length === line.length ? low : null;
+    });
+    const next = (hay, from) => {
+      const at = hay.indexOf(needle, from);
+      return at === -1 ? null : [at, at + needle.length];
+    };
+    return scanLines(hays, next, GREP_LINE_WINDOW, GREP_LINE_LEAD, GREP_MAX_RANGES);
+  }
+  try {
+    const sandbox = vm.createContext({
+      src: query,
+      flags: 'g' + (o.caseSensitive ? '' : 'i'),
+      lines,
+      W: GREP_LINE_WINDOW,
+      LEAD: GREP_LINE_LEAD,
+      MAX: GREP_MAX_RANGES,
+    });
+    return JSON.parse(vm.runInContext(REGEX_SCAN, sandbox, { timeout: GREP_REGEX_MS }));
+  } catch (err) {
+    // ERR_SCRIPT_EXECUTION_TIMEOUT, or a SyntaxError from a pattern only PCRE reads.
+    return plain();
+  }
+}
+
+/**
+ * grep(dir, query, { caseSensitive, regex, max, timeout })
+ *   → { ok, error, matches: [{ path, line, text, offset, ranges }], truncated }
+ *
+ * Find in files over what is ON DISK — the files lsFiles() lists: tracked, plus untracked
+ * ones .gitignore does not exclude. Never the index, never an unsaved buffer.
+ *   -I                          binary files are skipped (git's test: a NUL in the first 8000 bytes)
+ *   --no-color --no-column      a user's color.grep=always or grep.column=true would reshape the records
+ *   --no-recurse-submodules     a user's submodule.recurse=true makes git refuse --untracked outright
+ *   --max-count                 per file, so one generated file cannot spend the whole budget
+ *   -F | -P, then -e <query> -- the query is always -e's argument, whatever it starts with
+ * `text` is the whole line, or for a line longer than GREP_LINE_WINDOW the window of it
+ * that starts GREP_LINE_LEAD characters before the first match, with `offset` its start
+ * in the full line — a minified bundle's one line is megabytes the renderer cannot show.
+ * `ranges` are the matches inside `text`, [[start, end], …] in UTF-16 indices, at most
+ * GREP_MAX_RANGES — what the renderer highlights, found by matchSpans() under a timeout.
+ *
+ * Exit 1 is "no matches", not a failure. Regex mode is -P, the closest git has to the JS
+ * RegExp matchSpans() highlights with; a git built without PCRE refuses -P ("cannot use
+ * Perl-compatible regexes when not compiled with USE_LIBPCRE") and gets one retry with -E.
+ * Only that refusal: a PCRE that gives up mid-search ("pcre2_match failed … match limit
+ * exceeded") is this repo's error, not a reason to re-read the pattern as POSIX ERE, where
+ * `\d` is the letter d and the answer would be quietly wrong.
+ * A search cut by maxBuffer, the timeout or `max` keeps every complete record before the
+ * cut and says truncated; only the timeout is also an error, since that one is not a cap
+ * the user asked for.
+ */
+async function grep(dir, query, opts) {
+  const o = opts || {};
+  const max = o.max || GREP_MAX_MATCHES;
+  const flags = (mode) => [
+    'grep', '-z', '-n', '-I', '--untracked', '--exclude-standard', '--no-color', '--no-column',
+    '--no-recurse-submodules', '--max-count', String(GREP_MAX_PER_FILE),
+  ].concat(o.caseSensitive ? [] : ['-i'], [mode, '-e', String(query), '--']);
+  const runOpts = { timeout: o.timeout || GREP_TIMEOUT_MS };
+
+  let r = await run(dir, flags(o.regex ? '-P' : '-F'), runOpts);
+  if (o.regex && !r.overflow && !r.timedOut && r.code === 128 &&
+      /not compiled with USE_LIBPCRE|cannot use Perl-compatible/i.test(r.stderr)) {
+    r = await run(dir, flags('-E'), runOpts);
+  }
+  const cut = r.overflow || r.timedOut;
+  // A kill reads as exit 1 too (run() has no number to report), so the kill is tested first.
+  if (!cut && r.code === 1) return { ok: true, error: null, matches: [], truncated: false };
+  if (!cut && r.code !== 0) {
+    return { ok: false, error: sentence(r, 'git could not search ' + path.basename(dir) + '.'), matches: [], truncated: false };
+  }
+  const parsed = grepRecords(r.stdout, max);
+  const spans = matchSpans(parsed.records.map((rec) => rec.text), String(query), o);
+  const matches = parsed.records.map((rec, i) => {
+    const s = spans[i];
+    const text = rec.text.length > GREP_LINE_WINDOW ? rec.text.slice(s.offset, s.offset + GREP_LINE_WINDOW) : rec.text;
+    return { path: rec.path, line: rec.line, text, offset: s.offset, ranges: s.ranges };
+  });
+  const truncated = cut || parsed.full;
+  if (!r.overflow && r.timedOut) {
+    return { ok: false, error: 'Searching ' + path.basename(dir) + ' took too long.', matches, truncated };
+  }
+  return { ok: true, error: null, matches, truncated };
+}
+
+// ---------------------------------------------------------------------------
 // pull main
 // ---------------------------------------------------------------------------
 
@@ -722,6 +1045,11 @@ module.exports = {
   originUrl,
   fetch: fetchRepo,
   lastFetch,
+  // the Editor tab (§4.14, through editor.js)
+  lsFiles,
+  headBlob,
+  grep,
+  GREP_MAX_MATCHES,
   // exported for workspaces.js and for tests
   parseRemoteUrl,
   isMainName,

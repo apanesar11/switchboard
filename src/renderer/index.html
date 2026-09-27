@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8">
 <title>Switchboard</title>
-<!-- xterm's own stylesheet first so styles.css always wins. -->
+<!-- xterm's own stylesheet first so styles.css always wins. Monaco's is not linked
+     here: its loader appends editor.main.css AFTER styles.css on the first Editor
+     open, so there Monaco wins a tie and styles.css scopes its overrides under .ed. -->
 <link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css">
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -76,6 +78,19 @@
 <script src="views/pr.js"></script>
 <!-- After pr.js: the list borrows its gh failure bars. -->
 <script src="views/prs.js"></script>
+<!-- After term-theme.js (Monaco's two themes are built from its palette) and
+     views/workspace.js (the Editor borrows its header).
+
+     Monaco itself is NOT loaded here, and must never get a script tag in this page:
+     views/editor.js injects node_modules/monaco-editor/min/vs/loader.js the first time
+     an Editor tab opens. That loader installs a global AMD `define` with `define.amd`,
+     and the xterm UMD wrappers above test for exactly that BEFORE falling through to
+     their global branch — had it run first, xterm would have registered itself as an
+     anonymous AMD module, window.Terminal and window.FitAddon would never exist, and
+     every Terminal, Logs pane and Grid square would say the terminal did not load.
+     Injected lazily it runs long after them, and costs nothing for a user who never
+     opens the Editor. -->
+<script src="views/editor.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

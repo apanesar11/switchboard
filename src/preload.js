@@ -39,6 +39,27 @@ contextBridge.exposeInMainWorld('sb', {
   fileDiff: (id, repoName, path) => ipcRenderer.invoke('sb:diff:file', id, repoName, path),
   allDiffs: (id, repoName) => ipcRenderer.invoke('sb:diff:all', id, repoName || null),
 
+  // Editor (§4.14) — the Editor tab's files. A file is (id, repoName, path) as for
+  // fileDiff: `repoName` is Repo.name, `path` repo-relative with '/'. Main resolves it and
+  // refuses anything outside the repo or inside .git; none of these ever runs a git write.
+  // codeTree: { ok, repos: [{ name, files, truncated, error }] } — git ls-files, per repo.
+  codeTree: id => ipcRenderer.invoke('sb:code:tree', id),
+  // { ok, text, mtimeMs, size, bom }, or binary / tooLarge / missing instead of text.
+  codeRead: (id, repoName, path) => ipcRenderer.invoke('sb:code:read', id, repoName, path),
+  // Save, in place. `opts`: { mtimeMs, bom, force } — the mtime the file was read at makes
+  // a change on disk since then a { conflict } answer rather than an overwrite; `force`
+  // is the user's Overwrite.
+  codeWrite: (id, repoName, path, text, opts) => ipcRenderer.invoke('sb:code:write', id, repoName, path, text, opts || {}),
+  // The HEAD version the modified-line markers diff against; `oldPath` for a rename.
+  codeBase: (id, repoName, path, oldPath) => ipcRenderer.invoke('sb:code:base', id, repoName, path, oldPath || null),
+  // `files`: [{ repo, path }], at most 200 — how open tabs notice a change on disk.
+  codeStat: (id, files) => ipcRenderer.invoke('sb:code:stat', id, files || []),
+  // Find in files over what is on disk. `opts`: { caseSensitive, regex }.
+  codeSearch: (id, query, opts) => ipcRenderer.invoke('sb:code:search', id, query, opts || {}),
+  // How many open files have unsaved edits, whenever that changes: main asks before a
+  // close or a quit would throw them away (Electron ignores a page's beforeunload).
+  codeDirty: count => ipcRenderer.invoke('sb:code:dirty', count),
+
   // Pull requests
   prSummary: id => ipcRenderer.invoke('sb:pr:summary', id),
   // `opts.fresh` skips main's 60 s cache — ⌘R on the screen.
@@ -96,6 +117,10 @@ contextBridge.exposeInMainWorld('sb', {
   // { visible }.
   sidebar: () => ipcRenderer.invoke('sb:ui:sidebar'),
   setSidebar: visible => ipcRenderer.invoke('sb:ui:setSidebar', !!visible),
+  // What File ▸ Close did when it was the role: close the window. ⌘W now reaches the
+  // renderer first (sb:evt:edit `close`) so the Editor can close a file tab with it;
+  // everywhere else the renderer answers with this.
+  closeWindow: () => ipcRenderer.invoke('sb:ui:closeWindow'),
 
   // The Grid's views — named 2x2 arrangements of workspaces. Both answer { views },
   // and save hands back what main actually kept after cleaning the list.
@@ -118,8 +143,12 @@ contextBridge.exposeInMainWorld('sb', {
   onFocus: cb => subscribe('sb:evt:focus', cb),
   onTermData: cb => subscribe('sb:evt:term', cb),
   onTermState: cb => subscribe('sb:evt:termState', cb),
-  // The Edit menu's Copy / Paste / Select All, which have to be menu items rather
-  // than roles; `paste` arrives with the clipboard text already read in main.
+  // The Edit menu's Undo / Redo / Cut / Copy / Paste / Select All and File ▸ Close,
+  // which have to be menu items rather than roles: { action: 'undo' | 'redo' | 'cut' |
+  // 'copy' | 'paste' | 'selectAll' | 'close', text?, image? }. `paste` arrives with the
+  // clipboard text already read in main; `image: true` when there was no text, only an
+  // image, and `text` is the escaped path of a file main saved it to — for a terminal to
+  // type (Claude Code reads the image from it), and for nothing else to insert.
   onEdit: cb => subscribe('sb:evt:edit', cb),
   // The View menu's Terminal appearance, and a macOS appearance change while the
   // choice is "Match system".

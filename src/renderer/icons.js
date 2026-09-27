@@ -1,7 +1,8 @@
 // SB.icons — the inline SVG strings, lifted verbatim from the approved mock-up's
 // generator (gen.mjs `I`). Every glyph is viewBox="0 0 16 16"; the per-use width/
 // height, stroke-width and linecap are part of the design and must not be changed.
-// These strings are the ONLY markup this app ever feeds to innerHTML.
+// These strings are the ONLY markup this app ever feeds to innerHTML. (Monaco, which
+// the Editor tab loads, builds its own DOM; nothing of ours reaches it as markup.)
 window.SB = window.SB || {};
 
 (function (SB) {
@@ -58,6 +59,28 @@ window.SB = window.SB || {};
   // Page glyph — defined by the mock-up, unused by screens 01-07.
   var file = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 1.75h5.5L13 5.25v9H4z"/><path d="M9.5 1.75v3.5H13"/></svg>';
 
+  // The Editor's full-screen button at the top-right of its tab strip (§4.14): two
+  // corner arrows pointing out, the shape macOS draws for "enter full screen". 14x14 at
+  // 1.4 — the weight of the rail's grid and gauge glyphs, and the arrowheads' short legs
+  // are what keep it from reading as a resize handle.
+  var expand = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2.5h4v4M13.5 2.5L9.25 6.75M6.5 13.5h-4v-4M2.5 13.5l4.25-4.25"/></svg>';
+
+  // Its twin in the full-screen band: the same arrows turned inward. Same box and weight,
+  // so swapping one for the other never moves the eye.
+  var collapse = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 2.5L9.5 6.5M9.5 3v3.5H13M2.5 13.5l4-4M6.5 13V9.5H3"/></svg>';
+
+  // A magnifier: the Editor's Find results tab, the find-in-files field and the Go to
+  // file palette. 13x13 at 1.6, lifted from the Editor mock-ups, which draw it at three
+  // sizes: the tab's 12px and the palette's 14px are set by CSS (styles.css, Editor
+  // section), as are the 10px `chev`/`chevD` of the Editor's tree — the one screen that
+  // sizes these per place rather than per string.
+  var search = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>';
+
+  // ×: an Editor tab's close button, the find row's close and an Editor bar's dismiss.
+  // 12x12 at 1.8 from the Find in files mock-up; a tab draws it at 10px by CSS, in the
+  // 16px slot its unsaved-changes dot uses.
+  var close = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+
   SB.icons = {
     publish: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10V2m-3 3 3-3 3 3M3 10v3h10v-3"/></svg>',
     branch: branch,
@@ -75,6 +98,10 @@ window.SB = window.SB || {};
     grid: grid,
     more: more,
     gauge: gauge,
-    pr: pr
+    pr: pr,
+    expand: expand,
+    collapse: collapse,
+    search: search,
+    close: close
   };
 })(window.SB);

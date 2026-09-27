@@ -23,7 +23,12 @@
 // changed — there is no periodic re-render, and "running 14s" ticks its own text
 // node in views/workspace.js. The logs terminal survives because views/logs.js
 // keeps its live xterm hosts in its own Map and re-parents them into each new
-// body; renderMain() carries the focused element across with them.
+// body; renderMain() carries the focused element across with them. The Editor
+// goes one step further (§6 R13): it hands back the very SAME root element on
+// every call and rebuilds only its header inside it, and renderMain() leaves an
+// element it already mounted exactly where it is — no teardown, no re-parent, so
+// Monaco never sees the blur a move costs (an open suggest widget, an IME
+// composition and the cursor all survive a bell or a window focus).
 window.SB = window.SB || {};
 
 (function (SB) {
@@ -52,14 +57,17 @@ window.SB = window.SB || {};
   // owner/repo/number instead (views/pr.js) since its repo may be cloned nowhere here.
   var VIEWS = { workspace: 1, files: 1, diff: 1, pr: 1, grid: 1, usage: 1, prs: 1 };
   var TABS = {
-    workspace: ['changes', 'logs', 'terminal'],
+    workspace: ['changes', 'logs', 'terminal', 'editor'],
     files: ['files', 'all'], pr: ['overview', 'files', 'all'], diff: [], grid: [], usage: [], prs: []
   };
   var FREE = { grid: 1, usage: 1, prs: 1 };
 
   // Tabs of the workspace route that live in their own file and compose the whole
-  // screen themselves; see buildView(). Anything not listed is views/workspace.js.
-  var TAB_VIEWS = { logs: 'logs', terminal: 'terminal' };
+  // screen themselves — Logs, Terminal and the Editor each borrow the shared header
+  // and own everything below it; see buildView(). Anything not listed is
+  // views/workspace.js. A new tab needs both lines: one missing from TABS.workspace
+  // is rewritten by normalize() to the remembered tab before it is ever looked up.
+  var TAB_VIEWS = { logs: 'logs', terminal: 'terminal', editor: 'editor' };
 
   var PARENT = { diff: 'files', files: 'workspace', pr: 'workspace', workspace: null, grid: null, usage: null, prs: null };
 
@@ -1127,13 +1135,18 @@ window.SB = window.SB || {};
     busy: function () { return railTimer !== null; }
   };
 
+  // The Editor rides along without holding: Monaco's automaticLayout follows the
+  // slide frame by frame (a Monaco layout is cheap and has no pty behind it), so
+  // its relayout() here is only belt and braces for the slide's last frame.
   function settle() {
     railTimer = null;
-    ['terminal', 'logs'].forEach(function (name) {
-      var view = SB.views[name];
-      if (!view || typeof view.relayout !== 'function') return;
-      try { view.relayout(); } catch (err) { console.error('[switchboard] relayout:', err); }
-    });
+    ['terminal', 'logs', 'editor'].forEach(relayoutView);
+  }
+
+  function relayoutView(name) {
+    var view = SB.views[name];
+    if (!view || typeof view.relayout !== 'function') return;
+    try { view.relayout(); } catch (err) { console.error('[switchboard] relayout:', err); }
   }
 
   function railLabel() {
@@ -1169,6 +1182,7 @@ window.SB = window.SB || {};
   }
 
   function toggleRail() {
+    if (editorFull) applyFull(false);                  // see handleSidebar
     var next = !railVisible;
     applyRail(next);                                   // the click has to feel instant
     var a = api();
@@ -1180,8 +1194,16 @@ window.SB = window.SB || {};
     }
   }
 
+  // ⌃⌘S is main's menu item, so it arrives here. With the Editor full screen the
+  // rail is hidden whichever way .norail says, and flipping only the stored value
+  // would be a keystroke that visibly does nothing — so it leaves full screen and
+  // then applies the new choice. Only a real change does: the echo of a click this
+  // window already applied lands on railVisible and must not end a full screen
+  // entered in the round trip since.
   function handleSidebar(st) {
-    if (st && typeof st.visible === 'boolean') applyRail(st.visible);
+    if (!st || typeof st.visible !== 'boolean') return;
+    if (editorFull && st.visible !== railVisible) applyFull(false);
+    applyRail(st.visible);
   }
 
   // The rail's dots are the only place a background workspace's bell shows, so with
@@ -1220,6 +1242,78 @@ window.SB = window.SB || {};
     void win.offsetWidth;
     setTimeout(function () { win.classList.remove('noanim'); }, 0);
   }
+
+  // ── the Editor's full screen ──────────────────────────────────────────────
+
+  // The button at the Editor's top-right corner (§4.9, §6 R13): the rail and the
+  // header go and the editor has the whole window; the same button, or Esc, brings
+  // them back. Like hiding the rail it is a layout change, not a render — one class
+  // on .win, and the stylesheet slides the rail out, hides the header, the .drag
+  // strip and the rail button, and shows the editor's own title band in their place
+  // — so the buffers, the undo stack, the cursor and focus all stay where they are.
+  // A class of its OWN rather than .norail: .norail is the user's stored choice and
+  // owns the View menu's label, and a full screen is neither — leaving it has to put
+  // back exactly the rail the user had, open or closed.
+  //
+  // Never persisted and never part of the route: it belongs to the Editor on screen,
+  // so renderMain() drops it the moment anything else is (⌘1–9 and ⌘0 still work
+  // with the rail gone, and back() moves state.route without passing through go()).
+  // SB.layout.busy() is deliberately left alone: no terminal is on screen while the
+  // Editor is, and Monaco laying itself out on every frame of the slide costs
+  // nothing — there is no pty at the other end of it to resize.
+  var editorFull = false;
+  var fullTimer = null;
+
+  function onEditor() {
+    return state.route.view === 'workspace' && state.route.tab === 'editor' && !!state.route.wsId;
+  }
+
+  // `snap` is for renderMain() alone. Leaving full screen because the user went
+  // somewhere else lands on a screen that may hold a terminal — a Terminal tab, the
+  // Grid's four — and sliding the rail back in over it would fire their
+  // ResizeObservers on every frame of the slide with no busy() to hold them: the
+  // storm §4.9 measured, seven SIGWINCHs into a redrawing TUI. The whole column is
+  // being replaced anyway, so the rail simply snaps back, committed under .noanim
+  // the way railReady() commits the stored state at boot.
+  function applyFull(on, snap) {
+    var want = !!on;
+    var win = document.querySelector('.win');
+    if (!win || want === editorFull) return;
+    if (want && !onEditor()) return;                   // only ever the Editor's
+    editorFull = want;
+    var quiet = !!snap && !win.classList.contains('noanim');
+    if (quiet) win.classList.add('noanim');
+    win.classList.toggle('edfull', want);
+    if (quiet) {
+      void win.offsetWidth;
+      setTimeout(function () { win.classList.remove('noanim'); }, 0);
+    }
+
+    // Focus cannot stay on a rail that is sliding out of the tab order, nor on a rail
+    // button that is display:none. It goes into the editor — Monaco's textarea when a
+    // file is open — and otherwise nowhere, so the Editor's own landing focus decides.
+    // A click on the Editor's button needs none of this: the Editor puts focus back
+    // itself once the button it came from has disappeared (R13).
+    if (want) {
+      var el = document.activeElement;
+      var side = document.getElementById('side');
+      if (el && el !== document.body && ((side && side.contains(el)) || el.id === 'rail')) {
+        var main = document.getElementById('main');
+        var into = main && (main.querySelector('.edhost textarea.inputarea') || main.querySelector('.edhost textarea'));
+        if (into) { try { into.focus({ preventScroll: true }); } catch (e) { into.focus(); } }
+        else if (typeof el.blur === 'function') el.blur();
+      }
+    }
+
+    // Monaco's automaticLayout follows the slide on its own; one relayout() when it
+    // is over is belt and braces for its last frame. Its own timer, not railTimer.
+    if (fullTimer) clearTimeout(fullTimer);
+    fullTimer = setTimeout(function () { fullTimer = null; relayoutView('editor'); }, RAIL_MS);
+  }
+
+  // views/editor.js's button and its Esc go through these; nothing else does.
+  SB.layout.full = function () { return editorFull; };
+  SB.layout.setFull = function (on) { applyFull(!!on); };
 
   // ── main column ───────────────────────────────────────────────────────────
 
@@ -1273,8 +1367,8 @@ window.SB = window.SB || {};
     // Logs is a TAB of the workspace route but lives in its own file, and it
     // composes the whole screen itself — it borrows the shared header from
     // SB.views.workspace.header(ws, state) and owns the .bd.pane below it. So the
-    // logs tab routes straight to logs.js, never to workspace.js. Terminal works
-    // exactly the same way, which is why this is a lookup and not a pair of ifs.
+    // logs tab routes straight to logs.js, never to workspace.js. Terminal and the
+    // Editor work exactly the same way, which is why this is a lookup and not ifs.
     if (name === 'workspace') {
       var own = SB.views[TAB_VIEWS[state.route.tab]];
       if (own && typeof own.render === 'function') view = own;
@@ -1382,6 +1476,12 @@ window.SB = window.SB || {};
     var main = document.getElementById('main');
     if (!main) return;
 
+    // Full screen is the Editor's alone, and this is where it is dropped for the
+    // same reason the bell below is cleared here: every navigation passes through
+    // (⌘1–9 and ⌘0 still work with the rail gone; back() skips go()). Snapped, not
+    // slid — see applyFull().
+    if (editorFull && !onEditor()) applyFull(false, true);
+
     saveScroll();
     // Standing in front of a workspace's Terminal IS reading its bell. Cleared
     // here rather than in go() because renderMain is the one choke point every
@@ -1400,6 +1500,13 @@ window.SB = window.SB || {};
     var path = focusPath(main);
     var key = routeKey(state.route);
     var node = buildView();
+    // An Editor route that did not come back as the Editor — its view crashed, the
+    // workspace went — must not keep the rail and header hidden over whatever did.
+    // Every one of those stand-ins is screen()'s fragment; the Editor's root never is.
+    if (editorFull && (!node || node.nodeType !== 1)) applyFull(false, true);
+    // views/editor.js returns the element that is already mounted (§6 R13). Leaving
+    // it in place is the whole point: no d.clear(), so nothing inside it is detached,
+    // blurred and refocused, and Monaco keeps its widgets, its composition and focus.
     var reuse = !!node && node === mounted.node && node.parentNode === main;
 
     if (!reuse) {
@@ -1592,8 +1699,13 @@ window.SB = window.SB || {};
 
   // The Edit menu's Copy / Paste / Select All are custom items rather than roles,
   // because an accelerator wins over the renderer's keydown and xterm's selection
-  // is not a DOM selection (ARCHITECTURE §4.7). The focused terminal gets first
-  // refusal; everything else falls through to the document.
+  // is not a DOM selection (ARCHITECTURE §4.7). Undo / Redo / Cut joined them with
+  // the Editor, and File ▸ Close (⌘W) with them: the native roles run Chromium's
+  // editing command on the focused element, which Monaco ignores — measured, ⌘Z
+  // did nothing at all, or undid one character of its hidden textarea rather than
+  // Monaco's own undo stack — and role:'close' shut the whole window on the ⌘W
+  // Sublime's muscle memory sends to close a tab. First refusal goes to the focused
+  // terminal, then to the Editor, and everything else falls through to the document.
   //
   // That fallback is a real behaviour change for the WHOLE app, not just the
   // Terminal tab: ⌘C over a diff now goes through document.execCommand('copy')
@@ -1605,6 +1717,19 @@ window.SB = window.SB || {};
     var done = term && typeof term.editAction === 'function'
       ? term.editAction(e.action, e.text) : false;
     if (done) return;
+    // A pasted screenshot arrives as the escaped path of a PNG main saved it to (§4.7):
+    // that is for a terminal, whose Claude Code reads the image from it. Typed into a
+    // source file, the Editor's ⌘P / ⇧⌘F fields or the Grid's name field it is only junk,
+    // so once the terminal has declined it nothing else gets the chance.
+    if (e.action === 'paste' && e.image) return;
+    // A throw is a refusal: the document fallback below still gets its turn, so a
+    // broken Editor cannot take ⌘C and ⌘V away from the rest of the app.
+    var ed = SB.views.editor;
+    if (ed && typeof ed.editAction === 'function') {
+      try {
+        if (ed.editAction(e.action, e.text)) return;
+      } catch (err) { console.error('[switchboard] editor edit:', err); }
+    }
     try {
       // NOT document.execCommand('copy'): Chromium refuses it without a user gesture,
       // and arriving here from an IPC event is not one. It failed SILENTLY — a 337-
@@ -1617,10 +1742,40 @@ window.SB = window.SB || {};
         if (text) Promise.resolve(window.sb.writeClipboard(text))['catch'](function () {});
       } else if (e.action === 'selectAll') {
         document.execCommand('selectAll');
+      } else if (e.action === 'undo' || e.action === 'redo') {
+        // What the roles did, and the one thing they were good at: a text field's own
+        // undo — the Grid's name field. Anywhere else it is a no-op, as it was.
+        document.execCommand(e.action);
+      } else if (e.action === 'cut') {
+        // Copy the selected part of a field through main (the same gesture problem
+        // as Copy), then delete it as an edit, so the field's undo can bring it back.
+        var field = fieldIn(document.activeElement);
+        if (field && typeof field.selectionStart === 'number' && field.selectionEnd > field.selectionStart) {
+          var cut = field.value.slice(field.selectionStart, field.selectionEnd);
+          Promise.resolve(window.sb.writeClipboard(cut))['catch'](function () {});
+          document.execCommand('delete');
+        }
+      } else if (e.action === 'paste') {
+        // There ARE text inputs now — the Grid's name field, and the Editor's own
+        // fields when it declines — and the menu's ⌘V never lets a keystroke reach
+        // them. Chromium refuses document.execCommand('paste'), but main has already
+        // read the clipboard into e.text, and insertText types it at the caret as an
+        // edit: the field's input event fires and its undo can take it back.
+        if (fieldIn(document.activeElement) && typeof e.text === 'string' && e.text) {
+          document.execCommand('insertText', false, e.text);
+        }
+      } else if (e.action === 'close') {
+        // ⌘W anywhere the Editor did not take it closes the window, exactly as the old
+        // File ▸ Close role did — through win.close(), so the bounds are saved, a
+        // pending publish installs, and unsaved Editor buffers are asked about (§4.14).
+        var a = api();
+        if (a && typeof a.closeWindow === 'function') Promise.resolve(a.closeWindow())['catch'](noop);
       }
-      // 'paste' has nowhere to go outside the terminal: Switchboard has no text
-      // inputs, and Chromium refuses document.execCommand('paste') anyway.
     } catch (err) { /* the document refused; there is nothing else to try */ }
+  }
+
+  function fieldIn(el) {
+    return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? el : null;
   }
 
   function handleLinks(wsId, links) {
@@ -1657,6 +1812,14 @@ window.SB = window.SB || {};
     if (state.route.view === 'prs' && prs && typeof prs.refresh === 'function') prs.refresh(wantFetch);
     var pr = SB.views.pr;
     if (state.route.view === 'pr' && pr && typeof pr.refresh === 'function' && (wantFetch || !state.route.wsId)) pr.refresh(wantFetch);
+    // The Editor has no watcher (§4.14): coming back to the window is when a file
+    // changed behind its back — a formatter, a `git checkout`, Claude — so it re-lists
+    // the tree, re-stats its open tabs and re-reads their HEAD versions now. In place,
+    // never through a render, and behind the same storm guard as everything above.
+    var ed = SB.views.editor;
+    if (onEditor() && ed && typeof ed.refresh === 'function') {
+      try { ed.refresh(wantFetch); } catch (err) { console.error('[switchboard] editor refresh:', err); }
+    }
     var a = api();
     if (a) Promise.resolve(a.runStates()).then(adoptRunStates, noop);
   }
@@ -1693,8 +1856,19 @@ window.SB = window.SB || {};
 
   function shortcuts() {
     window.addEventListener('keydown', function (e) {
+      // The Editor first, before Esc means back: ⌘S, ⌘P and ⇧⌘F are its own (no
+      // menu accelerator takes them and Monaco binds none, so they bubble here), and
+      // its Esc closes the palette or leaves full screen before it is ever a step
+      // back. It answers false for everything else, and off its own tab for all of it.
+      var ed = SB.views.editor;
+      if (ed && typeof ed.onKey === 'function') {
+        var used = false;
+        try { used = ed.onKey(e); } catch (err) { console.error('[switchboard] editor key:', err); }
+        if (used) { e.preventDefault(); return; }
+      }
       if (e.key === 'Escape') {
-        if (typing(e.target)) return;                      // the composer and the terminal keep Esc
+        // The composer, the terminal and Monaco (a textarea too) keep Esc.
+        if (typing(e.target)) return;
         if (back()) e.preventDefault();
         return;
       }

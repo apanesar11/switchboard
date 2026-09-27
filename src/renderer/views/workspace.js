@@ -1,9 +1,10 @@
-// SB.views.workspace — the Changes tab, and the header that Logs shares.
+// SB.views.workspace — the Changes tab, and the header the other tabs share.
 //
 //   SB.views.workspace.render(state) -> the whole <main> column for
 //     {view:'workspace', wsId, tab:'changes'}
-//   SB.views.workspace.header(ws, state) -> the fixed .hd block; views/logs.js
-//     calls this so both tabs carry exactly the same title, sub line and buttons.
+//   SB.views.workspace.header(ws, state) -> the fixed .hd block; views/logs.js,
+//     views/terminal.js and views/editor.js call this so every tab carries exactly
+//     the same title, sub line, buttons and Changes | Logs | Terminal | Editor.
 //
 // One repo is ONE row: name, branch pill, a refresh when it sits on main, and
 // then EITHER the summary button OR one short state phrase — never both. When the
@@ -227,11 +228,11 @@ SB.views = SB.views || {};
     return box;
   }
 
-  // The three tabs that compose themselves from this header — views/logs.js and
-  // views/terminal.js each borrow it and own the .bd below. A whitelist rather
-  // than a logs/else test: with three tabs an else would print `Changes` selected
-  // while the Terminal is on screen.
-  var HEADER_TABS = { changes: 1, logs: 1, terminal: 1 };
+  // The four tabs that compose themselves from this header — views/logs.js,
+  // views/terminal.js and views/editor.js each borrow it and own what is below
+  // it. A whitelist rather than a logs/else test: with more than two tabs an else
+  // would print `Changes` selected while the Terminal or the Editor is on screen.
+  var HEADER_TABS = { changes: 1, logs: 1, terminal: 1, editor: 1 };
 
   function header(ws, state) {
     var run = runOf(state, ws.id);
@@ -252,7 +253,7 @@ SB.views = SB.views || {};
       subLine(ws, state, run),
       segmented(
         [{ key: 'changes', label: 'Changes' }, { key: 'logs', label: 'Logs' },
-          { key: 'terminal', label: 'Terminal' }],
+          { key: 'terminal', label: 'Terminal' }, { key: 'editor', label: 'Editor' }],
         tab,
         function (key) { go({ view: 'workspace', wsId: ws.id, tab: key }); }
       ));

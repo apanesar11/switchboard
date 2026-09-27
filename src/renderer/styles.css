@@ -852,3 +852,348 @@ aside .empty p{font-size:var(--fs-xs)}
 .md summary:hover{color:var(--ink)}
 .md details[open] > summary{margin-bottom:6px}
 .md .imgalt{color:var(--sec)}
+
+/* ── the Editor (views/editor.js, §4.14) ─────────────────────────────────────
+   The Editor tab's slab: a file tree, a tab strip, Monaco, a status bar, and the
+   ⌘P / ⇧⌘F surfaces over it — reproduced from the approved Editor mock-ups. It is
+   the terminal's slab (same background token, same 4px drop and radius) and follows
+   View > Terminal appearance the same way: dark is the UNSCOPED default and light
+   hangs off :root[data-term-theme="light"], because that attribute does not exist
+   until term-theme.js's first set() and a window that never hears from main must
+   still look like it always did. The chrome gets tokens of its own (prefixed ed-)
+   rather than borrowing term-bg and friends: term-theme.js writes those as inline
+   styles on <html>, which no rule here could override per theme.
+
+   Monaco's own stylesheet (editor.main.css) is injected at runtime AFTER this one,
+   so it wins every specificity tie: every rule that reaches into Monaco is scoped
+   `.ed .monaco-editor …` to outrank it. Everything else is ours and named ed-. */
+:root{
+  --ed-side:#202023;                      /* tree, tabs, status bar, full-screen band */
+  --ed-line:rgba(255,255,255,.07);        /* hairlines between them */
+  --ed-fg:#d4d4d8;                        /* folders, repo rows, bar text */
+  --ed-fg-2:#b4b4ba;                      /* file rows, result text */
+  --ed-fg-3:#9a9aa0;                      /* inactive tabs, toggles */
+  --ed-hi:#f2f2f5;                        /* the active tab, row and typed text */
+  --ed-chev:#76767c;
+  --ed-hover:rgba(255,255,255,.045);
+  --ed-on:rgba(255,255,255,.09);          /* the open file's row, the palette's pick */
+  --ed-press:rgba(255,255,255,.1);        /* a toggle that is on */
+  --ed-ring:rgba(124,183,255,.55);        /* keyboard focus inside the slab */
+  --ed-sel:rgba(124,183,255,.32);         /* selected text in the slab's own fields */
+  --ed-M:#f0c674; --ed-A:#8ad07e; --ed-D:#ff8a80; --ed-R:#c99cff;
+  --ed-dirty:#f0c674;
+  --ed-pal:#2a2a2e; --ed-pal-edge:rgba(255,255,255,.12); --ed-pal-rule:rgba(255,255,255,.08);
+  --ed-pal-sh:0 18px 50px rgba(0,0,0,.55);
+  --ed-match:#f0c674;
+  --ed-kb:rgba(255,255,255,.08);
+  --ed-find:#1f1f22;
+  --ed-field:rgba(255,255,255,.07); --ed-field-edge:rgba(255,255,255,.12);
+  --ed-hl:rgba(240,198,116,.22);
+  --ed-gut:#5a5a60;
+  --ed-thumb:rgba(255,255,255,.2);
+  --ed-bar-bg:#2a2a2e;           --ed-bar-fg:#d4d4d8;
+  --ed-warn-bg:rgba(240,198,116,.13); --ed-warn-fg:#f0c674;
+  --ed-err-bg:rgba(255,138,128,.13);  --ed-err-fg:#ff8a80;
+  --ed-btn:rgba(255,255,255,.08); --ed-btn-edge:rgba(255,255,255,.12); --ed-btn-hover:rgba(255,255,255,.14);
+  --ed-pri:#d4d4d8; --ed-pri-fg:#1c1c1e; --ed-pri-hover:#f2f2f5;
+}
+:root[data-term-theme="light"]{
+  --ed-side:#efeff2;
+  --ed-line:rgba(0,0,0,.08);
+  --ed-fg:#1d1d1f;
+  --ed-fg-2:#3a3a3c;
+  --ed-fg-3:#6f6f78;
+  --ed-hi:#1d1d1f;
+  --ed-chev:#86868b;
+  --ed-hover:rgba(0,0,0,.04);
+  --ed-on:rgba(0,0,0,.07);
+  --ed-press:rgba(0,0,0,.08);
+  --ed-ring:rgba(9,105,218,.45);
+  --ed-sel:#b9d5f7;
+  --ed-M:#b7791f; --ed-A:#1a7f37; --ed-D:#cf222e; --ed-R:#8250df;
+  --ed-dirty:#f0a020;
+  --ed-pal:#fff; --ed-pal-edge:rgba(0,0,0,.1); --ed-pal-rule:rgba(0,0,0,.07);
+  --ed-pal-sh:0 18px 50px rgba(0,0,0,.16),0 1px 3px rgba(0,0,0,.08);
+  --ed-match:#8a6100;
+  --ed-kb:rgba(0,0,0,.06);
+  --ed-find:#f2f2f5;
+  --ed-field:#fff; --ed-field-edge:rgba(0,0,0,.13);
+  --ed-hl:rgba(240,160,32,.28);
+  --ed-gut:#9a9aa0;
+  --ed-thumb:rgba(0,0,0,.2);
+  --ed-bar-bg:var(--info-bg);    --ed-bar-fg:var(--info-fg);
+  --ed-warn-bg:var(--warn-bg);   --ed-warn-fg:var(--warn-fg);
+  --ed-err-bg:var(--err-bg);     --ed-err-fg:var(--err-fg);
+  --ed-btn:rgba(255,255,255,.7); --ed-btn-edge:rgba(0,0,0,.1); --ed-btn-hover:#fff;
+  --ed-pri:#1d1d1f; --ed-pri-fg:#fff; --ed-pri-hover:#333336;
+}
+
+/* The slab. color-scheme follows the appearance so the native bits inside it — the
+   fields' carets and autofill, a scrollbar Monaco does not draw — are dark on dark. */
+.ed{
+  position:relative;flex:1;min-height:0;display:flex;flex-direction:column;
+  margin-top:4px;border-radius:var(--r-card);overflow:hidden;
+  background:var(--term-bg);color:var(--ed-fg);font:var(--fs-sm)/1.3 var(--ui);
+  color-scheme:dark;
+}
+/* The light edge is a shadow, as on .term: the same slab, the same reason. */
+:root[data-term-theme="light"] .ed{box-shadow:inset 0 0 0 1px var(--line);color-scheme:light}
+/* The body never scrolls; the tree, the results and Monaco scroll inside it. */
+.ed input{-webkit-user-select:text;user-select:text}
+/* The app's ::selection is a light blue made for dark text on paper; under the dark
+   slab's near-white field text (⇧⌘F, ⌘P, Monaco's find box) it read at about 1.3:1.
+   Each field keeps its own text colour; only the wash behind it is the slab's. */
+.ed ::selection{background:var(--ed-sel)}
+.ed.sizing,.ed.sizing *{cursor:col-resize!important;-webkit-user-select:none;user-select:none}
+.edmain{flex:1;min-height:0;display:flex;position:relative}
+
+/* the file tree — one focusable element with a roving row (the .cur one) */
+.edtree{
+  width:216px;flex:none;position:relative;overflow-y:auto;overflow-x:hidden;
+  background:var(--ed-side);border-right:1px solid var(--ed-line);
+  padding:0 0 10px;scroll-padding-top:36px;
+  scrollbar-width:thin;scrollbar-color:var(--ed-thumb) transparent;
+}
+/* No 2px ring round the whole column: the row under the keyboard gets a quiet one
+   instead, and only while the keyboard is what brought focus here or moved it —
+   :focus-visible for a Tab in (Chromium does not match it on a click into a tabindex
+   div), .kbd for arrows after a click (set by views/editor.js on keydown, dropped on
+   mousedown). */
+.edtree:focus-visible{outline:none}
+.edtree:focus-visible .edrow.cur,.edtree.kbd:focus .edrow.cur{box-shadow:inset 0 0 0 1px var(--ed-ring)}
+.edth{
+  position:sticky;top:0;z-index:1;padding:14px 14px 8px;background:var(--ed-side);
+  font-size:var(--fs-micro);font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--t-dim);
+}
+.edrow{
+  display:flex;align-items:center;gap:5px;height:24px;padding-right:10px;
+  color:var(--ed-fg-2);white-space:nowrap;
+}
+.edrow.d{color:var(--ed-fg)}
+.edrow.top .nm{font-weight:500}
+.edrow[data-i]:hover{background:var(--ed-hover)}
+.edrow.on,.edrow.on:hover{background:var(--ed-on);color:var(--ed-hi)}
+.edrow .cv{width:12px;flex:none;display:inline-flex;color:var(--ed-chev)}
+.edrow .cv svg{width:10px;height:10px}
+.edrow .nm{min-width:0;overflow:hidden;text-overflow:ellipsis}
+/* the scan's letter for a changed file, and the dot on a folder holding one */
+.edrow .mk{margin-left:auto;padding-left:8px;flex:none;font-size:var(--fs-micro);font-weight:600;color:var(--ed-M)}
+.edrow .mk.A{color:var(--ed-A)}
+.edrow .mk.D{color:var(--ed-D)}
+.edrow .mk.R{color:var(--ed-R)}
+.edrow .mk.dot{width:6px;height:6px;padding:0;margin-right:2px;border-radius:50%;background:var(--ed-M)}
+.edrow.note{color:var(--t-dim);padding-left:14px}
+.edtry{padding:6px 14px}
+.edtree::-webkit-scrollbar-thumb,.edres::-webkit-scrollbar-thumb,.edpl::-webkit-scrollbar-thumb{
+  background:var(--ed-thumb);background-clip:content-box}
+
+/* The 5px grip on the tree's right edge, hairline included. A negative margin, so it
+   takes no pixel from either column — and wholly on the tree's side: Monaco's host
+   stacks above it (.edhost), so any part over the code column would be out of reach. */
+.edsash{width:5px;flex:none;margin:0 0 0 -5px;position:relative;z-index:2;cursor:col-resize;
+  transition:background .1s linear .15s}
+.edsash:hover,.ed.sizing .edsash{background:var(--ed-ring)}
+
+.edcode{flex:1;min-width:0;display:flex;flex-direction:column;position:relative}
+
+/* The tab strip. 35px with its hairline drawn as an inset shadow, so the active tab
+   (35px, the slab's colour) paints over it and joins the code below, as drawn. The
+   list grows to fill the strip — it is the spacer before the full-screen button — and
+   scrolls sideways with no scrollbar of its own: a classic one would take 9px out of
+   a 34px strip, and the wheel is mapped across by views/editor.js. */
+.edtabs{display:flex;align-items:flex-start;height:35px;flex:none;
+  background:var(--ed-side);box-shadow:inset 0 -1px 0 var(--ed-line)}
+.edtl{display:flex;height:35px;flex:1 1 auto;min-width:0;position:relative;
+  overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.edtl::-webkit-scrollbar{display:none}
+.edtab{
+  display:flex;align-items:center;gap:6px;height:34px;flex:none;max-width:280px;
+  padding:0 7px 0 14px;border-right:1px solid var(--ed-line);
+  color:var(--ed-fg-3);font-size:var(--fs-sm);white-space:nowrap;
+}
+.edtab:hover{color:var(--ed-fg)}
+.edtab.on{height:35px;background:var(--term-bg);color:var(--ed-hi)}
+.edtab .nm{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.edtab .sfx{flex:none;color:var(--t-dim)}
+.edtab.gone .nm{text-decoration:line-through;opacity:.55}
+.edtab > .ic{color:var(--ed-fg-3)}
+.edtab.on > .ic{color:var(--ed-fg)}
+.edtab > .ic svg{width:12px;height:12px}
+/* One 16px slot: the amber dot while there are unsaved edits, the × on hover. */
+.edtab .edx{display:inline-flex;align-items:center;justify-content:center;flex:none;
+  width:16px;height:16px;border-radius:var(--r-sm);color:var(--ed-fg-3)}
+.edtab .edx .ic,.edtab .edx .dd{display:none}
+.edtab .edx svg{width:10px;height:10px}
+.edtab .edx .dd{width:7px;height:7px;border-radius:50%;background:var(--ed-dirty)}
+.edtab.dirty .edx .dd{display:block}
+.edtab:hover .edx .ic{display:inline-flex}
+.edtab:hover .edx .dd{display:none}
+.edtab .edx:hover{background:var(--ed-press);color:var(--ed-hi)}
+
+/* The full-screen button: the quiet .ib.dots look, in the slab's colours. */
+.ed .ib.edfull{width:26px;height:26px;border-color:transparent;background:transparent;color:var(--t-dim)}
+.ed .ib.edfull:hover{background:var(--ed-press);color:var(--ed-fg)}
+.ed .ib.edfull:active{background:var(--ed-on)}
+.edtabs .edfull{align-self:center;margin:0 5px 0 6px}
+
+/* The Editor's own one-line bar, inside the slab (never the app's .bar). */
+.edbar{display:flex;align-items:center;gap:8px;flex:none;min-height:36px;padding:5px 8px 5px 14px;
+  background:var(--ed-bar-bg);color:var(--ed-bar-fg);border-bottom:1px solid var(--ed-line);font-size:var(--fs-sm)}
+.edbar.warn{background:var(--ed-warn-bg);color:var(--ed-warn-fg)}
+.edbar.err{background:var(--ed-err-bg);color:var(--ed-err-fg)}
+.edbm{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.edbtn{display:inline-flex;align-items:center;height:24px;padding:0 10px;flex:none;
+  border-radius:var(--r-seg);border:1px solid var(--ed-btn-edge);background:var(--ed-btn);
+  color:var(--ed-fg);font-size:var(--fs-xs);font-weight:500;white-space:nowrap}
+.edbtn:hover{background:var(--ed-btn-hover)}
+.edbtn.pri{background:var(--ed-pri);border-color:transparent;color:var(--ed-pri-fg)}
+.edbtn.pri:hover{background:var(--ed-pri-hover)}
+.edbtn:focus-visible{border-radius:var(--r-seg)}
+.edbar .edx,.edfrow .edx{display:inline-flex;align-items:center;justify-content:center;flex:none;
+  width:24px;height:24px;border-radius:5px;color:var(--ed-fg-3)}
+.edbar .edx:hover,.edfrow .edx:hover{background:var(--ed-press);color:var(--ed-hi)}
+
+/* Monaco's host. Its own stacking context, so Monaco's z-indexes stay inside it, at 3:
+   above the sash (2) and the tree's sticky heading (1), so a suggest list or context
+   menu that spills over the tree paints over both and takes their clicks, and below
+   the palette (30, an overlay of the slab), which always sits on top of them. */
+.edhost{flex:1;min-height:0;position:relative;z-index:3;isolation:isolate}
+.edmonaco{position:absolute;inset:0}
+.edhost.blank .edmonaco{visibility:hidden}
+.edph{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+  padding:18px 22px;text-align:center;color:var(--t-dim);font:var(--fs-base)/var(--lh) var(--ui)}
+.edhost.blank .edph{display:flex}
+.edph .stack{display:flex;flex-direction:column;align-items:center;gap:12px;max-width:52ch}
+
+/* the status bar */
+.edstatus{display:flex;align-items:center;gap:14px;height:26px;flex:none;padding:0 14px;
+  background:var(--ed-side);border-top:1px solid var(--ed-line);
+  font-size:var(--fs-pill);color:var(--t-dim);white-space:nowrap}
+.edsl{display:flex;gap:14px;min-width:0;overflow:hidden}
+.edsr{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+
+/* Find results — the pseudo-tab's panel stands where Monaco does. */
+.edfind{display:none;flex:1;min-height:0;flex-direction:column}
+.edcode.findon .edfind{display:flex}
+.edcode.findon .edhost{display:none}
+.edfrow{display:flex;align-items:center;gap:8px;height:42px;flex:none;padding:0 10px 0 14px;
+  background:var(--ed-find);border-bottom:1px solid var(--ed-line);font-size:var(--fs-sm)}
+.edfld{display:flex;align-items:center;gap:8px;flex:0 1 360px;min-width:140px;height:28px;padding:0 10px;
+  border-radius:var(--r-seg);background:var(--ed-field);border:1px solid var(--ed-field-edge);color:var(--t-dim)}
+.edfld:focus-within{border-color:var(--ed-ring)}
+.edfld input{flex:1;min-width:0;height:100%;border:0;outline:none;background:none;
+  color:var(--ed-hi);font:var(--fs-sm) var(--mono)}
+.edfld input::placeholder{color:var(--t-dim);font-family:var(--ui)}
+.edtg{height:24px;padding:0 8px;flex:none;border-radius:5px;border:1px solid transparent;
+  font:var(--fs-pill) var(--mono);color:var(--ed-fg-3)}
+.edtg:hover{background:var(--ed-hover);color:var(--ed-fg)}
+.edtg.on,.edtg.on:hover{background:var(--ed-press);color:var(--ed-hi)}
+.edcnt{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--t-dim)}
+.edres{flex:1;min-height:0;overflow:auto;position:relative;padding:8px 0;
+  font:var(--fs-sm)/22px var(--mono);scrollbar-width:thin;scrollbar-color:var(--ed-thumb) transparent}
+.edfh{display:flex;align-items:center;gap:6px;height:28px;margin-top:8px;padding:0 22px;
+  color:var(--ed-hi);font:var(--fs-sm) var(--ui);white-space:nowrap}
+.edfh:first-child{margin-top:0}
+.edfh .dir{color:var(--t-dim)}
+.edfh .n{margin-left:auto;padding-left:12px;flex:none;color:var(--t-dim);font-size:var(--fs-pill)}
+.edfh:hover .base{text-decoration:underline}
+.edrl{display:flex;height:22px}
+.edrl:hover{background:var(--ed-hover)}
+.edrl.cur,.edrl.cur:hover{background:var(--ed-on)}
+.edrl .g{width:58px;flex:none;padding-right:18px;text-align:right;color:var(--ed-gut)}
+.edrl .t{min-width:0;padding-right:22px;overflow:hidden;text-overflow:ellipsis;white-space:pre;color:var(--ed-fg-2)}
+.edrl .hl{border-radius:2px;background:var(--ed-hl);color:var(--ed-hi)}
+
+/* Go to file (⌘P): an overlay of the slab, above Monaco's host (see .edhost). */
+.edpal{position:absolute;left:50%;top:48px;z-index:30;transform:translateX(-50%);
+  width:600px;max-width:calc(100% - 40px);max-height:calc(100% - 72px);display:flex;flex-direction:column;
+  background:var(--ed-pal);border:1px solid var(--ed-pal-edge);border-radius:var(--r-card);
+  box-shadow:var(--ed-pal-sh);font-size:var(--fs-base);overflow:hidden;-webkit-app-region:no-drag}
+.edpin{display:flex;align-items:center;gap:10px;height:44px;flex:none;padding:0 14px;
+  border-bottom:1px solid var(--ed-pal-rule);color:var(--t-dim)}
+.edpin svg{width:14px;height:14px}
+.edpin input{flex:1;min-width:0;height:100%;border:0;outline:none;background:none;
+  color:var(--ed-hi);font:14px var(--ui)}
+.edpin input::placeholder{color:var(--t-dim)}
+.edpl{flex:0 1 auto;min-height:0;overflow-y:auto;position:relative;padding:6px 0;
+  scrollbar-width:thin;scrollbar-color:var(--ed-thumb) transparent}
+.edpr{display:flex;align-items:center;gap:10px;height:34px;padding:0 14px;color:var(--ed-fg-2)}
+.edpr.on{background:var(--ed-on);color:var(--ed-hi)}
+.edpr .nm{flex:none;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:var(--fs-sm) var(--mono)}
+.edpr .nm b{font-weight:600;color:var(--ed-match)}
+.edpr .dr{margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:var(--fs-xs);color:var(--t-dim)}
+.edpn{padding:8px 14px;color:var(--t-dim)}
+.edpft{display:flex;align-items:center;gap:16px;height:30px;flex:none;padding:0 14px;
+  border-top:1px solid var(--ed-pal-rule);font-size:var(--fs-pill);color:var(--t-dim);white-space:nowrap}
+.edpft .r{margin-left:auto}
+.edpft .kb{display:inline-block;margin-right:4px;padding:0 5px;border-radius:var(--r-code);
+  background:var(--ed-kb);color:var(--ed-fg-2);font-size:var(--fs-micro);line-height:17px}
+
+/* ── Monaco under this app's global rules ──
+   The modified-line bars (the mock-up's 3px strips, flush with the slab's left edge,
+   2px short of each line top and bottom). Monaco writes each marker's left and width
+   inline, hence the !important. Colours are the diff bar's own: --blk-g added,
+   --chg modified, --blk-r a deletion's small triangle on the line after it. */
+.ed .monaco-editor .margin-view-overlays .cldr.edmk{left:0!important;width:3px!important;
+  top:2px;bottom:2px;height:auto;border-radius:0 2px 2px 0}
+.ed .monaco-editor .margin-view-overlays .cldr.edmk-a{background:var(--blk-g)}
+.ed .monaco-editor .margin-view-overlays .cldr.edmk-m{background:var(--chg)}
+.ed .monaco-editor .margin-view-overlays .cldr.edmk-d{width:0!important;top:-4px;bottom:auto;height:0;
+  border-style:solid;border-width:4px 0 4px 5px;border-color:transparent transparent transparent var(--blk-r);
+  border-radius:0}
+/* The app's `.empty` (the centred empty state) has a namesake in Monaco: an empty
+   find/replace field carries it. Without this, the find widget's placeholder would
+   sit centred in its box. */
+.ed .monaco-editor .empty{text-align:inherit;color:inherit}
+/* body is user-select:none; the find widget's fields must still select. */
+.ed .monaco-editor textarea,.ed .monaco-editor input{-webkit-user-select:text;user-select:text}
+/* fixedOverflowWidgets: the suggest list and its details are position:fixed and sized
+   against the WINDOW, so in a short one they open upward over the header (or, in full
+   screen, the band) — both drag regions, where a click on a suggestion moved the
+   window instead. A box cuts no hole in a drag region unless it declares one, so each
+   widget declares no-drag; it is later in the document than both, so its hole wins.
+   On the widgets, not their size-less containers. */
+.ed .monaco-editor .overflowingContentWidgets > *,
+.ed .monaco-editor .overflowingOverlayWidgets > *{-webkit-app-region:no-drag}
+
+/* ── Editor full screen (.edfull on .win — app.js, SB.layout.setFull) ──
+   The rail leaves exactly as .norail's does (the same slide, the same late
+   visibility:hidden that takes its rows out of the tab order), but this is NOT
+   .norail: that one is persisted and owns the View menu's label, and this is a
+   moment's state that app.js drops the instant the route leaves the Editor. The
+   header goes too, and with it the column's only drag region — so the slab grows a
+   band of its own at the top: the traffic lights' 78px, the workspace, and the way
+   back. .drag and #rail go, not merely under the band: .drag comes AFTER <main> in
+   the document, so while shown it would cover the band's button and turn its clicks
+   into window drags (the region-order trap, index.html). The band's button is inside
+   the band, so its no-drag hole is punched after the band's drag region is added. */
+.win.edfull aside{margin-left:calc(var(--rail) * -1);visibility:hidden;
+  transition:margin-left var(--rail-ms) var(--ease),visibility 0s linear var(--rail-ms)}
+.win.edfull main,.win.norail.edfull main{padding-top:0}
+.win.edfull .drag,.win.edfull #rail{display:none}
+.win.edfull .edview > .hd{display:none}
+.win.edfull .edbd{padding:0}
+.win.edfull .ed{margin:0;border-radius:0;box-shadow:none}
+/* The app's notice (app.js applyNotice puts it first in .bd, above the slab) drops to
+   the foot of the window: at the top it sat under the traffic lights and pushed the
+   band — the only drag region left — down. `order` moves only where it paints, so its
+   "never two bars" check, which reads the DOM's first child, is unchanged. */
+.win.edfull .edbd > .bar{order:1;margin:0;border-radius:0}
+.win.edfull .edtabs .edfull{display:none}
+.win.edfull .edband{display:flex}
+.win.noanim.edfull aside{transition:none}
+@media (prefers-reduced-motion:reduce){
+  .win.edfull aside{transition:none}
+}
+/* 38px, content centred on y=24 — the traffic lights' own centre with
+   trafficLightPosition {x:18,y:18}, which is where .rail sits with the rail closed. */
+.edband{display:none;align-items:center;gap:10px;height:var(--titlebar);flex:none;padding:10px 8px 0 0;
+  background:var(--ed-side);border-bottom:1px solid var(--ed-line);
+  font-size:var(--fs-xs);color:var(--t-dim);-webkit-app-region:drag}
+.edgap{width:68px;flex:none}          /* plus the 10px gap: clear of the lights, which end at x=70 */
+.edbt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.edbell{display:none;width:7px;height:7px;flex:none;border-radius:50%;background:var(--link)}
+.edbell.on{display:inline-block}
+.edband .edfull{-webkit-app-region:no-drag}

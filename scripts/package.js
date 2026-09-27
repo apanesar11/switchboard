@@ -50,7 +50,13 @@ async function packageApp(options = {}) {
     // tmux reads switchboard.tmux.conf itself, outside Electron's virtual FS.
     // Keep real files so it and node-pty can use their bundled resources directly.
     asar: false,
-    ignore: [/^\/dist(?:\/|$)/],
+    ignore: [
+      /^\/dist(?:\/|$)/,
+      // monaco-editor ships ~100 MB (dev/, esm/, min/); the Editor tab loads only min/vs through its AMD loader.
+      /^\/node_modules\/monaco-editor\/(?!min(?:\/|$)|package\.json$|LICENSE$|ThirdPartyNotices\.txt$)/,
+      // Legacy per-language worker entry points (the assets/ workers are the ones used) and non-English NLS bundles.
+      /^\/node_modules\/monaco-editor\/min\/vs\/(?:nls|language)(?:\/|$)/,
+    ],
     // A local ad-hoc signature needs no Apple account or signing certificate.
     osxSign: {
       identity: '-',

@@ -3,7 +3,7 @@
 A macOS Electron app that replaces Cursor as the control panel for the multi-repo
 workspaces under `~/Projects`. It shows, per workspace: what is running, what
 changed, and what the branch's pull request looks like — and it starts and stops the
-dev servers.
+dev servers, and opens the repos' files in a plain editor.
 
 This file is the **contract**. Every module is written against it, in parallel, by
 separate authors. If you own a file listed below, you implement exactly the exports and
@@ -27,11 +27,13 @@ edit files you do not own.
   The user's standing rule: *one row = name + one line of state + one action; details
   are a tap away; summarise counts, don't list.*
 - **Never write to the user's repos** except the explicit actions: `git pull --ff-only`
-  (Pull main), starting/stopping dev processes, and Publish building Switchboard's
-  source into a desktop app. No commits, no checkouts, no stashes. Squash and merge
-  (§4.4) acts on GitHub through `gh pr merge --squash -R owner/repo` and then deletes
-  the merged branch there, as GitHub's own Delete branch button would — never on the
-  checkout: nothing is checked out and no local branch is deleted.
+  (Pull main), starting/stopping dev processes, Publish building Switchboard's
+  source into a desktop app, and Save in the Editor (⌘S), which writes the one file the
+  user edited, in place; nothing else — no git, no formatting, no other file (§4.14).
+  No commits, no checkouts, no stashes. Squash and merge (§4.4) acts on GitHub
+  through `gh pr merge --squash -R owner/repo` and then deletes the merged branch
+  there, as GitHub's own Delete branch button would — never on the checkout: nothing
+  is checked out and no local branch is deleted.
 - Errors are values. Main-process handlers never throw across IPC: they resolve to
   `{ ok: false, error: "human sentence" }`. The renderer renders the sentence.
 
@@ -70,10 +72,12 @@ switchboard/
   src/renderer/views/grid.js    — Grid: four terminals side by side, in views     [R10]
   src/renderer/views/usage.js   — Usage screen + the Grid's five-hour gauge         [R11]
   src/main/usage.js             — Claude usage: the keychain token, the endpoint    [M7]
+  src/main/editor.js            — the Editor's file access: tree, read, save, HEAD base, stat, find in files [M8]
   src/renderer/views/files.js   — Files + All diffs screens                       [R6]
   src/renderer/views/diff.js    — single-file Diff screen                         [R6]
   src/renderer/views/pr.js      — Pull request screen                             [R7]
   src/renderer/views/prs.js     — Pull requests screen: every open PR of yours    [R12]
+  src/renderer/views/editor.js  — Editor tab (Monaco over the workspace's repos)  [R13]
 ```
 
 ---
@@ -479,6 +483,118 @@ client behind it, painted whole by tmux, instead of a ring-buffer replay. See M6
 | `sb.termAppearance()` | `sb:term:appearance` | `{ appearance, effective }` — asked once at boot |
 | `sb.setTermAppearance(choice)` | `sb:term:setAppearance` | `{ appearance, effective }` |
 
+### 4.14 Editor
+
+The fourth workspace tab, **Editor** (added 2026-09-26, the user's ask: "something very
+simple, like Sublime Text … light, no extensions … browse and edit files", and a button
+in the editor's top-right corner that opens it up full screen). Monaco — VS Code's
+editor, nothing else of VS Code — over the workspace's repos: a file tree with one top
+folder per repo, tabs, ⌘S, ⌘P, ⇧⌘F, modified-line markers against `HEAD`. Out of scope
+on purpose: creating, renaming or deleting files, any git operation, language servers,
+extensions, settings, split panes. The renderer side is R13; this is the channel area
+`code` (`sb:editor` is the older "open the folder in VS Code" of §4.5 and has nothing to
+do with it).
+
+`id` is a workspace id — **never** an absolute path: those are the Grid's folder squares
+(§4.10), which have no workspace screen and so no Editor, and they are refused. `repoName`
+is `Repo.name`, the display name, the same key `sb:diff:file` takes; `path` is
+repo-relative with `/` separators.
+
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.codeTree(id)` | `sb:code:tree` | `{ ok, repos: [{ name, files: [path…], truncated, error }] }` — every file git would show: tracked plus untracked-not-ignored, minus tracked files deleted from the worktree, deduplicated — three listings run side by side (`git ls-files -z -c`, `-o --exclude-standard`, `-d`), tracked files first, so the cap of 100 000 per repo (`truncated: true`) costs untracked files before any tracked one: one `-c -o` call printed every untracked path before the first tracked one, and an un-ignored `node_modules` filled the tree with nothing else. An untracked listing that fails or times out is that same cut, not a failed repo. An untracked nested repo or linked worktree is one `-o` entry, `vendor/lib/`; it loses the slash and is a row like any file, whose read says it is a folder. One entry per repo in the order `workspaces.scan` gives them, the folder itself for a single-repo workspace. A repo git cannot list gets `files: []` and an `error` sentence; it never fails the call |
+| `sb.codeRead(id, repoName, path)` | `sb:code:read` | `{ ok, text, mtimeMs, size, bom }` for UTF-8 text up to 5 MB (a BOM is stripped from `text` and reported as `bom: true`); `{ ok, binary: true, mtimeMs, size }` when the first 8 KB hold a NUL or the bytes are not valid UTF-8; `{ ok, tooLarge: true, mtimeMs, size }` over 5 MB; `{ ok:false, missing: true, error: '<path> is not there any more' }`; `{ ok:false, error: '<path> is a folder' }` — a submodule's gitlink, an untracked nested repo and a linked worktree each list as one path |
+| `sb.codeWrite(id, repoName, path, text, {mtimeMs, bom, force})` | `sb:code:write` | Save. `{ ok, mtimeMs, size }` from a fresh stat, or `{ ok:false, conflict: true, missing, mtimeMs, error: '<name> changed on disk since it was opened' }` (`… was deleted on disk`) — see below. `text` is a string of at most 20 MB |
+| `sb.codeBase(id, repoName, path, oldPath?)` | `sb:code:base` | The `HEAD` version, for the markers: `git cat-file blob HEAD:<oldPath or path>`. `{ ok, text }` when the blob exists, holds no NUL and is at most 3 MB; `{ ok, text: null }` when `HEAD` has no such path or there is no `HEAD` yet (every line is then "added"); `{ ok, text: null, skip: true }` for a binary or oversize blob (no markers at all). `oldPath` is a rename's, from `FileChange.oldPath`. A path that goes through a symlink (`CLAUDE.md -> AGENTS.md`, or a file in a linked folder) is asked for by where it really is in the repo, since the read shows the target's text and `HEAD`'s blob for the link is only the target's name — diffed against each other, an unchanged file was all modified. A path with no link in it keeps git's spelling, which is what `HEAD` knows it by after a case-only rename not yet committed |
+| `sb.codeStat(id, files)` | `sb:code:stat` | `{ ok, stats: [{ repo, path, exists, mtimeMs, size }] }` for `files = [{ repo, path }]`, in order, at most 200 (the rest ignored); a path the guard refuses, or one that is not there, is `{ exists: false, mtimeMs: null, size: null }`. How open tabs notice an outside change |
+| `sb.codeSearch(id, query, {caseSensitive, regex})` | `sb:code:search` | Find in files: `{ ok, matches: [{ repo, path, line, text, offset, ranges }], truncated, files, errors: [{ repo, error }] }` — per repo `git grep -z -n -I --untracked --exclude-standard --no-color --no-column --no-recurse-submodules --max-count 200 [-i] (-F \| -P) -e <query> --` (`--no-recurse-submodules` because a user's `submodule.recurse=true` makes git refuse `--untracked` outright; exit 1 is no matches, not an error), across repos in order, at most 2 000 matching lines (`truncated`; the Find results count is of matches — a line can hold several — so it adds up the spans), 15 s. `-E` gets one retry only when this git was built without PCRE (`cannot use Perl-compatible regexes when not compiled with USE_LIBPCRE`); a PCRE that gives up mid-search (its match limit) is that repo's error, never a quiet re-read as POSIX ERE, where `\d` is the letter d. A line over 400 characters comes back as a 400-character window from about 80 before the first match, `offset` being where it starts in the full line. `ranges` are the highlights, `[[start, end], …]` inside the returned `text` (UTF-16, at most 50 a line, empty matches skipped, clipped to the window) — see below. An empty query answers no matches; one over 500 characters, `that search is too long`; one with a line break, `find in files searches one line at a time` |
+| `sb.codeDirty(count)` | `sb:code:dirty` | `{ ok }` — how many open files have unsaved edits, sent whenever the number changes; main asks before a close or a quit (below) |
+| `sb.closeWindow()` | `sb:ui:closeWindow` | `{ ok }` — closes the window exactly as File ▸ Close's old role did, through `win.close()`, so its `close` handler still runs (bounds, publish on close, the question below) |
+
+**One path guard, in `main/editor.js`, for read, write, base and stat.** It resolves
+`(id, repoName)` without a `scan()` — that runs several git commands per repo, and a
+stat poll every 3 s cannot afford it: `workspaces.lookup(id)` gives the folder,
+`workspaces.repoDirsIn` its repos (or the folder itself when it has a `.git` and no repo
+children), and the one whose display name is `repoName` wins. Then the path: a
+non-empty string, no NUL, not absolute, and no segment that is empty, `.`, `..` or
+`.git` (in any case — a Mac's disk is case-insensitive). Then the disk: the realpath of
+the file — or, for a file that is not there yet, of its parent folder — must be the
+repo's realpath or under it, and never under its `.git`; a symlink pointing out of the
+repo is refused like `../`. The sentences: `<path> is outside <repo>`, `<repo> is not a
+repo in <id>`, `no workspace called <id>`.
+
+**Save writes in place.** `fs.promises.writeFile` on the file itself, never a temp file
+renamed over it: a rename is a new inode, which drops the file's mode (an executable
+script stops being one) and breaks a hard link — for a file the user did nothing to but
+edit. The BOM the read stripped goes back on. Before writing, unless `force`, the
+file's current mtime is compared with the one the tab opened (or last saved) at: more
+than 0.5 ms apart, or the file gone, and nothing is written — the answer is `conflict`,
+and the renderer asks (Overwrite, or Reload). A missing file may only be created again
+where its parent folder still exists inside the repo: that is "deleted on disk → Save
+again", not a way to make new files. The renderer only asks for a write there is a
+reason for: ⌘S on a clean tab writes nothing (a forced save — Overwrite, Save again —
+and a deleted file's still do), and a file that mixes line endings on disk asks before
+its first save, which would make every line end the model's one way (R13).
+
+**Find's highlights are main's, and bounded.** The user's pattern is run by git, and
+then once more in JS to say where on each line it matched — and git's `-P` is PCRE
+while a JS `RegExp` is V8's: `\h` is whitespace to one and the letter h to the other,
+so `(\h+)+b`, which git answers in 12 ms, backtracks 2^40 times in V8 over a line of
+h's. That second run is therefore in main, never the renderer, and never unbounded:
+`git.js` builds the `RegExp` inside a fresh `vm` context from the pattern's source and
+flags (with `u` when it compiles so, without when it does not) and scans every matched
+line of a repo's answer in ONE `runInContext` with a 250 ms timeout, which V8 does
+interrupt mid-backtrack. A timeout, or a pattern V8 cannot compile, gives every line of
+that repo `ranges: []` and a window from 0 — the lines still show, unhighlighted. A
+fixed string is a plain `indexOf` loop with nothing to bound; case-insensitive compares
+lowercase with lowercase, and a line whose length lowercasing changes (`İ`) gets no
+spans. The renderer paints `ranges` and runs no pattern of its own at all, so a user's
+regex never runs unbounded in either process.
+
+**No watcher.** Open tabs are stat-polled by the renderer — every 3 s, and only while
+that Editor is on screen and the window has focus — and re-checked on every window
+focus (`handleFocus`, R2). One `stat` per open tab is cheaper than an `fs.watch` over
+repos of tens of thousands of files, and it cannot go deaf: an editor or formatter that
+saves atomically (temp file, rename) swaps the inode a watch handle is holding, and the
+watch never hears of the file again. The tree is re-listed on focus, on ⌘R and after a
+save.
+
+**Unsaved work is asked about, once.** `beforeunload` is no use — Electron shows no
+dialog for it, it only cancels the close silently — so the renderer keeps main told how
+many files are dirty (`sb:code:dirty`), and main asks, synchronously, in the window's
+`close` and in `before-quit`: `dialog.showMessageBoxSync` with **Discard Changes** and
+**Cancel** (the default), `You have unsaved changes in N file(s).` It is the one
+question the app ever asks in a modal, against the standing rule of one bar, and it has
+to be: a close or a quit is decided inside main's event handler — `preventDefault()`
+then or never — while a bar would need the renderer to answer across IPC first, and ⌘Q,
+the Dock's Quit and a logout do not wait for that. `before-quit` asks first and marks
+the answer, so the window's own `close` that follows a Discard does not ask again; a
+quit that then does not happen clears the mark. The count is reset when the window
+closes, its buffers being gone with it. A smoke run never shows the box: under
+`SB_SMOKE` it logs `SMOKE unsaved: N` and discards.
+
+**And once more, if the quit had to wait.** A quit is deferred until a publish in flight
+has finished and the dev servers are down (§4.13, M5) — tens of seconds when it is a
+whole build — and the window stays live meanwhile: nothing tells the renderer a quit is
+pending. So `before-quit` asks again at the END of that wait — after `stopEverything()`,
+before `publisher.applyOnQuit()` — when files are dirty by then and no Discard covers
+them: nothing was dirty at ⌘Q, so nothing was asked, or a file has gone dirty since the
+Discard (`sb:code:dirty` reporting a higher count while `quitting` clears `discardOk` — a
+Discard was about the files unsaved then, not whatever is typed next). Without it an edit
+typed during the wait was dropped unasked: the second `before-quit` returns at once on
+`quitting`, and the window's `close` skips its question while quitting. Cancel there
+clears `quitting` and shows the window, its buffers and the prepared update all kept
+for the next quit; the dev servers and shells are already stopped, which a cancelled
+quit can live with.
+
+`sb:ui:closeWindow` exists because ⌘W is no longer the `close` role (§4.7): in the Editor
+it closes a file tab, and anywhere else the renderer asks for exactly what the role did.
+While the key window is not a Switchboard window at all — the About panel, a native
+panel, where `BrowserWindow.getFocusedWindow()` is null — main never sends the event: it
+does what the role did, `performClose:` to that window. Otherwise the event reached the
+main page behind the panel, which closed an Editor tab or the whole window and left the
+panel up.
+
 ### 4.7 Push events (main → renderer)
 `preload.js` exposes subscribe helpers returning an unsubscribe function:
 
@@ -489,7 +605,7 @@ sb.onLinks((wsId, links /*Link[]*/) => {}) // 'sb:evt:links' — as ports come u
 sb.onFocus((opt) => {})              // 'sb:evt:focus' — refresh now; {fetch:true} from ⌘R
 sb.onTermData((wsId, chunk) => {})   // 'sb:evt:term' — shell output
 sb.onTermState((state /*Shell*/) => {})  // 'sb:evt:termState' — spawned, exited
-sb.onEdit((e) => {})                 // 'sb:evt:edit' — {action:'copy'|'paste'|'selectAll', text?}
+sb.onEdit((e) => {})                 // 'sb:evt:edit' — {action:'copy'|'paste'|'selectAll'|'undo'|'redo'|'cut'|'close', text?, image?}
 sb.onAppearance((s) => {})           // 'sb:evt:appearance' — {appearance, effective}; see §4.8
 sb.onSidebar((s) => {})              // 'sb:evt:sidebar' — {visible}; see §4.9
 ```
@@ -497,8 +613,33 @@ sb.onSidebar((s) => {})              // 'sb:evt:sidebar' — {visible}; see §4.
 `sb:evt:edit` exists because a menu accelerator wins over the renderer's keydown, and
 xterm's selection is **not** a DOM selection, so `role: 'copy'` copies nothing from the
 terminal. The Edit menu's Copy / Paste / Select All are therefore custom items that send
-this event; the renderer gives the terminal first refusal and otherwise reads the
-document's own selection.
+this event. The renderer gives first refusal to the focused terminal, then to the
+Editor (R13), and only then falls back to the document: its own selection for Copy,
+`execCommand` for Select All, Undo and Redo, and — for a focused text field, the Grid's
+name field — the field's selection for Cut and `insertText` for Paste, since the menu's
+⌘V never lets the keystroke reach it. A Paste with `image: true` (below) is the one
+exception: if the terminal declines it, nothing else is offered it.
+
+**Undo, Redo and Cut became items too, and File ▸ Close with them** (added 2026-09-26,
+with the Editor). Measured with Monaco 0.57 in this Electron 44: the native `undo` /
+`redo` roles run Chromium's editing command on the focused element, and Monaco ignores
+it — with its default EditContext nothing happens at all, and with its textarea it undoes
+one character of the hidden textarea rather than anything on Monaco's own undo stack —
+while the accelerator, winning over keydown as always, means Monaco never sees ⌘Z to do
+it itself. So ⌘Z / ⇧⌘Z / ⌘X send `{action:'undo'|'redo'|'cut'}` and the Editor runs its
+own commands; Cut goes the same way so its copy half takes Copy's path through main
+(below) and its delete half is one edit on Monaco's undo stack. ⌘W was `role: 'close'`,
+and Sublime's muscle memory — ⌘W closes the file — closed the whole window; it now sends
+`{action:'close'}`, the Editor closes its active tab, and anywhere else the renderer
+answers with `sb.closeWindow()` (§4.14), which is the old behaviour exactly. While the
+DevTools have focus all four call the native method on the DevTools' own contents
+instead (`undo()`, `redo()`, `cut()`, `closeDevTools()`), so the DevTools keep their Undo
+and ⌘W. And while the key window is no BrowserWindow at all — the About panel — ⌘W is
+`Menu.sendActionToFirstResponder('performClose:')`, the role's own action, and no event
+is sent: it closes the panel, not a tab or the window behind it (§4.14). That test comes
+after the DevTools' and before the crashed page's, and a smoke run skips it — its
+window is never shown, so never key, and `SB_SMOKE_MENU='File>Close'` must still reach
+the page.
 
 **Both directions of the clipboard belong to main**, and this is not a preference:
 * Chromium refuses `document.execCommand('copy')` outside a user gesture, and an IPC
@@ -519,7 +660,12 @@ document's own selection.
   it under `$TMPDIR/switchboard-pastes/` via `main/drops.js` and sends that file's
   escaped path as `text` — the same text a Finder drop of the image would have typed,
   and so the same route into Claude Code. Without it the accelerator swallowed ⌘V and
-  the terminal never saw the keystroke.
+  the terminal never saw the keystroke. That payload carries `image: true` (plain text
+  never does), because the path is for a terminal alone: typed into a source file, the
+  Editor's ⌘P and ⇧⌘F fields or the Grid's name field it is junk, so `handleEdit` (R2)
+  returns after the terminal's refusal instead of offering it to the Editor or the
+  document. The PNG is still written on every such ⌘V, wherever focus is; the paste
+  folder is pruned after a day.
 
 ### 4.8 Terminal appearance
 
@@ -533,7 +679,7 @@ Light is the default, and deliberately not `'system'`: the rest of the app is li
 (`color-scheme: light`, window `#ffffff`), so following a Mac in Dark Mode would leave a
 single dark slab in an otherwise white window — the thing this setting exists to fix.
 
-The choice has two consumers and they need it at different moments:
+The choice has three consumers and they need it at different moments:
 
 * **The renderer**, immediately. `term-theme.js` rewrites the `:root` colour tokens and
   assigns the new palette to every live `Terminal.options.theme`. xterm registers
@@ -541,6 +687,14 @@ The choice has two consumers and they need it at different moments:
   matters because rebuilding would throw away the scrollback, the keyboard focus and a
   half-painted TUI's frame. Measured after a toggle: the shell's `startedAt` is unchanged,
   the text on screen is the text that was there before, and focus is still in the pane.
+* **The Editor**, at the same moment and the same way (added 2026-09-26). Its slab is the
+  other thing in the window that follows the appearance: `views/editor.js` registers one
+  `SB.termTheme.onChange` listener at load and switches Monaco between its two themes,
+  `sb-dark` and `sb-light`, built from the same palette, with `monaco.editor.setTheme` —
+  global to every editor, repainted in place, never a render, so the buffers, the undo
+  stack, the cursor and focus all stay. The slab's own chrome (tree, tabs, status line)
+  follows `data-term-theme` through its `--ed-*` tokens. The menu item keeps its name;
+  it now governs the Logs panes and the Editor as well as the Terminal.
 * **`shell.js`**, *before* it spawns. A shell's environment is fixed at fork, so
   `COLORFGBG` (`0;15` light, `15;0` dark) can only ever be set for the NEXT shell. A
   running shell keeps the old value on purpose rather than being restarted under the user.
@@ -592,6 +746,51 @@ Three things the layout has to get right, all of them measured:
 One thing the rail is the only place for: a background workspace's bell. With it closed
 the button carries the blue dot instead, so hiding the rail does not silently drop the
 signal it exists for.
+
+**The Editor's full screen** (added 2026-09-26, the user's ask: a button in the editor's
+top-right corner "to open the editor up, like full screen"). The button hides the rail
+AND the header so the editor fills the window; the same button, or Esc, brings them
+back. It is the same kind of change as hiding the rail — one class, `.edfull`, on
+`.win`, and the stylesheet does the rest, so nothing is rendered and the editor's
+buffers, cursor and focus survive it — but it is **not** `.norail`: that class is the
+user's stored choice and owns the View menu's label, and a full screen is neither
+persisted nor the menu's business; leaving it must put back exactly the rail the user
+had, open or closed. `app.js` owns the class next to `.norail` and exports
+`SB.layout.full()` / `SB.layout.setFull(on)` for `views/editor.js`, whose button and Esc
+are the only callers.
+
+* **The rail slides out** exactly as `.norail`'s does (same margin, same delayed
+  `visibility`, same reduced-motion and `noanim` exits); `.edview > .hd` goes, and the
+  slab loses its margin and radius to meet the window's edges.
+* **The traffic lights and the drag region move into the editor.** With the rail and
+  the header both gone the lights sit over the slab's top-left and the window has no
+  drag region left, so the slab grows a `--titlebar` band (`.edband`) — draggable, with
+  a 78px spacer for the lights (x 18–70), the workspace and its branch, and at its right
+  the exit button, `no-drag` — and `main` drops the 30px `.norail` inset, the band being
+  the inset now. The buttons are INSIDE the band, so walking the document in order adds
+  the band's drag region before their holes are subtracted — the order §6 R1 insists
+  on. The `.drag` strip and `#rail` are `display:none` meanwhile: the strip comes after
+  `main` in the document, so shown it would cover the band's buttons and turn their
+  clicks into window drags. The tab strip's own button hides too, so there is exactly
+  one toggle, top right.
+* **The app's notice moves to the foot.** `applyNotice` still puts its `.bar` first in
+  `.edbd`, which in full screen put it at y=0 under the traffic lights, above the band
+  — pushing the one drag region left down the window. `.win.edfull .edbd > .bar` takes
+  `order:1`, no margin and no radius, so it paints as a strip below the slab and the
+  band stays at the top. `order` moves only the paint: `applyNotice`'s "never two bars"
+  test reads the DOM's first child and is untouched.
+* **It belongs to the Editor on screen.** `renderMain()` drops it the moment the route is
+  anything else — ⌘1–9 and ⌘0 still work with the rail gone, and `back()` never passes
+  through `go()` — and snaps the rail back rather than sliding it, under `noanim`: the
+  screen arrived at may hold a terminal (a Terminal tab, the Grid's four), and a slide
+  would fire their `ResizeObserver`s on every frame with no `busy()` to hold them. ⌃⌘S
+  while full screen leaves it and then applies the rail choice, so the keystroke
+  visibly does something. `busy()` is otherwise untouched: no terminal is on screen
+  while the Editor is, and Monaco's `automaticLayout` follows the slide for free; its
+  `relayout()` runs once when the slide is over.
+* **The bell is not dropped.** The band carries a blue dot (`.edbell`, "a terminal in
+  another workspace rang") while another workspace's shell has rung, computed on the
+  render a bell already schedules.
 
 ### 4.10 Grid
 
@@ -756,6 +955,18 @@ untracked, NUL-separated parsing), `fileDiff(dir, path, {untracked})`, `allDiffs
 `pullMain(dir)`, `remoteInfo(dir)`, `fetch(dir)`. Handle: no upstream, missing
 `origin/main`, detached HEAD, renames, binary files, paths with spaces and unicode.
 
+For the Editor (§4.14), three readers that never write: `lsFiles(dir, {max})` → `{ ok,
+files, truncated, error }` (tracked first, then untracked-not-ignored, less what the
+worktree has deleted — three `ls-files` calls side by side — cut at `LS_FILES_MAX`,
+100 000), `headBlob(dir, relPath)` → `{ ok, text, skip }` (`git cat-file blob HEAD:…`,
+`HEAD_BLOB_MAX_BYTES`, 3 MB, as its `maxBuffer`) and `grep(dir, query, {caseSensitive,
+regex, max})` → `{ ok, matches: [{path, line, text, offset, ranges}], truncated, error }`
+(`GREP_MAX_MATCHES`, 2 000; `GREP_MAX_PER_FILE`, 200; the 400/80-character window; and
+`matchSpans()`, the one bounded pass that finds `ranges` — at most `GREP_MAX_RANGES`, 50,
+a line, under a `GREP_REGEX_MS`, 250 ms, `vm` timeout for a regex). `-z` on anything that
+prints paths, and a user's string only ever after `-e` or `--`, so a query or a file name
+can never be read as an option. `max` is for tests, which need a cap they can reach.
+
 ### M4 `github.js`
 `prForBranch(dir, branch)`, `prDetail(dir, number)`, `prDetailByRemote({owner, repo,
 host}, number, {fresh})`, `myPullRequests({fresh})`, `reviewComments(dir, number)`,
@@ -847,6 +1058,25 @@ focus, which re-asks only past 20s; and `events`, emitting `usage` with every an
 `normalize(body, plan)` and `planName(subscription, tier)` are exported for tests.
 Never rejects; see §4.11 for what it reads and the one place it sends it.
 
+### M8 `editor.js`
+The Editor's file access (§4.14): `tree(id)`, `read(id, repoName, rel)`, `write(id,
+repoName, rel, text, opts)`, `base(id, repoName, rel, oldPath)`, `stat(id, files)` and
+`search(id, query, opts)`. It is a module of its own so that everything that touches a
+file in a repo sits behind one guard: every path from the renderer goes through it
+(resolve the repo from the id without a scan, refuse `..`, `.git`, absolute paths and
+symlinks out, check the realpath), and the one write — the in-place `writeFile` of
+Save, behind the mtime check — is the only file the app itself ever writes into a repo
+(Pull main's writes are git's). Its own limits live here — 5 MB to open
+(`READ_MAX_BYTES`), 20 MB to save (`WRITE_MAX_BYTES`), 200 files a stat
+(`STAT_MAX_FILES`), 500 characters a query (`SEARCH_MAX_QUERY`); the git-side caps it
+relies on live in `git.js` (M3) — 3 MB for a `HEAD` base (`HEAD_BLOB_MAX_BYTES`),
+100 000 files a repo (`LS_FILES_MAX`), 2 000 matching lines a search (`GREP_MAX_MATCHES`, which
+`search()` re-applies across repos) and the highlights' 50 a line and 250 ms. Git itself
+goes through `git.js` too. There is deliberately no watcher
+(§4.14). Like `git.js`, nothing throws: every failure resolves to `{ ok:false, error }`,
+and `scripts/test-editor.js` runs all of it against fictional scratch repos with plain
+`node --test` (`npm run test:editor`).
+
 ---
 
 ## 6. Renderer
@@ -855,10 +1085,26 @@ Never rejects; see §4.11 for what it reads and the one place it sends it.
 Load order, all classic scripts, no `type=module`:
 `icons.js`, `dom.js`, `term-theme.js`, `markdown.js`, `diffview.js`, `views/workspace.js`,
 `views/logs.js`, `views/terminal.js`, `views/usage.js`, `views/grid.js`, `views/files.js`,
-`views/diff.js`, `views/pr.js`, `views/prs.js`, `app.js` (last — it boots). `term-theme.js`
-must precede the two views that build `Terminal`s: both read the palette at construction;
-`markdown.js` must precede `diffview.js` and the two PR screens, which render every
-comment body through it; `prs.js` follows `pr.js`, whose gh failure bars it borrows.
+`views/diff.js`, `views/pr.js`, `views/prs.js`, `views/editor.js`, `app.js` (last — it
+boots). `term-theme.js` must precede the two views that build `Terminal`s: both read the
+palette at construction; `markdown.js` must precede `diffview.js` and the two PR screens,
+which render every comment body through it; `prs.js` follows `pr.js`, whose gh failure
+bars it borrows; `views/editor.js` follows `term-theme.js` (Monaco's themes are built
+from its palette) and `views/workspace.js` (it borrows the header).
+
+**Monaco is not in this list, and must never be put above it.** Its AMD `loader.js`
+installs a global `define` with `define.amd`, and the xterm UMD wrappers at the top of
+the page check exactly that FIRST — `"function"==typeof define&&define.amd` comes before
+their global branch — so with Monaco's loader ahead of them xterm registers itself as an
+anonymous AMD module, `window.Terminal` and `window.FitAddon` never exist, and every
+Terminal, Logs pane and Grid square says the terminal did not load. `views/editor.js`
+injects `node_modules/monaco-editor/min/vs/loader.js` itself, the first time an Editor tab
+opens (R13): long after the xterm scripts ran, and nothing at all for a user who never
+opens one. Its `editor.main.css` arrives the same way, after `styles.css`, so Monaco wins
+a tie and the Editor's overrides are scoped under `.ed`. Packaging keeps only
+`monaco-editor/min/vs` (less its legacy `language/` workers and non-English `nls/`) —
+about 15 MB of the package's 100 — through `scripts/package.js`'s `ignore`.
+
 Body skeleton:
 `<div class="win noanim"><aside id="side"></aside><main id="main"></main><div class="drag"></div><button id="rail"></button></div>`.
 The toggle is a child of `.win`, not of the aside, because it has to outlive the rail —
@@ -927,7 +1173,21 @@ terminal views hold their fits behind while it moves. The settling period is a *
 not `transitionend`: under `prefers-reduced-motion` there is no transition at all, the
 event never arrives, and every terminal would stay frozen for good at its old size.
 
-Routes: `{view:'workspace', wsId, tab:'changes'|'logs'|'terminal'}`, `{view:'files', wsId, tab:'files'|'all'}`,
+The Editor (R13) is wired in at four calls, each feature-checked and wrapped in a
+`try`/`catch` that logs, so a broken Editor never takes the rest of the app with it:
+its `onKey(e)` is the FIRST thing the window's keydown listener asks — ⌘S, ⌘P, ⇧⌘F,
+and Esc while its palette, its find field or its full screen is up, before Esc can
+mean back; its `editAction(action, text)` is asked right after the terminal's (§4.7),
+except for a Paste with `image: true`, a screenshot's temp-file path that only a
+terminal may type and `handleEdit` drops once the terminal has declined it;
+`handleFocus` calls its `refresh(fetch)` while it is on screen, behind the same 1200 ms
+storm guard as everything else there; and `settle()` calls its `relayout()` with the
+terminals'. And `renderMain()` leaves its root in place when a render hands back the
+element already mounted (the reuse path), where every other view is torn down.
+`SB.layout.full()` / `SB.layout.setFull(on)` are its full screen (§4.9): the `.edfull`
+class on `.win`, dropped by `renderMain()` off the Editor's route and by ⌃⌘S.
+
+Routes: `{view:'workspace', wsId, tab:'changes'|'logs'|'terminal'|'editor'}`, `{view:'files', wsId, tab:'files'|'all'}`,
 `{view:'diff', wsId, repo, path}`, `{view:'pr', wsId, repo, tab:'overview'|'files'|'all'}`,
 `{view:'pr', owner, repo, number, tab}` (no workspace — a pull request opened from the
 list; its parent for the back caret and Esc is `prs`, not `workspace`),
@@ -1087,7 +1347,10 @@ gauge on screen up to date in place and answers whether the document now agrees 
 only then.
 
 ### R4 `views/workspace.js`
-The Changes tab and the shared header the Logs and Terminal tabs borrow (§6 R8). The
+The Changes tab and the shared header the Logs, Terminal and Editor tabs borrow (§6 R8,
+R13); its segmented control is `Changes | Logs | Terminal | Editor`, lit from a
+whitelist of the four rather than a logs/else test, which would light `Changes` for any
+tab it had not heard of. The
 header's title (`h1.jump`) is a shortcut into this workspace's Terminal — the tab the
 user lives in — no-drag so the click is not eaten by the drag region, and the workspace
 name in the Files, Diff and Pull request breadcrumbs jumps there too. The repo name and
@@ -1145,12 +1408,159 @@ full-width `brew install gh` / `gh auth login` bars are only for a list that nev
 loaded. Empty: `no open pull requests`, with Open on GitHub. Exports `render` and
 `refresh(hard)`.
 
+### R13 `views/editor.js`
+The Editor tab (§4.14; added 2026-09-26, the user's ask). The shared header, and below
+it one dark (or light — §4.8) slab: the file tree on the left, the tab strip with the
+full-screen button at its far right, the editor, and a one-line status (`Ln 21, Col 73
+· Spaces: 2 · TypeScript`, and the repo with its branch).
+
+```js
+SB.views.editor = { render(state), editAction(action, text), onKey(e), refresh(fetch),
+                    relayout(), dirtyCount() }
+```
+
+**The root is persistent, and it is the same element every time.** Everything in it —
+the Monaco instance, its models (one per open file, so each keeps its own undo stack and
+view state; keyed `sb://ws/<encoded workspace id>/<repo>/<path>`, the id in the path
+because Monaco lowercases an authority, and `Demo` and `demo` then shared every model —
+opening a file in one disposed the other's live buffer as stale), the tabs, the tree's
+expanded folders — lives in one record per workspace in the module's own `Map`, never
+on the route (`normalize()` keeps no such fields) and never in `SB.state`. `render(state)` is called on every app render — a window focus, a
+bell, a run state — and never rebuilds any of it: it returns that workspace's root
+(`div.view.edview`, `.hd` then `.bd.pane.edbd` holding the slab) and only swaps a freshly
+built header into it in place, putting focus back at the same position when it was in
+the old one. `renderMain()` sees the element it already mounted and leaves it where it
+is (R2), so unlike the Terminal's re-parented host — which is blurred and refocused on
+every render — Monaco is never detached at all: an open suggest widget, an IME
+composition and the cursor survive. The app's own `.bar` still lands at the top of
+`.edbd` and the slab lays out beneath it (in full screen it paints below the slab
+instead, §4.9). When the root has just been attached again (it was not connected when
+the render began) the Editor lays Monaco out, re-stats its open tabs, re-reads their
+`HEAD` bases and takes focus if nothing inside it has it, on a `setTimeout` — never rAF,
+which is starved while the window is hidden. The bases because `HEAD` moves without a
+window focus: a commit or a checkout typed in the in-app Terminal tab is the same
+window, so `refresh()` never hears of it, and the change bars must be drawn against the
+`HEAD` there is now. It never disposes an editor with unsaved changes; in fact it
+disposes none.
+
+**Monaco loads lazily, once.** No `<script>` for it in `index.html` (R1: its AMD
+`define` would hijack the xterm bundles). The first Editor open appends
+`min/vs/loader.js`, points `require` at `min/vs` and requires `vs/editor/editor.main` —
+measured at ~55 ms in this window. It sets up its own Blob workers that
+`importScripts` the `file://` worker files, which work in this sandboxed,
+contextIsolated renderer (the editor worker is what gives word suggestions and link
+detection). A load that fails shows `the editor did not load` with Try again, never a
+broken screen.
+
+**`editContext: false`, and it is required.** Monaco 0.57 defaults to the EditContext
+API, whose focus target is a DIV — measured. `typing()` in `app.js` only counts INPUT,
+TEXTAREA and contentEditable as typing, and the textarea is what `renderMain()`'s
+refocus and the Esc rules were written for; with a DIV, Esc inside the editor would be
+a step back.
+
+**The language services are off.** There is no project behind a file here — no
+`tsconfig`, no `node_modules` the worker can see — so TypeScript's diagnostics paint
+"cannot find module" over every import. `setModeConfiguration` turns off completions,
+hovers, diagnostics, formatting and the rest for TypeScript, JavaScript, JSON, CSS and
+HTML right after the load (JSON keeps its tokens, its colouring coming from its own
+main-thread tokenizer). Measured: none of their workers ever starts, while syntax
+colouring (the Monarch grammars), word-based suggestions and links all still work.
+Two themes, `sb-dark` and `sb-light`, are built from `term-theme.js`'s palette and the
+mock-ups, and one `onChange` listener switches them (§4.8).
+
+**Keys.** `onKey(e)` answers only on the Editor's own route (R2 asks it first): ⌘S
+saves the active file; ⌘P opens Go to file; ⇧⌘F opens Find in files; Esc closes the
+palette, or leaves the find field for the previous tab, or leaves full screen, and is
+otherwise the app's. Monaco consumes Esc itself — closing its find or suggest widget,
+dropping a selection or extra cursors — and stops it there, so the second Esc is the one
+that leaves full screen (measured). None of the three is a menu accelerator and Monaco
+binds none of them, so they reach the window (measured for ⌘P-class keys); Monaco keeps
+⌘Enter, ⌘F, ⌘D, ⌘/ and the rest, and ⌘1–9, ⌘0 and ⌘. keep their app-wide meaning as in
+the Terminal. `editAction` (§4.7) takes Copy, Paste, Select All, Undo, Redo and Cut when
+focus is in one of its roots — in Monaco, or in its palette and find fields, which the
+menu's ⌘V would otherwise never reach; Copy with nothing selected copies the whole line,
+as Sublime and VS Code do, and pasting that same text puts it on a line of its own —
+and Close when a file tab is open and focus is in the Editor or nowhere at all.
+
+**The tree** is `sb.codeTree` — one top folder per repo, `git ls-files` with
+`.gitignore` honoured, where a submodule, an untracked nested repo or a linked worktree
+is a single row like a file's, and opening it says it is a folder — drawn lazily (only
+expanded folders' children, at most 2 000 in one folder with a "⌘P to find them" row
+after). One focusable element with a roving
+active row, not a button per row: a repo can hold tens of thousands of files. The git
+letters (`M` `A` `D` `R`) and the amber dot on a folder holding changes come from the
+scan the app already refreshes (`Repo.files`), not from a git call of its own. Its width
+is remembered in `localStorage`, as are each workspace's open tabs (at most 30) and the
+active one, reopened lazily the first time that workspace's Editor is shown; a file that
+no longer reads is dropped quietly.
+
+**Saving and the disk.** ⌘S writes through `sb.codeWrite` with the mtime the file was
+opened at; a conflict asks in the Editor's own one-line bar — `x.ts changed on disk since
+you opened it`, Overwrite or Reload. ⌘S on a clean tab writes nothing at all: it is a
+key pressed out of habit, and rewriting a file nobody edited is what §0 rules out
+(Overwrite, Save again and a deleted file's tab still write). After a save the workspace
+is re-scanned (debounced), so the header's count, the tree's letters and the Changes tab
+catch up. An outside change to an open file — seen by the 3 s stat poll while the
+Editor is on screen and the window focused, or on a window focus — is applied to a
+clean buffer as one minimal edit (the common prefix and suffix kept), so the cursor and
+the scroll stay put; a dirty buffer is never clobbered — the bar offers Reload or Keep
+mine — and a file deleted under a tab strikes the tab through and offers Close or Save
+again. "Clean" is checked twice: when the stat answers and again when the read does, by
+the model's alternative version id — whatever was typed while the read was in flight is
+the user's, so that reload is not applied and the same "changed on disk" bar goes up
+instead. The bar's Reload is the user saying discard mine, and it does. Closing a dirty
+tab asks Save, Don't save or Cancel. That bar is `.edbar`, inside the slab, and not the
+app's `.bar`, so the "never two bars" rule in `applyNotice` is untouched. Whenever the
+number of dirty files changes it goes to main (`sb.codeDirty`), which asks before a
+close or a quit.
+
+**Line endings.** Monaco makes every line of a model end one way — the majority's, CR
+and CRLF counted together against LF — so a file on disk that mixes them, or holds a
+bare CR, would be rewritten on Save beyond the lines the user touched. Such a file is
+noticed when it is read (opened or reloaded), and its first save asks in the bar
+instead: `x.ts mixes line endings — saving makes them all LF` (or `CRLF`), Save anyway
+or Cancel, and only Save anyway writes. The bar takes no focus — ⌘S is typed
+mid-sentence, and a focused button would take the next Space — and the close question's
+Save goes through it before the tab closes. The yes lasts until a save lands (the disk
+no longer mixes) or the file is read again, so an Overwrite after a conflict does not ask
+twice. A reload into a live model picks its line ending by the same majority rule, never
+"any CRLF", so one stray line does not turn a mostly-LF file into CRLF on the next save.
+
+**Undo steps.** A save ends one (`pushStackElement` right before the text is taken), or
+the ⌘Z after a save took back text typed before it too, the saved part included —
+measured. A reload's edit is a step of its own, with a stop either side, so one ⌘Z never
+takes back the outside change together with the user's typing.
+
+**Markers** are the mock-up's 3px bars left of the code: green for added lines, amber for
+modified, a small red triangle where lines were deleted — each open file diffed against
+`sb.codeBase` (its `HEAD` version) by lines, CRLF-blind, 250 ms after the last edit (common
+prefix and suffix, then Myers with a cap past which the middle is simply "modified"). A
+file not in `HEAD` is all added; a binary or oversize base draws nothing. The base is
+read when the file opens and again on `refresh()`, on every re-attach (above) and after
+an outside change is reloaded in place — a file changing on disk is exactly when `HEAD`
+may have moved too (a checkout, a pull, a reset); a sequence number drops a stale answer.
+
+**Go to file** (⌘P) is an overlay inside the slab, mounted once and toggled — never
+through a render: a fuzzy match over `repo/path` that favours runs, segment starts and
+the file name, recent files first on an empty query, `name:42` to land on a line.
+**Find in files** (⇧⌘F) is a pseudo-tab, "Find results": `git grep` over every repo
+(`sb.codeSearch`), `Aa` and `.*` toggles, results grouped by file with every match
+highlighted, a click opening the file with its first match selected (`column = offset +
+start + 1`), or at the line's start when there is none. The highlights are main's
+`ranges` (§4.14): the renderer never compiles the user's pattern — a JS `RegExp` here
+could backtrack for hours, and nothing in the window could stop it — and takes a span
+only while they come in order, do not overlap and fall inside `text`; a line main ran out
+of time on, or a main with no `ranges` at all, shows unhighlighted. It searches what is
+on disk — unsaved buffers are not searched, and its field says so. A file dropped on the
+slab is refused rather than navigating the window.
+
 ---
 
 ## 7. Screens (from the mock-up — `out/01.html` … `out/07.html`)
 
 1. **Workspace / Changes** — header: name, sub line (`TASK-352 · 6 changes · 1 repo behind main`
-   `· ● running 14s`), `Pull main`, `Start`/`Stop`. Segmented `Changes | Logs`. One row per
+   `· ● running 14s`), `Pull main`, `Start`/`Stop`. Segmented `Changes | Logs | Terminal |
+   Editor` (R4; the mock-up predates the last two). One row per
    repo: name (150px), branch pill (`⎇ TASK-352 #218`), refresh icon button (only when on
    main), summary button (`4 files +84 −3 ›`) when it has changes else plain state text
    (`up to date` / `2 behind`), and — when running — its link(s) right-aligned.
@@ -1169,8 +1579,8 @@ loaded. Empty: `no open pull requests`, with Open on GitHub. Exports `render` an
    nested under it with `path:line` linking into All diffs. All diffs: the diffs with review comments inline under the
    lines they sit on.
 
-8. **Terminal** — the same header, segmented `Changes | Logs | Terminal`, and a dark
-   terminal filling the body: a login shell in the workspace directory. When the shell
+8. **Terminal** — the same header, segmented `Changes | Logs | Terminal | Editor`, and a
+   dark terminal filling the body: a login shell in the workspace directory. When the shell
    has exited, the `.exit` footer from screen 2 with a single `New shell` button. A bell
    from a background workspace's shell (Claude finishing a turn) turns that workspace's
    sidebar dot blue until its Terminal is looked at — the same one dot the row already
@@ -1186,6 +1596,24 @@ loaded. Empty: `no open pull requests`, with Open on GitHub. Exports `render` an
     of yours in any repository: repo, `#81 title`, `Draft` / `Approved` / `Changes
     requested` when so, a checks dot, `3 comments`, `1d ago`, chevron. A row opens the
     pull request's Overview; Esc comes back.
+
+11. **Editor** — the same header, segmented `Changes | Logs | Terminal | Editor`, and
+    one slab filling the body, dark or light with the Terminal appearance. On the left
+    the file tree: a folder per repo (a single repo starts open; of several, the one with
+    the most changes), 24px rows, a chevron per folder, the git letter at the right of a
+    changed file and an amber dot on a folder holding one, the open file's row lit. On
+    the right the tab strip — name, an amber `●` while unsaved that turns into `×` on
+    hover, `— dir` when two open files share a name — ending in the full-screen button;
+    the editor with its 3px change bars beside the line numbers; and a status line,
+    `Ln 21, Col 73 · Spaces: 2 · TypeScript` on the left and `sample-api · ⎇ TASK-352` on
+    the right. With no file open: `open a file from the tree, or press ⌘P`. ⌘P is a
+    centred Go to file palette over the editor (`↑↓ navigate · ↩ open · esc close · N of
+    M files`); ⇧⌘F is the "Find results" tab — the query, `Aa`, `.*`, `8 matches in 4
+    files`, the matches grouped by file. **Full screen**: the rail and the header are
+    gone, the slab meets the window's edges, and a 38px band across its top carries the
+    traffic lights, the workspace and branch, a blue dot when another workspace's
+    terminal has rung, and at its right the one button that restores it; Esc restores it
+    too.
 
 Clicking the branch pill opens the PR screen on its Overview. Clicking a summary button
 opens Files. Clicking a file row opens Diff. The workspace name — the header title, the
@@ -1208,4 +1636,20 @@ The back caret and Esc go back.
   on the description reads as such, with the login in the chip's tooltip.
 - The Pull requests screen lists every open PR of the signed-in user, in every
   repository, and a row opens that PR's Overview whether or not the repo is cloned here.
+- The Editor's tree is `git ls-files` for every repo of the workspace: untracked files
+  in, ignored files out, one top folder per repo.
+- Save in the Editor writes exactly the file that was edited, in place — mode and
+  inode unchanged — and nothing else: no git, no formatting, no other file. ⌘S on a
+  file nobody edited writes nothing, and one that mixes line endings asks first.
+- The Editor's change bars match `git diff HEAD` for the file, unsaved edits included —
+  after a commit or checkout in the Terminal tab too.
+- A file changed on disk reloads into a clean tab without moving the cursor, and a tab
+  with unsaved changes is never clobbered — it asks, typing that lands while the reload
+  is in flight included. Closing or quitting with unsaved changes asks once, and a quit
+  that waited on a build or the dev servers asks about edits made meanwhile.
+- A user's regex in Find in files cannot hang either process: a pattern that backtracks
+  without end still lists git's matches, unhighlighted, after 250 ms of trying.
+- The Editor follows the Terminal appearance (`effective`), repainting in place.
+- Full screen hides the rail and the header; Esc or the button restores them, and the
+  terminal's scrollback and focus are intact afterwards.
 - Every screen matches the mock-up's spacing, type and colour.

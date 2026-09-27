@@ -26,6 +26,9 @@ const shells = require('./shell.js');
 const drops = require('./drops.js');
 // Claude usage — the token Claude Code keeps in the keychain, asked every five minutes.
 const usage = require('./usage.js');
+// The Editor tab's file access (§4.14) — the in-app editor. Not sb:editor, which is
+// "open this folder in Visual Studio Code" and predates it.
+const editor = require('./editor.js');
 const { Publisher } = require('./publisher.js');
 const publisher = new Publisher({
   target: app.isPackaged ? path.resolve(process.execPath, '..', '..', '..')
@@ -39,6 +42,14 @@ const MAX_DIFF_LINES = 2000;
 
 let mainWindow = null;
 let quitting = false;
+// How many files the Editor holds with unsaved edits, as the renderer last said
+// (sb:code:dirty). Closing the window or quitting asks first while it is not 0 —
+// Electron shows nothing for a renderer's beforeunload, so main has to be the one
+// that knows. `discardOk` holds a "Discard Changes" for the rest of that one quit, so
+// nothing on the way out — the window's own close event included — asks twice; it is
+// cleared wherever a failed quit leaves the app running.
+let editorDirty = 0;
+let discardOk = false;
 
 process.on('unhandledRejection', reason => {
   console.error('[switchboard] unhandled rejection:', reason);
@@ -199,6 +210,32 @@ function openExternal(url) {
   return true;
 }
 
+/**
+ * "You have unsaved changes in N files" — true when the user chose Discard Changes.
+ * The one native dialog the app puts up on its own: a bar in the page cannot hold a
+ * close or a quit open while it waits for an answer, and a sheet on the window is
+ * exactly what every Mac editor shows here. Cancel is the default, so a stray Return
+ * loses nothing. A smoke run's window is hidden and nobody could answer, so there it
+ * says what it would have asked and lets the close go ahead.
+ */
+function confirmDiscard() {
+  const n = editorDirty;
+  if (process.env.SB_SMOKE) {
+    console.log(`SMOKE unsaved: ${n}`);
+    return true;
+  }
+  const opts = {
+    type: 'warning',
+    buttons: ['Discard Changes', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    message: `You have unsaved changes in ${n} file${n === 1 ? '' : 's'}.`,
+    detail: 'They will be lost if you close Switchboard now.',
+  };
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  return (win ? dialog.showMessageBoxSync(win, opts) : dialog.showMessageBoxSync(opts)) === 0;
+}
+
 function createWindow() {
   const bounds = loadBounds();
   mainWindow = new BrowserWindow({
@@ -234,9 +271,24 @@ function createWindow() {
     if (publisher.hasPending() && !quitting) {
       event.preventDefault();
       app.quit();
+      // app.quit() goes through before-quit, which asks about unsaved Editor files
+      // itself; asking here as well would put the same question up twice.
+      return;
+    }
+    if (!quitting && !discardOk && editorDirty > 0 && !confirmDiscard()) {
+      event.preventDefault();
+      return;
     }
   });
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    editorDirty = 0;                      // the renderer, and every buffer in it, is gone
+  });
+  // Likewise when the page itself goes — a reload from DevTools, a crashed renderer: the
+  // buffers are gone and the count main holds would ask about files nobody has any more.
+  // The page that comes back starts at 0 and reports again from its first edit.
+  mainWindow.webContents.on('did-navigate', () => { editorDirty = 0; });
+  mainWindow.webContents.on('render-process-gone', () => { editorDirty = 0; });
 
   // Every http(s) link in the app — the ports on a repo row, Open on GitHub —
   // belongs in the user's browser, never in this window.
@@ -598,24 +650,77 @@ async function clipboardImagePaste() {
 // Menu — deliberately minimal: the app has one window and its own shortcuts.
 // ---------------------------------------------------------------------------
 
+/**
+ * Undo / Redo / Cut / Close: send sb:evt:edit and let the renderer decide — the Editor
+ * takes them when it has focus (§4.14), anything else falls back to what the role did.
+ *
+ * DevTools are a second webContents the renderer knows nothing about, so while they have
+ * focus the item does to them what the role would have — the native editing command on
+ * the DevTools contents, and ⌘W closes the DevTools — or ⌘Z in the Console would undo in
+ * the page instead. ⌘W while the key window is not a BrowserWindow at all — the About
+ * panel, any native panel — is performClose: to that window, exactly what `role: 'close'`
+ * did: send() would otherwise hand it to the main page behind the panel
+ * (getFocusedWindow() is null, so `|| mainWindow`), which closed an Editor tab or the whole
+ * window and left the panel up. Before the crashed test, since the panel is still the key
+ * window then. A smoke run's window is never shown, so never key, and File ▸ Close clicked
+ * by SB_SMOKE_MENU goes to it as before. And a crashed renderer cannot answer ⌘W with
+ * sb.closeWindow(), so a dead page's window is closed from here; ⌘W is the way out of it.
+ */
+function editItem(action) {
+  const wc = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null;
+  if (wc && wc.isDevToolsFocused() && wc.devToolsWebContents) {
+    if (action === 'close') wc.closeDevTools();
+    else wc.devToolsWebContents[action]();
+    return;
+  }
+  if (action === 'close' && !BrowserWindow.getFocusedWindow() && !process.env.SB_SMOKE) {
+    if (process.platform === 'darwin') Menu.sendActionToFirstResponder('performClose:');
+    return;
+  }
+  if (action === 'close' && wc && wc.isCrashed()) {
+    mainWindow.close();
+    return;
+  }
+  send('sb:evt:edit', { action });
+}
+
 function buildMenu() {
   const appearance = storedAppearance();
   const sidebarShown = storedSidebar();
   const template = [];
   if (process.platform === 'darwin') template.push({ role: 'appMenu' });   // keeps ⌘Q
   template.push(
-    { label: 'File', submenu: [{ role: 'close' }] },                       // ⌘W
+    {
+      label: 'File',
+      submenu: [
+        // Not `role: 'close'` any more: ⌘W closes the Editor's active file tab, the way it
+        // does in Sublime and VS Code, and closed the whole window instead when it was the
+        // role. Anywhere else the renderer answers with sb.closeWindow(), which is
+        // win.close() — the old behaviour, `close` handler (bounds, publish, unsaved) and all.
+        { label: 'Close', accelerator: 'CmdOrCtrl+W', click: () => editItem('close') },
+      ],
+    },
     {
       label: 'Edit',
       submenu: [
-        { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
-        { role: 'cut' },
+        // Undo / Redo / Cut cannot be roles once there is an editor, for the reason Copy
+        // below cannot: the accelerator wins over the renderer's keydown, so Monaco never
+        // sees ⌘Z at all. And the role's native command does not reach Monaco's undo stack
+        // either — measured with Monaco 0.57 in this Electron: with EditContext nothing
+        // happens, with its hidden textarea it undoes one character of the textarea. So
+        // these are items too, and the Editor runs its own undo/redo/cut; outside it the
+        // renderer falls back to document.execCommand, which is what the role amounted to.
+        { label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: () => editItem('undo') },
+        { label: 'Redo', accelerator: 'Shift+CmdOrCtrl+Z', click: () => editItem('redo') },
+        { type: 'separator' },
+        { label: 'Cut', accelerator: 'CmdOrCtrl+X', click: () => editItem('cut') },
         // Copy / Paste / Select All cannot be roles, for the same reason ⌘R is a menu
         // item below: the accelerator wins over the renderer's keydown.  And xterm's
         // selection is not a DOM selection, so `role: 'copy'` copies nothing at all out
-        // of the Terminal tab.  These send sb:evt:edit instead; the renderer gives the
-        // focused terminal first refusal and otherwise reads the document's own
-        // selection and hands it back to sb:clipboard:write.
+        // of the Terminal tab — nor, since, out of Monaco's.  These send sb:evt:edit
+        // instead; the renderer gives the focused terminal first refusal, then the
+        // Editor, and otherwise reads the document's own selection and hands it back
+        // to sb:clipboard:write.
         // Both directions of the clipboard are main's: Chromium refuses
         // document.execCommand('copy') outside a user gesture, and the renderer would
         // otherwise need clipboard-read permission to paste.
@@ -639,12 +744,15 @@ function buildMenu() {
             if (typeof text !== 'string') text = '';
             // No text but an image on the clipboard — a pasted screenshot. Type the
             // path to a file holding it, exactly as dragging that file in would.
+            // `image` says so: that path is for a terminal (Claude Code reads the image
+            // from it), and typed into a source file or a text field it is junk.
+            let image = false;
             if (!text) {
               let img = '';
               try { img = await clipboardImagePaste(); } catch (_) { img = ''; }
-              if (img) text = img;
+              if (img) { text = img; image = true; }
             }
-            send('sb:evt:edit', { action: 'paste', text });
+            send('sb:evt:edit', { action: 'paste', text, image });
           },
         },
         {
@@ -1033,6 +1141,45 @@ handle('sb:diff:all', async (id, repoName) => {
 });
 
 // ---------------------------------------------------------------------------
+// §4.14 Editor
+//
+// The Editor tab's file access. editor.js resolves (id, repoName, path) itself, through
+// the path guard, and never through findRepo(): a scan is several git commands per repo,
+// and sb:code:stat runs every few seconds while the Editor is on screen. These handlers
+// pass the arguments through untouched — editor.js checks every one of them.
+// ---------------------------------------------------------------------------
+
+handle('sb:code:tree', id => editor.tree(id));
+handle('sb:code:read', (id, repoName, filePath) => editor.read(id, repoName, filePath));
+handle('sb:code:write', (id, repoName, filePath, text, opts) => editor.write(id, repoName, filePath, text, opts));
+handle('sb:code:base', (id, repoName, filePath, oldPath) => editor.base(id, repoName, filePath, oldPath));
+handle('sb:code:stat', (id, files) => editor.stat(id, files));
+handle('sb:code:search', (id, query, opts) => editor.search(id, query, opts));
+
+// The renderer says how many open files have unsaved edits whenever that number changes;
+// the window's `close` and the app's `before-quit` ask before they throw those away.
+handle('sb:code:dirty', count => {
+  const n = Number(count);
+  const next = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  // A quit still waiting (a publish build, dev servers stopping) keeps the window usable.
+  // "Discard Changes" was about the files unsaved THEN; a new one since must be asked
+  // about again, which the re-check after stopEverything() does once this is cleared.
+  if (quitting && next > editorDirty) discardOk = false;
+  editorDirty = next;
+  return { ok: true };
+});
+
+// ⌘W anywhere the Editor does not want it (File ▸ Close is an item now — buildMenu says
+// why). close(), never destroy(): the window's `close` handler still runs, so the bounds
+// are saved, a pending publish still turns the close into a quit, and unsaved Editor
+// files in another workspace still get their question.
+handle('sb:ui:closeWindow', () => {
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  if (win && !win.isDestroyed()) win.close();
+  return { ok: true };
+});
+
+// ---------------------------------------------------------------------------
 // §4.4 Pull requests
 // ---------------------------------------------------------------------------
 
@@ -1267,6 +1414,15 @@ if (!app.requestSingleInstanceLock()) {
   // Never leave a dev server behind.  Quit is deferred until every session is
   // torn down, whether or not anything was running.
   app.on('before-quit', event => {
+    // First, before anything is torn down: a Cancel here must leave every dev server,
+    // shell and pending publish exactly as it was.
+    if (!quitting && !discardOk && editorDirty > 0) {
+      if (!confirmDiscard()) {
+        event.preventDefault();
+        return;
+      }
+      discardOk = true;
+    }
     if (quitting) return;
     quitting = true;
     event.preventDefault();
@@ -1275,9 +1431,20 @@ if (!app.requestSingleInstanceLock()) {
       // half-prepared update behind. Build failure keeps the installed app intact.
       await publisher.wait();
       await stopEverything();
+      // Again, now: that wait can be a whole publish build, and the window stayed live
+      // through it — an edit made meanwhile was never asked about, and neither the second
+      // before-quit (`quitting`) nor the window's close would ask. Before applyOnQuit(),
+      // so a Cancel keeps the prepared update for the next quit, along with the buffers;
+      // the dev servers and shells are already stopped, which a cancelled quit can live with.
+      if (!discardOk && editorDirty > 0 && !confirmDiscard()) {
+        quitting = false;
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+        return;
+      }
       const installed = publisher.applyOnQuit();
       if (!installed.ok) {
         quitting = false;
+        discardOk = false;                // the window stays, and so do its unsaved files
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
         return;
       }
@@ -1285,6 +1452,7 @@ if (!app.requestSingleInstanceLock()) {
     })().catch(err => {
       console.error('[switchboard] could not finish quitting:', err);
       quitting = false;
+      discardOk = false;
     });
   });
 }

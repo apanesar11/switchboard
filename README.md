@@ -5,9 +5,10 @@
 
 A local control panel for your development workspaces.
 
-One window for terminals, dev servers, repository changes, and pull requests.
-Group your own projects in the sidebar and arrange up to four terminals per grid
-view. Switchboard ships with no workspaces or personal configuration.
+One window for terminals, dev servers, repository changes, pull requests, and a
+plain editor for your files. Group your own projects in the sidebar and arrange up
+to four terminals per grid view. Switchboard ships with no workspaces or personal
+configuration.
 
 ## Run it
 
@@ -91,11 +92,25 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   terminal back where it was, Claude mid-turn and all; `exit` ends one for good. That
   needs tmux (`brew install tmux`). Without it, quitting hangs the shells up the way
   closing a terminal window does, and `claude --continue` picks the conversation back up.
+- **Editor** — the fourth tab, for when you want to look at or fix a file without
+  opening another app: something like Sublime Text, with no extensions and no setup.
+  The tree on the left has a folder for each repo, lists what `git` would (ignored
+  files stay out) and marks changed files with their letter. Open files as tabs, save
+  with ⌘S, and close a tab with ⌘W (⌘W anywhere else still closes the window). ⌘P goes
+  to any file by a few letters of its name (`name:42` lands on line 42); ⇧⌘F searches
+  every repo and lists the matches by file. Bars beside the line numbers show what you
+  changed since the last commit. A file changed on disk — by Claude, a formatter, a
+  checkout — reloads into its tab by itself; if you have unsaved edits there, you are
+  asked instead, and closing Switchboard with unsaved edits asks first. The button at
+  the editor's top right makes it full screen, hiding the sidebar and the header; the
+  same button or Esc brings them back. It follows **Terminal appearance**. Save writes
+  only the file you edited — no git, no formatting, nothing else — and a file whose
+  lines end in a mix of LF and CRLF asks first, since saving makes them all one kind.
 - **Terminal appearance** — light by default, so a Claude Code set to its light theme is
   actually readable and the terminal belongs to the rest of the app. **View ▸ Terminal
   appearance** switches between Light, Dark and Match system; the choice is remembered in
-  `~/.switchboard/config.json` and applies to Logs too. Panes repaint where they stand —
-  nothing restarts and no scrollback is lost.
+  `~/.switchboard/config.json` and applies to Logs and the Editor too. Panes repaint where
+  they stand — nothing restarts, no scrollback is lost and no unsaved edit is touched.
 - **Jump to a terminal** — the workspace name is a link to its Terminal: the big title
   on the workspace page, the workspace name in any breadcrumb, and the name on a Grid
   square. It is the tab you spend the most time in, so it is one click from wherever
@@ -132,7 +147,8 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   terminal or a diff. The button beside the traffic lights, or **View ▸ Hide Sidebar**
   (⌃⌘S); it is remembered, ⌘1–9 still switch workspace without it, and if a shell rings
   while it is closed the button carries the blue dot. Nothing reloads — the terminal keeps
-  its scrollback, its focus and its shell.
+  its scrollback, its focus and its shell. The Editor's full-screen button goes further
+  and hides the header too, until you press it again or Esc.
 - **Single-repo apps** — a workspace is usually a folder of repos, but an app that is one
   repository with nothing nested — Switchboard is one — is a workspace too. List it in
   `~/.switchboard/config.json` under `workspaces` as `"name": { "dir": "folder" }` and it
@@ -173,8 +189,10 @@ dev command and links.
 
 GitHub operations run through `gh`, and repository status, diffs, fetches and pulls
 run through `git`. Terminals use xterm.js and node-pty to run your login shell,
-optionally inside tmux. Dev commands also run in local shells. Claude usage uses
-the direct request described above; local port checks use sockets and system
+optionally inside tmux. The Editor is Monaco, the editor inside VS Code, bundled with
+the app; it reads the files in your repos through `git` and the file system, and
+writes one only when you save it. Dev commands also run in local shells. Claude usage
+uses the direct request described above; local port checks use sockets and system
 utilities, and ngrok discovery calls its local HTTP API.
 
 The source does not need account credentials. Each computer uses its own Git/GitHub
