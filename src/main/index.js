@@ -29,6 +29,8 @@ const usage = require('./usage.js');
 // The Editor tab's file access (§4.14) — the in-app editor. Not sb:editor, which is
 // "open this folder in Visual Studio Code" and predates it.
 const editor = require('./editor.js');
+// The Notes tab's one markdown file per workspace (§4.15) — outside every repo.
+const notes = require('./notes.js');
 const { Publisher } = require('./publisher.js');
 const publisher = new Publisher({
   target: app.isPackaged ? path.resolve(process.execPath, '..', '..', '..')
@@ -50,6 +52,21 @@ let quitting = false;
 // cleared wherever a failed quit leaves the app running.
 let editorDirty = 0;
 let discardOk = false;
+// The Notes tab writes itself a moment after typing stops, so nothing has to be asked
+// about on the way out — but the last few hundred milliseconds would go with the
+// window. flushNotes() tells the renderer to write now and waits for it to say it has,
+// which a page's beforeunload cannot do (Electron ignores it).
+let noteFlush = null;
+let noteFlushId = 0;
+// How many notes the renderer holds that it could NOT write (sb:notes:dirty). Normally
+// 0 — a note saves itself a moment after typing stops — so the only one that ever gets
+// here is a note whose file will not take it: a read-only folder, a full disk, a
+// conflict waiting on an answer. It joins editorDirty in the one question the app asks
+// on the way out, because the alternative is losing what someone typed in silence.
+let noteDirty = 0;
+// Set once the renderer has been asked to write its notes for a close that is not a
+// quit, so the second pass through 'close' lets the window go.
+let noteClose = false;
 
 process.on('unhandledRejection', reason => {
   console.error('[switchboard] unhandled rejection:', reason);
@@ -219,7 +236,7 @@ function openExternal(url) {
  * says what it would have asked and lets the close go ahead.
  */
 function confirmDiscard() {
-  const n = editorDirty;
+  const n = editorDirty + noteDirty;
   if (process.env.SB_SMOKE) {
     console.log(`SMOKE unsaved: ${n}`);
     return true;
@@ -275,14 +292,32 @@ function createWindow() {
       // itself; asking here as well would put the same question up twice.
       return;
     }
-    if (!quitting && !discardOk && editorDirty > 0 && !confirmDiscard()) {
+    // Closing WITHOUT quitting — ⌘W, the red button — is the other way the renderer
+    // goes away, and notes are written on a 400 ms debounce: whatever sits inside it
+    // would die with the WebContents. So the close is held for one round trip while
+    // the renderer writes, and the second pass through here lets it go. Before the
+    // question below, so a note that saved fine is not asked about at all.
+    if (!quitting && !noteClose && noteDirty > 0) {
       event.preventDefault();
+      noteClose = true;
+      flushNotes().then(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+      }, () => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+      });
+      return;
+    }
+    if (!quitting && !discardOk && (editorDirty + noteDirty) > 0 && !confirmDiscard()) {
+      event.preventDefault();
+      noteClose = false;               // a cancelled close must flush again next time
       return;
     }
   });
   mainWindow.on('closed', () => {
     mainWindow = null;
     editorDirty = 0;                      // the renderer, and every buffer in it, is gone
+    noteDirty = 0;
+    noteClose = false;
   });
   // Likewise when the page itself goes — a reload from DevTools, a crashed renderer: the
   // buffers are gone and the count main holds would ask about files nobody has any more.
@@ -460,7 +495,11 @@ function smokeTest(win) {
       // launchd, still holding its ports.  Not only the no-pty fallback: in pty mode any
       // dev script that ignores SIGHUP survives the same way.  Outside the try/catch on
       // purpose: teardown must run even when the capture failed.  stopEverything() never
-      // rejects, and app.exit(0) still guarantees a deterministic exit.
+      // rejects, and app.exit(0) still guarantees a deterministic exit.  flushNotes()
+      // is here for the same reason, and BEFORE the teardown while the window is still
+      // live: a smoke that typed into a Notes tab would otherwise lose whatever sat
+      // inside the 400 ms save debounce, which is most of what a smoke types.
+      await flushNotes();
       await stopEverything();
       app.exit(0);
     }, wait);
@@ -1169,6 +1208,79 @@ handle('sb:code:dirty', count => {
   return { ok: true };
 });
 
+// The Editor tree's three writes (§4.16). Delete goes to the TRASH — shell.trashItem,
+// passed in rather than required by editor.js, which never loads Electron so its tests
+// can run under plain node. A file the Trash refuses falls back to an unlink; a FOLDER
+// never does, because a recursive delete nobody can undo is not something to do behind
+// a failure. All three re-list the tree in the renderer; none of them runs git.
+handle('sb:code:create', (id, repoName, filePath, opts) => editor.create(id, repoName, filePath, opts));
+handle('sb:code:rename', (id, repoName, from, to) => editor.rename(id, repoName, from, to));
+handle('sb:code:delete', (id, repoName, filePath) =>
+  editor.remove(id, repoName, filePath, { trash: target => shell.trashItem(target) }));
+
+// ---------------------------------------------------------------------------
+// §4.15 Notes
+//
+// One markdown scratch pad per workspace, in <config dir>/notes/. notes.js resolves the
+// id to a file itself — a workspace id or a Grid square's folder path, always hashed —
+// so these handlers pass their arguments through untouched.
+// ---------------------------------------------------------------------------
+
+handle('sb:notes:read', id => notes.read(id));
+handle('sb:notes:write', (id, text, opts) => notes.write(id, text, opts));
+handle('sb:notes:reveal', async id => {
+  const file = notes.fileFor(id);
+  if (!file) return { ok: false, error: `no workspace called ${id}` };
+  // showItemInFolder on a file that is not there opens nothing at all; the folder is
+  // the honest answer for a note that has never been written.
+  try {
+    await fs.promises.stat(file);
+    shell.showItemInFolder(file);
+  } catch (_) {
+    await fs.promises.mkdir(notes.notesDir(), { recursive: true }).catch(() => {});
+    shell.openPath(notes.notesDir());
+  }
+  return { ok: true };
+});
+
+// How many notes the renderer could not write, whenever that number moves. Read by
+// confirmDiscard() alongside editorDirty; the Notes tab's own bar says the same thing
+// in the page, and this is only so the way OUT of the app cannot lose it in silence.
+handle('sb:notes:dirty', count => {
+  const n = Number(count);
+  const next = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  if (quitting && next > noteDirty) discardOk = false;
+  noteDirty = next;
+  return { ok: true };
+});
+
+// The renderer answering flushNotes(). Resolving a promise, not returning a value: the
+// quit is waiting on it. The generation matters: a quit can be CANCELLED (an unsaved
+// Editor buffer, a failed applyOnQuit) after this one has timed out, and without the id
+// the late answer to that flush would satisfy the next quit's flush instantly — which
+// would then not wait for any note at all.
+handle('sb:notes:flushed', id => {
+  if (noteFlush && Number(id) === noteFlushId) noteFlush();
+  return { ok: true };
+});
+
+/** Ask the renderer to write every unsaved note, and wait — but never for long. */
+function flushNotes() {
+  const win = mainWindow;
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return notes.settle();
+  const id = ++noteFlushId;
+  return new Promise(resolve => {
+    const done = () => { noteFlush = null; clearTimeout(timer); resolve(); };
+    const timer = setTimeout(done, 2000);
+    noteFlush = done;
+    try {
+      win.webContents.send('sb:evt:notesFlush', id);
+    } catch (_) {
+      done();
+    }
+  }).then(() => notes.settle());
+}
+
 // ⌘W anywhere the Editor does not want it (File ▸ Close is an item now — buildMenu says
 // why). close(), never destroy(): the window's `close` handler still runs, so the bounds
 // are saved, a pending publish still turns the close into a quit, and unsaved Editor
@@ -1416,7 +1528,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', event => {
     // First, before anything is torn down: a Cancel here must leave every dev server,
     // shell and pending publish exactly as it was.
-    if (!quitting && !discardOk && editorDirty > 0) {
+    if (!quitting && !discardOk && (editorDirty + noteDirty) > 0) {
       if (!confirmDiscard()) {
         event.preventDefault();
         return;
@@ -1431,12 +1543,17 @@ if (!app.requestSingleInstanceLock()) {
       // half-prepared update behind. Build failure keeps the installed app intact.
       await publisher.wait();
       await stopEverything();
+      // The notes last, not first: a publish build can take a minute and the window
+      // stays live through it, so a flush at the top would miss whatever was typed
+      // while it ran. The renderer is still there at this point; it is only after
+      // applyOnQuit() that it is not.
+      await flushNotes();
       // Again, now: that wait can be a whole publish build, and the window stayed live
       // through it — an edit made meanwhile was never asked about, and neither the second
       // before-quit (`quitting`) nor the window's close would ask. Before applyOnQuit(),
       // so a Cancel keeps the prepared update for the next quit, along with the buffers;
       // the dev servers and shells are already stopped, which a cancelled quit can live with.
-      if (!discardOk && editorDirty > 0 && !confirmDiscard()) {
+      if (!discardOk && (editorDirty + noteDirty) > 0 && !confirmDiscard()) {
         quitting = false;
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
         return;

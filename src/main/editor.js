@@ -463,6 +463,179 @@ async function search(id, query, opts) {
   return { ok: true, matches, truncated, files: seen.size, errors };
 }
 
+// ---------------------------------------------------------------------------
+// §4.16 — making, renaming and removing a file
+//
+// The three writes the Editor's tree can do, beside Save. They go through the SAME
+// guard() as everything else, so nothing here can name a path Save could not, and
+// nothing here ever runs a git command: a new file is untracked, and `git ls-files -o`
+// shows it on the next listing without being told (git.lsFiles).
+//
+// All three work on the LEXICAL path inside the repo — `path.join(repoReal, rel)` — and
+// not on guard()'s resolved `real`. The difference matters for a symlink: renaming or
+// binning `CLAUDE.md -> AGENTS.md` has to move THE LINK, and following it to the target
+// would silently operate on a different file than the row that was clicked. guard() has
+// already said that whatever the path resolves to is inside the repo, which is the
+// question that needed answering (a link pointing OUT of it is refused outright, as it
+// is for read and write); which of the two ends is then touched is this code's own
+// decision, and it is the one the user pointed at.
+// ---------------------------------------------------------------------------
+
+/** The path a write acts on, and its folder — both lexical, inside the guarded repo. */
+function lexical(g) {
+  return path.join(g.repoReal, g.rel);
+}
+
+/**
+ * The two paths ARE one file on disk — the same inode — which on a case-insensitive
+ * volume is what `readme.md` and `README.md` are.
+ *
+ * lstat, and dev+ino, NOT realpath: realpath follows links, so `CLAUDE.md -> AGENTS.md`
+ * and `AGENTS.md` resolve to one path and read as "the same file". The case-only
+ * exception below then fired for a link and its target, and `fs.rename` replaced the
+ * real file with the link — a self-referential dangling symlink, the bytes gone and
+ * never in the Trash. Measured. A case-only pair shares dev:ino; a link and its target
+ * never do.
+ */
+function sameFile(a, b) {
+  try {
+    const sa = fs.lstatSync(a);
+    const sb = fs.lstatSync(b);
+    return sa.dev === sb.dev && sa.ino === sb.ino;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * create(id, repoName, rel, { dir }) → { ok:true, path, dir } or { ok:false, error }.
+ *
+ * A new empty file, or a new folder. Intermediate folders are made as needed — someone
+ * typing `src/lib/parse.js` into the tree's name field means all of it — and every one
+ * of them is a real folder, so the result cannot end up outside the repo even though
+ * the guard could only check the deepest part of the path that already existed.
+ *
+ * A file is created with O_EXCL: if anything appeared at that name meanwhile (a symlink
+ * included) this fails rather than following it and truncating whatever is at the end.
+ * An existing path is always a refusal, never an overwrite — the tree's New file is not
+ * a way to blank a file.
+ */
+async function create(id, repoName, rel, opts) {
+  const o = opts || {};
+  const g = await guard(id, repoName, rel);
+  if (!g.ok) return g;
+  if (g.exists || g.dangling) return { ok: false, error: `${g.rel} is already there` };
+  const abs = lexical(g);
+  const parent = path.dirname(abs);
+  // A FILE part-way along the path is its own sentence: mkdir would throw EEXIST there
+  // and "already there" would name a path where nothing exists at all.
+  try {
+    const st = await fs.promises.stat(parent);
+    if (!st.isDirectory()) return { ok: false, error: `${path.dirname(g.rel)} is a file, not a folder` };
+  } catch (_) { /* not there yet: mkdir makes it */ }
+  try {
+    await fs.promises.mkdir(parent, { recursive: true });
+    if (o.dir) await fs.promises.mkdir(abs);
+    else await (await fs.promises.open(abs, 'wx')).close();
+    return { ok: true, path: g.rel, dir: !!o.dir };
+  } catch (err) {
+    if (err && err.code === 'ENOTDIR') return { ok: false, error: `${path.dirname(g.rel)} is a file, not a folder` };
+    if (err && err.code === 'EEXIST') return { ok: false, error: `${g.rel} is already there` };
+    return { ok: false, error: `could not create ${g.rel}: ${why(err)}` };
+  }
+}
+
+/**
+ * rename(id, repoName, from, to) → { ok:true, from, to, dir } or { ok:false, error }.
+ *
+ * Renaming and moving are one operation: `to` is a whole repo-relative path, so a name
+ * typed with slashes in it moves the file, and its folders are made on the way.
+ *
+ * A case-only rename is the one time an existing destination is allowed. On APFS
+ * `readme.md` and `README.md` are the same file, so the "is something already there?"
+ * test sees the source itself; refusing would make fixing a file's capitalisation
+ * impossible, and `fs.rename` does exactly the right thing with it.
+ */
+async function rename(id, repoName, from, to) {
+  const a = await guard(id, repoName, from);
+  if (!a.ok) return a;
+  if (!a.exists && !a.dangling) return missing(a.rel);
+  const b = await guard(id, repoName, to);
+  if (!b.ok) return b;
+  if (a.rel === b.rel) return { ok: true, from: a.rel, to: b.rel, dir: false };
+
+  const src = lexical(a);
+  const dst = lexical(b);
+  if ((b.exists || b.dangling) && !sameFile(src, dst)) {
+    return { ok: false, error: `there is already something called ${path.basename(b.rel)} there` };
+  }
+  let isDir = false;
+  try {
+    isDir = (await fs.promises.lstat(src)).isDirectory();
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return missing(a.rel);
+  }
+  // Moving a folder into itself (`src` → `src/lib`) is the one rename fs would answer
+  // with a bare EINVAL, which reads as nothing at all in a one-line bar.
+  if (isDir && (dst === src || dst.startsWith(src + path.sep))) {
+    return { ok: false, error: `${a.rel} cannot be moved inside itself` };
+  }
+  try {
+    await fs.promises.mkdir(path.dirname(dst), { recursive: true });
+    await fs.promises.rename(src, dst);
+    return { ok: true, from: a.rel, to: b.rel, dir: isDir };
+  } catch (err) {
+    if (err && err.code === 'ENOTEMPTY') return { ok: false, error: `there is already a folder called ${path.basename(b.rel)} there` };
+    if (err && err.code === 'ENOTDIR') return { ok: false, error: `${path.dirname(b.rel)} is a file, not a folder` };
+    return { ok: false, error: `could not rename ${a.rel}: ${why(err)}` };
+  }
+}
+
+/**
+ * remove(id, repoName, rel, { trash }) → { ok:true, path, dir, trashed } or
+ * { ok:false, error }.
+ *
+ * Deleting is moving to the Trash, so that a slip is one ⌘Z in Finder away from being
+ * undone; `opts.trash` is main's shell.trashItem (this module never requires Electron).
+ * Only when the Trash refuses — no Finder, a volume with no trash folder — does a FILE
+ * fall back to an ordinary unlink. A FOLDER never does: a recursive delete that the
+ * user cannot undo is not something to do behind a failed Trash, so that case is
+ * reported instead.
+ */
+async function remove(id, repoName, rel, opts) {
+  const o = opts || {};
+  const g = await guard(id, repoName, rel);
+  if (!g.ok) return g;
+  if (!g.exists && !g.dangling) return missing(g.rel);
+  const abs = lexical(g);
+  let isDir = false;
+  try {
+    isDir = (await fs.promises.lstat(abs)).isDirectory();
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return missing(g.rel);
+    return { ok: false, error: `could not delete ${g.rel}: ${why(err)}` };
+  }
+
+  if (typeof o.trash === 'function') {
+    try {
+      await o.trash(abs);
+      return { ok: true, path: g.rel, dir: isDir, trashed: true };
+    } catch (err) {
+      if (isDir) return { ok: false, error: `could not move ${g.rel} to the Trash: ${why(err)}` };
+    }
+  } else if (isDir) {
+    return { ok: false, error: `could not move ${g.rel} to the Trash` };
+  }
+
+  try {
+    await fs.promises.unlink(abs);
+    return { ok: true, path: g.rel, dir: false, trashed: false };
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return missing(g.rel);
+    return { ok: false, error: `could not delete ${g.rel}: ${why(err)}` };
+  }
+}
+
 module.exports = {
   tree,
   read,
@@ -470,4 +643,7 @@ module.exports = {
   base,
   stat,
   search,
+  create,
+  rename,
+  remove,
 };

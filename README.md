@@ -5,10 +5,10 @@
 
 A local control panel for your development workspaces.
 
-One window for terminals, dev servers, repository changes, pull requests, and a
-plain editor for your files. Group your own projects in the sidebar and arrange up
-to four terminals per grid view. Switchboard ships with no workspaces or personal
-configuration.
+One window for terminals, dev servers, repository changes, pull requests, a plain
+editor for your files and a scratch pad per workspace. Group your own projects in the
+sidebar and arrange up to four terminals per grid view. Switchboard ships with no
+workspaces or personal configuration.
 
 ## Run it
 
@@ -110,6 +110,30 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   same button or Esc brings them back. It follows **Terminal appearance**. Save writes
   only the file you edited — no git, no formatting, nothing else — and a file whose
   lines end in a mix of LF and CRLF asks first, since saving makes them all one kind.
+  Right-click a row in the tree to make a file or a folder, rename one, copy its path
+  or reveal it in Finder; the two small buttons beside **Files** make a file or a folder
+  wherever the tree's cursor is. You type the name in the tree itself, and a name with
+  slashes in it makes the folders on the way (or moves the file, when you are renaming).
+  **Delete** asks first and puts the file in the Trash, so a slip is one ⌘Z in Finder
+  away from being undone — and if the Trash is not available it says so rather than
+  pretending. Nothing here runs git: a file you make is untracked, exactly as it would
+  be if you had made it in a shell.
+- **Notes** — the fifth tab: somewhere to write things down for a workspace, one note
+  each. It works the way Notion does rather than the way a markdown editor does — type
+  `### ` at the start of a line and the line becomes a heading and the `### ` goes,
+  `- ` makes a bullet, `1. ` a numbered one, `[] ` a checkbox you can tick, `> ` a
+  quote, three backticks a code block and `---` a divider. `**bold**`, `*italic*`,
+  `` `code` `` and `~~strike~~` apply as you finish typing them, ⌘B and ⌘I do the same
+  to a selection, ⇥ and ⇧⇥ indent a list, and a web address you type becomes a link.
+  There is no source view and no preview toggle, because what you see is the note. It
+  saves itself a moment after you stop typing, and again when you leave the window,
+  close it or quit — ⌘S if you want to be sure. If it ever cannot write the file, it
+  says so and asks before you quit rather than losing what you wrote. The note is an ordinary markdown file, so anything
+  can read it, but it lives in `~/.switchboard/notes/` rather than in your repo: it
+  will never show up in **Changes**, in the Editor's tree or in a commit. A line it has
+  no block for — a table, an image, a link definition, a line of HTML — is shown as the
+  source it is, in monospace, and saved back untouched; so is anything it cannot write
+  out exactly as you had it. Opening a note never rewrites it.
 - **Terminal appearance** — light by default, so a Claude Code set to its light theme is
   actually readable and the terminal belongs to the rest of the app. **View ▸ Terminal
   appearance** switches between Light, Dark and Match system; the choice is remembered in
@@ -127,7 +151,11 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   one — with Done to finish; the bar beside the ⋯ is this session's Claude usage. A
   square *is* that workspace's Terminal — the same shell, the same scrollback, whether
   you look at it here or on its own tab — and taking it out of a square leaves the shell
-  running. A square can also hold **any folder** rather than a workspace: the picker's
+  running. The button at a square's top right swaps the terminal for that workspace's
+  **note** and back again — one or the other, never both — so a square can be a scratch
+  pad while you wait on the shell behind it, which keeps running either way. It carries
+  a small amber dot when there is already something written down. A square can also
+  hold **any folder** rather than a workspace: the picker's
   first row, **Choose a folder…**, opens the Mac's folder chooser, and the square becomes
   a shell in that folder — the apps folder itself, a repo outside it, anything — on no
   rail and with no screen of its own. Views are remembered in the config; the window
@@ -195,13 +223,17 @@ GitHub operations run through `gh`, and repository status, diffs, fetches and pu
 run through `git`. Terminals use xterm.js and node-pty to run your login shell,
 optionally inside tmux. The Editor is Monaco, the editor inside VS Code, bundled with
 the app; it reads the files in your repos through `git` and the file system, and
-writes one only when you save it. Dev commands also run in local shells. Claude usage
+writes, moves or bins one only when you ask it to — a save, a new file or folder, a
+rename, a delete. Notes are plain markdown files of Switchboard's own, one per
+workspace, in `~/.switchboard/notes/`; nothing in a repo. Dev commands also run in
+local shells. Claude usage
 uses the direct request described above; local port checks use sockets and system
 utilities, and ngrok discovery calls its local HTTP API.
 
 The source does not need account credentials. Each computer uses its own Git/GitHub
 and coding CLI sign-ins. Switchboard's configuration stays in
-`~/.switchboard/config.json`; window state, browser storage and publish logs live in
+`~/.switchboard/config.json` and your notes beside it in `~/.switchboard/notes/`;
+window state, browser storage and publish logs live in
 Electron's Application Support folder. Terminal programs can save their own history
 and credentials outside this checkout. Pasted images are saved in a temporary
 Switchboard folder.

@@ -59,6 +59,38 @@ contextBridge.exposeInMainWorld('sb', {
   // How many open files have unsaved edits, whenever that changes: main asks before a
   // close or a quit would throw them away (Electron ignores a page's beforeunload).
   codeDirty: count => ipcRenderer.invoke('sb:code:dirty', count),
+  // The Editor tree's three writes (§4.16). Same (id, repoName, path) key as the rest of
+  // sb:code:*, and the same guard in front of them: nothing here can name a file Save
+  // could not. codeCreate makes an empty file, or a folder with `opts.dir`; codeRename
+  // moves within one repo (a path with slashes in it moves the file); codeDelete puts
+  // the file in the Trash, so a slip is one ⌘Z in Finder away from being undone.
+  codeCreate: (id, repoName, path, opts) => ipcRenderer.invoke('sb:code:create', id, repoName, path, opts || {}),
+  codeRename: (id, repoName, from, to) => ipcRenderer.invoke('sb:code:rename', id, repoName, from, to),
+  codeDelete: (id, repoName, path) => ipcRenderer.invoke('sb:code:delete', id, repoName, path),
+
+  // Notes (§4.15) — one markdown scratch pad per workspace, kept outside every repo.
+  // `id` is a workspace id, or a Grid square's folder path. notesRead answers
+  // { ok, text, mtimeMs, missing } — a note never written is an empty one, not an error
+  // — or { ok, tooLarge } for a file past 2 MB, which is shown rather than opened.
+  notesRead: id => ipcRenderer.invoke('sb:notes:read', id),
+  // Save. `opts.mtimeMs` is what the renderer last read or wrote, so a note something
+  // else has touched since comes back { ok:false, conflict:true } instead of overwritten;
+  // `opts.force` is the user's Keep mine.
+  notesWrite: (id, text, opts) => ipcRenderer.invoke('sb:notes:write', id, text, opts || {}),
+  // The file in Finder, or the folder when there is none yet — the way out of a note
+  // too large to open.
+  notesReveal: id => ipcRenderer.invoke('sb:notes:reveal', id),
+  // How many notes hold text that could NOT be written, whenever that changes: main
+  // asks before a close or a quit would throw them away, as it does for the Editor's
+  // buffers. Normally 0 — a note saves itself.
+  notesDirty: count => ipcRenderer.invoke('sb:notes:dirty', count),
+  // The quit flush. Main asks on its way out and WAITS for notesFlushed, because a
+  // page's beforeunload is ignored and the last few hundred ms of typing would go with
+  // the window otherwise.
+  // `id` is the flush's generation; hand it straight back so main can tell a late
+  // answer to a flush it has given up on from an answer to the one it is waiting for.
+  onNotesFlush: cb => subscribe('sb:evt:notesFlush', cb),
+  notesFlushed: id => ipcRenderer.invoke('sb:notes:flushed', id),
 
   // Pull requests
   prSummary: id => ipcRenderer.invoke('sb:pr:summary', id),

@@ -30,6 +30,7 @@ const EXPECTED = [
   'src/main/drops.js',
   'src/main/usage.js',
   'src/main/editor.js',
+  'src/main/notes.js',
   'src/preload.js',
   'src/renderer/index.html',
   'src/renderer/styles.css',
@@ -37,6 +38,7 @@ const EXPECTED = [
   'src/renderer/dom.js',
   'src/renderer/app.js',
   'src/renderer/markdown.js',
+  'src/renderer/noteedit.js',
   'src/renderer/diffview.js',
   'src/renderer/views/workspace.js',
   'src/renderer/views/logs.js',
@@ -49,6 +51,7 @@ const EXPECTED = [
   'src/renderer/views/pr.js',
   'src/renderer/views/prs.js',
   'src/renderer/views/editor.js',
+  'src/renderer/views/notes.js',
 ];
 
 function walk(dir, out) {

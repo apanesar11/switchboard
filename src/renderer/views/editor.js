@@ -631,6 +631,14 @@ window.SB = window.SB || {};
       statting: false,
       refreshTimer: null,
       shown: false,
+      entry: null,                 // an inline name field in the tree; see startEntry()
+      menu: null,                  // the tree's right-click menu, while one is open
+      // Folders made here that git cannot see. `git ls-files` lists blobs, so an empty
+      // folder is in no listing at all — it would be created on disk and vanish from
+      // the tree in the same breath. These are folded back in on every re-list, for as
+      // long as the window lives; once something is in one, git lists it and this is
+      // simply redundant. A relaunch forgets an empty one, exactly as git has.
+      newDirs: Object.create(null),
     };
 
     ed.bandText = h('span.edbt');
@@ -797,6 +805,7 @@ window.SB = window.SB || {};
     // is starved while the window is hidden or occluded.
     if (!attached) {
       closePalette(ed, false);
+      closeMenu(ed);
       setTimeout(function () { attach(ed); }, 0);
     }
     return ed.root;
@@ -1805,11 +1814,33 @@ window.SB = window.SB || {};
   // `files` and `ignored` (§4.14) into one tree: an ignored file is a row like any other,
   // drawn dim, and a ⌘P hit like any other. Nothing here knows which folders git ignores:
   // main leaves those out whole.
+  function folder() {
+    return { dirs: Object.create(null), files: [], ign: Object.create(null), list: null };
+  }
+
+  // The folders made from the tree that git has nothing to say about (see ed.newDirs),
+  // put back into the listing so they stay on screen until they hold something.
+  function foldMadeDirs(ed) {
+    Object.keys(ed.newDirs).forEach(function (key) {
+      var cut = key.indexOf('\u0000');
+      var repoName = key.slice(0, cut);
+      var rel = key.slice(cut + 1);
+      if (!rel) return;
+      var repo = null;
+      for (var i = 0; i < (ed.repos || []).length; i++) if (ed.repos[i].name === repoName) repo = ed.repos[i];
+      if (!repo) return;
+      var segs = rel.split('/');
+      var node = repo.root;
+      for (var k = 0; k < segs.length; k++) {
+        if (!node.dirs[segs[k]]) { node.dirs[segs[k]] = folder(); node.list = null; }
+        node = node.dirs[segs[k]];
+      }
+      if (!repo.count) repo.count = 1;      // "no files" is no longer the truth
+    });
+  }
+
   function adoptTree(ed, repos) {
     var index = [];
-    function folder() {
-      return { dirs: Object.create(null), files: [], ign: Object.create(null), list: null };
-    }
     ed.repos = repos.filter(function (r) { return r && typeof r.name === 'string'; }).map(function (r) {
       var root = folder();
       var count = 0;
@@ -1831,6 +1862,7 @@ window.SB = window.SB || {};
       (Array.isArray(r.ignored) ? r.ignored : []).forEach(function (p) { add(p, true); });
       return { name: r.name, root: root, count: count, truncated: !!r.truncated, error: r.error || null };
     });
+    foldMadeDirs(ed);
     ed.index = index;
     ed.byKey = Object.create(null);
     index.forEach(function (e) { ed.byKey[fileKey(e.repo, e.path)] = e; });
@@ -1896,18 +1928,31 @@ window.SB = window.SB || {};
   var LETTER = { M: 'M', A: 'A', '?': 'A', D: 'D', R: 'R' };
 
   function rowKey(row) {
-    if (row.kind === 'note') return null;             // a sentence, not a place the cursor goes
+    // A sentence, or a field being typed into — neither is a place the cursor goes.
+    if (row.kind === 'note' || row.kind === 'entry') return null;
     return (row.kind === 'file' ? 'f' : 'd') + fileKey(row.repo, row.path);
   }
 
   function visibleRows(ed) {
     var rows = [];
+    var entry = ed.entry;
+    // A new file or folder is named in a row of its own, first inside its parent —
+    // the tree is sorted and the name is not known yet, so anywhere else would move
+    // under the caret as it is typed. A rename stands where its own row does.
+    function newHere(repo, dir) {
+      return !!entry && entry.mode !== 'rename' && entry.repo === repo && entry.dir === dir;
+    }
+    function renameHere(repo, p) {
+      return !!entry && entry.mode === 'rename' && entry.repo === repo && entry.path === p;
+    }
     function walk(node, repo, dir, depth) {
+      if (newHere(repo, dir)) rows.push({ kind: 'entry', depth: depth });
       var list = children(node);
       var cap = Math.min(list.length, FOLDER_CAP);
       for (var i = 0; i < cap; i++) {
         var c = list[i];
         var p = dir ? dir + '/' + c.name : c.name;
+        if (renameHere(repo, p)) { rows.push({ kind: 'entry', depth: depth }); continue; }
         if (c.node) {
           rows.push({ kind: 'dir', repo: repo, path: p, name: c.name, depth: depth });
           if (ed.expanded[fileKey(repo, p)]) walk(c.node, repo, p, depth + 1);
@@ -1923,7 +1968,7 @@ window.SB = window.SB || {};
       rows.push({ kind: 'dir', repo: repo.name, path: '', name: repo.name, depth: 0, top: true });
       if (!ed.expanded[fileKey(repo.name, '')]) return;
       if (repo.error) rows.push({ kind: 'note', depth: 1, name: repo.error });
-      else if (!repo.count) rows.push({ kind: 'note', depth: 1, name: 'no files' });
+      else if (!repo.count && !newHere(repo.name, '')) rows.push({ kind: 'note', depth: 1, name: 'no files' });
       else walk(repo.root, repo.name, '', 1);
       if (repo.truncated) rows.push({ kind: 'note', depth: 1, name: 'only the first ' + num(repo.count) + ' files are listed' });
     });
@@ -1932,8 +1977,13 @@ window.SB = window.SB || {};
 
   function paintTree(ed) {
     var keep = ed.tree.scrollTop;
+    var field = ed.entry && ed.tree.contains(document.activeElement) ? document.activeElement : null;
+    if (field && field.tagName === 'INPUT') {
+      ed.entry.sel = [field.selectionStart, field.selectionEnd];
+      ed.entry.focused = true;
+    }
     D.clear(ed.tree);
-    ed.tree.appendChild(h('div.edth', { 'aria-hidden': 'true' }, 'Files'));
+    ed.tree.appendChild(treeHead(ed));
     ed.rows = [];
     var ws = workspace(ed);
     if (!ed.repos) {
@@ -1965,9 +2015,32 @@ window.SB = window.SB || {};
     ed.tree.appendChild(frag);
     ed.tree.scrollTop = keep;
     cursorTo(ed, ed.cursor, false);
+    focusEntry(ed);
+  }
+
+  // The heading, and the two things the tree can do that no row can: make a file and
+  // make a folder, in whichever folder the cursor is in. Everything else — rename,
+  // delete, reveal — belongs to a row, and lives on its right-click menu.
+  function treeHead(ed) {
+    var head = h('div.edth', null, h('span.edthl', { 'aria-hidden': 'true' }, 'Files'), h('span.sp'));
+    if (!ed.repos || !ed.repos.length) return head;
+    head.appendChild(h('button.ib.edadd', {
+      type: 'button',
+      title: 'New file',
+      'aria-label': 'New file',
+      onClick: function () { startEntry(ed, 'new'); },
+    }, D.icon('note')));
+    head.appendChild(h('button.ib.edadd', {
+      type: 'button',
+      title: 'New folder',
+      'aria-label': 'New folder',
+      onClick: function () { startEntry(ed, 'newdir'); },
+    }, D.icon('folderPlus')));
+    return head;
   }
 
   function rowEl(ed, row, i, key, activeKey) {
+    if (row.kind === 'entry') return entryRow(ed, row);
     if (row.kind === 'note') {
       return h('div.edrow.note', { style: 'padding-left:' + indent(row.depth) + 'px', dataset: { i: i } },
         h('span.cv'), h('span.nm', null, row.name));
@@ -2021,6 +2094,17 @@ window.SB = window.SB || {};
     if (scroll) reveal(ed.tree, el, 36);             // clear of the sticky "Files" heading
   }
 
+  // A folder, rather than a file: itself expanded and its row under the cursor.
+  function revealDir(ed, repo, path) {
+    ed.expanded[fileKey(repo, '')] = true;
+    var segs = path.split('/');
+    for (var i = 1; i <= segs.length; i++) ed.expanded[fileKey(repo, segs.slice(0, i).join('/'))] = true;
+    ed.cursor = 'd' + fileKey(repo, path);
+    if (!ed.repos) return;
+    paintTree(ed);
+    cursorTo(ed, ed.cursor, true);
+  }
+
   // Opening a file shows it in the tree: its repo and folders open, its row in view.
   function revealInTree(ed, repo, path) {
     ed.expanded[fileKey(repo, '')] = true;
@@ -2046,8 +2130,26 @@ window.SB = window.SB || {};
   // tens of thousands of files and Tab must not walk through them.
   function wireTree(ed) {
     ed.tree.addEventListener('mousedown', function () { ed.tree.classList.remove('kbd'); });
+    // Right-click is how a file is made, renamed or binned (§4.16). On the tree's own
+    // rows only: anywhere else in the tree it is left alone, and Monaco keeps its own.
+    ed.tree.addEventListener('contextmenu', function (e) {
+      var el = e.target && e.target.closest ? e.target.closest('.edrow[data-i]') : null;
+      var row = el && el.classList.contains('ent') ? null : (el ? ed.rows[Number(el.dataset.i)] : null);
+      if (!row || row.kind === 'note') {
+        // Still ours, still not Chromium's "Reload / Inspect": the tree offers the two
+        // things that need no row at all.
+        e.preventDefault();
+        if (ed.repos && ed.repos.length) openMenu(ed, { kind: 'dir', repo: ed.repos[0].name, path: '', name: ed.repos[0].name, top: true }, e.clientX, e.clientY);
+        return;
+      }
+      e.preventDefault();
+      ed.cursor = rowKey(row);
+      cursorTo(ed, ed.cursor, false);
+      openMenu(ed, row, e.clientX, e.clientY);
+    });
     ed.tree.addEventListener('click', function (e) {
       var el = e.target && e.target.closest ? e.target.closest('.edrow[data-i]') : null;
+      if (el && el.classList.contains('ent')) return;
       var row = el ? ed.rows[Number(el.dataset.i)] : null;
       if (!row || row.kind === 'note') return;
       if (row.kind === 'dir') { toggleDir(ed, row); return; }
@@ -2125,6 +2227,331 @@ window.SB = window.SB || {};
       ed.tree.style.width = width + 'px';
       saveWidth();
     });
+  }
+
+
+  // ── making, renaming and removing a file (§4.16) ──────────────────────────
+  //
+  // The three writes the tree can do beside Save. Each is one bridge call, and each
+  // one's answer is either the new tree or a sentence in the Editor's bar — nothing
+  // here guesses at whether it worked. Afterwards the tree is listed again and the
+  // workspace re-scanned, so the Changes tab, the git letters in the tree and the
+  // header's count all follow without being told separately.
+  //
+  // A new file is untracked, which `git ls-files -o` shows on the next listing with no
+  // `git add` of any kind — this module never runs a git command, and creating a file
+  // must not quietly stage one.
+
+  function rescan(ed) {
+    if (typeof SB.refresh === 'function') SB.refresh(ed.wsId);
+  }
+
+  /** The absolute path of a repo file, from the scan's Repo. Null before the scan. */
+  function absOf(ed, repoName, rel) {
+    var repo = scanned(ed, repoName);
+    if (!repo || !repo.dir) return null;
+    return rel ? repo.dir + '/' + rel : repo.dir;
+  }
+
+  function joinRel(dir, name) {
+    var clean = String(name || '').replace(/^\/+|\/+$/g, '');
+    return dir ? dir + '/' + clean : clean;
+  }
+
+  function cursorRow(ed) {
+    var i = ed.rows.map(rowKey).indexOf(ed.cursor);
+    return i === -1 ? null : ed.rows[i];
+  }
+
+  /** Which folder a row is "in": a folder is itself, a file is its parent. */
+  function folderOf(row) {
+    if (!row || row.kind === 'note' || row.kind === 'entry') return null;
+    return { repo: row.repo, dir: row.kind === 'dir' ? row.path : dirName(row.path) };
+  }
+
+  function tabsUnder(ed, repoName, rel, isDir) {
+    return ed.tabs.filter(function (tab) {
+      if (tab.kind === 'find' || tab.repo !== repoName) return false;
+      return tab.path === rel || (isDir && tab.path.indexOf(rel + '/') === 0);
+    });
+  }
+
+  // ── the inline name field ─────────────────────────────────────────────────
+
+  /**
+   * startEntry(ed, mode, row) — a text field in the tree, where the thing being named
+   * is going to be. `mode` is 'new', 'newdir' or 'rename'; `row` defaults to wherever
+   * the tree's cursor is, so the header's two buttons need no argument.
+   */
+  function startEntry(ed, mode, row) {
+    if (!ed.repos || !ed.repos.length) return;
+    closeMenu(ed);
+    var at = row || cursorRow(ed);
+    if (mode === 'rename') {
+      if (!at || at.top || at.kind === 'note' || at.kind === 'entry') return;
+      ed.entry = { mode: mode, repo: at.repo, path: at.path, value: at.name, fresh: true, sel: null };
+    } else {
+      var where = folderOf(at) || { repo: ed.repos[0].name, dir: '' };
+      ed.expanded[fileKey(where.repo, '')] = true;
+      var segs = where.dir ? where.dir.split('/') : [];
+      for (var i = 1; i <= segs.length; i++) ed.expanded[fileKey(where.repo, segs.slice(0, i).join('/'))] = true;
+      ed.entry = { mode: mode, repo: where.repo, dir: where.dir, value: '', fresh: true, sel: null };
+    }
+    paintTree(ed);
+  }
+
+  function entryRow(ed, row) {
+    var e = ed.entry;
+    // No `data-i`: every other handler on the tree reads that attribute as an index
+    // into ed.rows, and this row is not in that list.
+    var el = h('div.edrow.ent', {
+      style: 'padding-left:' + indent(row.depth) + 'px',
+    }, h('span.cv', null, e.mode === 'newdir' ? D.icon('chev') : null));
+    var input = h('input.edname', {
+      type: 'text',
+      value: e.value,
+      spellcheck: 'false',
+      autocomplete: 'off',
+      'aria-label': e.mode === 'rename' ? 'New name' : (e.mode === 'newdir' ? 'Name for the new folder' : 'Name for the new file'),
+      placeholder: e.mode === 'newdir' ? 'folder name' : 'file name',
+      onInput: function () { if (ed.entry === e) e.value = input.value; },
+      onKeydown: function (ev) {
+        ev.stopPropagation();
+        if (ev.key === 'Enter') { ev.preventDefault(); commitEntry(ed); }
+        else if (ev.key === 'Escape') { ev.preventDefault(); cancelEntry(ed); }
+      },
+      // Deferred, and never decided from the event: Chromium blurs a focused element
+      // BEFORE a rebuild detaches it, so a re-listed tree arriving mid-word looks
+      // exactly like the user clicking away. Only where focus actually IS once the
+      // rebuild is over can say which happened. (The same trap views/grid.js's name
+      // field is written around.)
+      onBlur: function () {
+        setTimeout(function () {
+          if (ed.entry !== e) return;
+          var now = ed.tree.querySelector('.edname');
+          if (now && document.activeElement === now) return;
+          if (String(e.value || '').trim()) commitEntry(ed);
+          else cancelEntry(ed);
+        }, 0);
+      },
+    });
+    el.appendChild(input);
+    return el;
+  }
+
+  function focusEntry(ed) {
+    var e = ed.entry;
+    if (!e) return;
+    var input = ed.tree.querySelector('.edname');
+    if (!input) return;
+    if (!e.fresh && !e.focused) return;
+    if (e.fresh) {
+      e.fresh = false;
+      try { input.focus({ preventScroll: true }); } catch (_) { input.focus(); }
+      // A rename selects the stem and leaves the extension alone, the way Finder does.
+      var dot = e.mode === 'rename' ? input.value.lastIndexOf('.') : -1;
+      if (dot > 0) input.setSelectionRange(0, dot);
+      else input.select();
+      reveal(ed.tree, input.parentNode, 36);
+      return;
+    }
+    e.focused = false;
+    try { input.focus({ preventScroll: true }); } catch (_) { input.focus(); }
+    if (e.sel) { try { input.setSelectionRange(e.sel[0], e.sel[1]); } catch (_) { /* gone */ } }
+  }
+
+  function cancelEntry(ed) {
+    if (!ed.entry) return;
+    ed.entry = null;
+    paintTree(ed);
+    if (onScreen(ed)) ed.tree.focus();
+  }
+
+  function commitEntry(ed) {
+    var e = ed.entry;
+    if (!e) return;
+    ed.entry = null;
+    var name = String(e.value || '').trim().replace(/^\/+|\/+$/g, '');
+    paintTree(ed);
+    if (!name) return;
+    if (e.mode === 'rename') {
+      var to = joinRel(dirName(e.path), name);
+      if (to === e.path) return;
+      doRename(ed, e.repo, e.path, to);
+      return;
+    }
+    doCreate(ed, e.repo, joinRel(e.dir, name), e.mode === 'newdir');
+  }
+
+  // ── the three operations ──────────────────────────────────────────────────
+
+  function failed(ed, text) {
+    showBar(ed, { id: 'fileop', tone: 'err', rank: 2, text: text });
+  }
+
+  function doCreate(ed, repoName, rel, isDir) {
+    call('codeCreate', ed.wsId, repoName, rel, { dir: !!isDir }).then(function (r) {
+      if (!r || !r.ok) { failed(ed, message(r && r.error)); return; }
+      clearBar(ed, 'fileop');
+      // An empty folder is in no `git ls-files` output, so the tree has to be told
+      // about it directly or it would disappear the instant it was made.
+      if (isDir) {
+        ed.newDirs[fileKey(repoName, rel)] = true;
+        ed.expanded[fileKey(repoName, rel)] = true;
+      }
+      loadTree(ed);
+      rescan(ed);
+      if (isDir) revealDir(ed, repoName, rel);
+      else openFile(ed, repoName, rel, { focus: true });
+    });
+  }
+
+  function doRename(ed, repoName, from, to) {
+    var isDir = isFolderRow(ed, repoName, from);
+    var open = tabsUnder(ed, repoName, from, isDir);
+    for (var i = 0; i < open.length; i++) {
+      if (isDirty(open[i])) {
+        failed(ed, 'save ' + open[i].name + ' before renaming it');
+        return;
+      }
+    }
+    call('codeRename', ed.wsId, repoName, from, to).then(function (r) {
+      if (!r || !r.ok) { failed(ed, message(r && r.error)); return; }
+      clearBar(ed, 'fileop');
+      // Every open tab under the old name follows it. They are all clean (refused
+      // above otherwise), so closing and re-opening loses nothing but a scroll
+      // position, and it is the only way the model's URI follows the file.
+      var wasActive = null;
+      open.forEach(function (tab) {
+        var next = tab.path === from ? to : to + tab.path.slice(from.length);
+        if (tab.key === ed.active) wasActive = next;
+        dropTab(ed, tab);
+        openFile(ed, repoName, next, { quiet: true });
+      });
+      if (wasActive) activate(ed, fileKey(repoName, wasActive), { reveal: true });
+      if (ed.newDirs[fileKey(repoName, from)]) {
+        delete ed.newDirs[fileKey(repoName, from)];
+        ed.newDirs[fileKey(repoName, to)] = true;
+      }
+      if (ed.expanded[fileKey(repoName, from)]) ed.expanded[fileKey(repoName, to)] = true;
+      loadTree(ed);
+      rescan(ed);
+      if (isDir) revealDir(ed, repoName, to); else revealInTree(ed, repoName, to);
+    });
+  }
+
+  function isFolderRow(ed, repoName, rel) {
+    for (var i = 0; i < ed.rows.length; i++) {
+      var row = ed.rows[i];
+      if (row.kind === 'dir' && row.repo === repoName && row.path === rel) return true;
+    }
+    return !!ed.newDirs[fileKey(repoName, rel)];
+  }
+
+  // Deleting asks once, in the bar, the way closing an unsaved tab does — never a
+  // dialog. It says Trash because that is where the file goes: a slip is one ⌘Z in
+  // Finder away from being undone, which is the whole reason this is allowed at all.
+  function askDelete(ed, row) {
+    var isDir = row.kind === 'dir';
+    var open = tabsUnder(ed, row.repo, row.path, isDir);
+    var unsaved = 0;
+    for (var i = 0; i < open.length; i++) if (isDirty(open[i])) unsaved++;
+    showBar(ed, {
+      id: 'del', tone: 'warn', rank: 3, focus: true, dismiss: false,
+      text: 'move ' + row.name + ' to the Trash?' +
+        (unsaved ? ' ' + D.plural(unsaved, 'open file') + ' here has unsaved changes.' : ''),
+      actions: [
+        { label: 'Move to Trash', pri: true, onClick: function () { doDelete(ed, row, isDir, open); } },
+        { label: 'Cancel', onClick: function () { if (onScreen(ed)) focusEditor(ed); } },
+      ],
+    });
+  }
+
+  function doDelete(ed, row, isDir, open) {
+    call('codeDelete', ed.wsId, row.repo, row.path).then(function (r) {
+      if (!r || !r.ok) { failed(ed, message(r && r.error)); return; }
+      clearBar(ed, 'fileop');
+      // The bar promised the Trash, and that promise is the whole reason deleting is
+      // allowed here at all. When the Trash refused it — a volume with no trash folder
+      // — main unlinked the file instead, and the user has to be told that the undo
+      // they agreed to is not there.
+      if (r.trashed === false) {
+        showBar(ed, {
+          id: 'fileop', tone: 'warn', rank: 2,
+          text: 'deleted ' + row.name + ' \u2014 the Trash was not available, so this cannot be undone',
+        });
+      }
+      open.forEach(function (tab) { dropTab(ed, tab); });
+      delete ed.newDirs[fileKey(row.repo, row.path)];
+      delete ed.expanded[fileKey(row.repo, row.path)];
+      loadTree(ed);
+      rescan(ed);
+    });
+  }
+
+  // ── the tree's right-click menu ───────────────────────────────────────────
+
+  function closeMenu(ed) {
+    if (!ed.menu) return;
+    if (ed.menu.parentNode) ed.menu.parentNode.removeChild(ed.menu);
+    ed.menu = null;
+  }
+
+  function menuItem(ed, label, fn, bad) {
+    return h('button.mi' + (bad ? '.bad' : ''), {
+      type: 'button',
+      role: 'menuitem',
+      onClick: function () { closeMenu(ed); fn(); },
+    }, label);
+  }
+
+  function openMenu(ed, row, x, y) {
+    closeMenu(ed);
+    if (!row || row.kind === 'note' || row.kind === 'entry') return;
+    var isDir = row.kind === 'dir';
+    var abs = absOf(ed, row.repo, row.path);
+    var box = h('div.menu.edmenu', {
+      role: 'menu',
+      onKeydown: function (e) {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMenu(ed); ed.tree.focus(); return; }
+        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+        e.preventDefault();
+        var items = Array.prototype.slice.call(box.querySelectorAll('.mi'));
+        if (!items.length) return;
+        var at = items.indexOf(document.activeElement);
+        items[e.key === 'ArrowDown' ? (at + 1) % items.length : (at - 1 + items.length) % items.length].focus();
+      },
+      onMousedown: function (e) { if (!e.target.closest('.mi')) e.preventDefault(); },
+    });
+
+    if (!isDir) box.appendChild(menuItem(ed, 'Open', function () { openFile(ed, row.repo, row.path, { focus: true }); }));
+    box.appendChild(menuItem(ed, 'New file…', function () { startEntry(ed, 'new', row); }));
+    box.appendChild(menuItem(ed, 'New folder…', function () { startEntry(ed, 'newdir', row); }));
+    // A repo's own folder is not this Editor's to rename or bin: it is the workspace.
+    if (!row.top) {
+      box.appendChild(h('div.msep'));
+      box.appendChild(menuItem(ed, 'Rename…', function () { startEntry(ed, 'rename', row); }));
+      box.appendChild(menuItem(ed, 'Delete', function () { askDelete(ed, row); }, true));
+    }
+    box.appendChild(h('div.msep'));
+    box.appendChild(menuItem(ed, 'Copy path', function () {
+      toClipboard(row.path ? row.repo + '/' + row.path : row.repo);
+    }));
+    if (abs) {
+      box.appendChild(menuItem(ed, 'Reveal in Finder', function () {
+        call('revealInFinder', abs);
+      }));
+    }
+
+    // Placed against the slab, which is the positioned box this sits in: the tree
+    // scrolls and clips, and a menu inside it would be cut off at the first row.
+    var slab = ed.slab.getBoundingClientRect();
+    box.style.left = Math.max(4, Math.min(x - slab.left, slab.width - 190)) + 'px';
+    box.style.top = Math.max(4, Math.min(y - slab.top, slab.height - 40)) + 'px';
+    ed.slab.appendChild(box);
+    ed.menu = box;
+    var first = box.querySelector('.mi');
+    if (first) first.focus();
   }
 
   // ── the status bar ────────────────────────────────────────────────────────
@@ -2648,6 +3075,17 @@ window.SB = window.SB || {};
       len: hit ? hit[1] - hit[0] : 0,
     });
   }
+
+  // A press anywhere but inside the menu dismisses it, the way a macOS menu behaves.
+  // Capture phase, so it runs before whatever was pressed — the same rule views/grid.js
+  // uses for the Grid's own ⋯ menu.
+  document.addEventListener('mousedown', function (e) {
+    var t = e.target;
+    var inside = t && typeof t.closest === 'function' && t.closest('.edmenu');
+    eds.forEach(function (ed) {
+      if (ed.menu && ed.menu !== inside) closeMenu(ed);
+    });
+  }, true);
 
   // ── keyboard ──────────────────────────────────────────────────────────────
 

@@ -719,3 +719,228 @@ test('find in files works for a user whose git config says submodule.recurse=tru
   assert.equal(r.ok, true);
   assert.deepEqual(hit(r, 'plain.txt').ranges, [[4, 10]]);
 });
+
+// ---------------------------------------------------------------------------
+// §4.16 — making, renaming and removing a file
+//
+// The three writes the Editor's tree can do. They go through the SAME guard as read()
+// and write(), so every refusal below is the guard's, not a second set of rules — and
+// none of them runs a git command: a new file is untracked, and `ls-files -o` shows it
+// on the next listing with nothing staged.
+// ---------------------------------------------------------------------------
+
+// The Trash is Electron's, so the tests pass their own: one that records what it was
+// asked to bin, and one that refuses, which is the fallback path.
+function binned() {
+  const seen = [];
+  return { trash: async p => { seen.push(p); fs.rmSync(p, { recursive: true, force: true }); }, seen };
+}
+const NO_TRASH = { trash: async () => { throw new Error('no Finder here'); } };
+
+test('create makes an empty file that git lists at once, with nothing staged', async () => {
+  const r = await editor.create(WS, 'sample-api', 'src/made.js');
+  assert.deepEqual(r, { ok: true, path: 'src/made.js', dir: false });
+  assert.equal(fs.readFileSync(path.join(api, 'src/made.js'), 'utf8'), '');
+  const tree = await editor.tree(WS);
+  const repo = tree.repos.find(x => x.name === 'sample-api');
+  assert.ok(repo.files.includes('src/made.js'), 'the new file should be in the tree');
+  // Untracked, not added: the index is the user's.
+  assert.match(git(api, 'status', '--porcelain', '--', 'src/made.js'), /^\?\? /);
+});
+
+test('create makes the folders on the way, and never outside the repo', async () => {
+  const r = await editor.create(WS, 'sample-api', 'src/deep/deeper/leaf.txt');
+  assert.equal(r.ok, true);
+  assert.equal(fs.existsSync(path.join(api, 'src/deep/deeper/leaf.txt')), true);
+  const dir = await editor.create(WS, 'sample-api', 'src/newdir', { dir: true });
+  assert.deepEqual(dir, { ok: true, path: 'src/newdir', dir: true });
+  assert.equal(fs.statSync(path.join(api, 'src/newdir')).isDirectory(), true);
+});
+
+test('create never overwrites, and never follows a link out of the repo', async () => {
+  const before = fs.readFileSync(path.join(api, 'README.md'), 'utf8');
+  const again = await editor.create(WS, 'sample-api', 'README.md');
+  assert.equal(again.ok, false);
+  assert.match(again.error, /already there/);
+  assert.equal(fs.readFileSync(path.join(api, 'README.md'), 'utf8'), before);
+  // A path whose last segment is an existing symlink out of the repo: refused as
+  // "already there", and the target is untouched.
+  fs.symlinkSync(path.join(temp, 'outside.txt'), path.join(api, 'create-link.txt'));
+  const onLink = await editor.create(WS, 'sample-api', 'create-link.txt');
+  assert.equal(onLink.ok, false);
+  assert.equal(fs.readFileSync(path.join(temp, 'outside.txt'), 'utf8'), 'top secret\n');
+  // And a path THROUGH a link out of the repo never reaches the far side.
+  const through = await editor.create(WS, 'sample-api', 'dir-out/new.txt');
+  assert.equal(through.ok, false);
+  assert.match(through.error, /outside sample-api/);
+  assert.equal(fs.existsSync(path.join(temp, 'outside-dir', 'new.txt')), false);
+});
+
+test('create is refused for .git, for an escape and for an unknown repo', async () => {
+  for (const rel of ['.git/hooks/evil', '../escaped.txt', '/etc/passwd', 'a/../../b']) {
+    const r = await editor.create(WS, 'sample-api', rel);
+    assert.equal(r.ok, false, `${rel} should have been refused`);
+  }
+  assert.equal(fs.existsSync(path.join(api, '.git/hooks/evil')), false);
+  assert.equal(fs.existsSync(path.join(temp, 'escaped.txt')), false);
+  assert.equal((await editor.create(WS, 'no-such-repo', 'x.txt')).ok, false);
+  assert.equal((await editor.create('no-such-ws', 'sample-api', 'x.txt')).ok, false);
+});
+
+test('rename moves a file, making the folders it needs', async () => {
+  put(api, 'movable.txt', 'move me\n');
+  const r = await editor.rename(WS, 'sample-api', 'movable.txt', 'moved/here.txt');
+  assert.deepEqual(r, { ok: true, from: 'movable.txt', to: 'moved/here.txt', dir: false });
+  assert.equal(fs.existsSync(path.join(api, 'movable.txt')), false);
+  assert.equal(fs.readFileSync(path.join(api, 'moved/here.txt'), 'utf8'), 'move me\n');
+});
+
+test('rename moves a whole folder', async () => {
+  put(api, 'bundle/one.txt', 'one\n');
+  const r = await editor.rename(WS, 'sample-api', 'bundle', 'bundled');
+  assert.equal(r.ok, true);
+  assert.equal(r.dir, true);
+  assert.equal(fs.readFileSync(path.join(api, 'bundled/one.txt'), 'utf8'), 'one\n');
+});
+
+test('rename refuses to land on something else, and to eat its own folder', async () => {
+  put(api, 'keepme.txt', 'keep\n');
+  put(api, 'other.txt', 'other\n');
+  const clash = await editor.rename(WS, 'sample-api', 'keepme.txt', 'other.txt');
+  assert.equal(clash.ok, false);
+  assert.match(clash.error, /already something called/);
+  assert.equal(fs.readFileSync(path.join(api, 'other.txt'), 'utf8'), 'other\n');
+
+  const inside = await editor.rename(WS, 'sample-api', 'bundled', 'bundled/deeper');
+  assert.equal(inside.ok, false);
+  assert.match(inside.error, /inside itself/);
+});
+
+test('rename moves the LINK, never what it points at', async () => {
+  // `link-in.js` points at `src/index.js`, inside the repo. Renaming what the guard
+  // RESOLVED the path to would move the source file and leave a dangling link.
+  const target = fs.readFileSync(path.join(api, 'src/index.js'), 'utf8');
+  const r = await editor.rename(WS, 'sample-api', 'link-in.js', 'link-moved.js');
+  assert.equal(r.ok, true);
+  assert.equal(fs.lstatSync(path.join(api, 'link-moved.js')).isSymbolicLink(), true);
+  assert.equal(fs.existsSync(path.join(api, 'link-in.js')), false);
+  assert.equal(fs.readFileSync(path.join(api, 'src/index.js'), 'utf8'), target);
+  await editor.rename(WS, 'sample-api', 'link-moved.js', 'link-in.js');
+});
+
+test('rename is refused for a file that is not there, and outside the repo', async () => {
+  const gone = await editor.rename(WS, 'sample-api', 'never-existed.txt', 'x.txt');
+  assert.equal(gone.ok, false);
+  assert.equal(gone.missing, true);
+  const out = await editor.rename(WS, 'sample-api', 'README.md', '../escaped.md');
+  assert.equal(out.ok, false);
+  assert.equal(fs.existsSync(path.join(temp, 'escaped.md')), false);
+  assert.equal(fs.existsSync(path.join(api, 'README.md')), true);
+  const intoGit = await editor.rename(WS, 'sample-api', 'README.md', '.git/README.md');
+  assert.equal(intoGit.ok, false);
+});
+
+test('a case-only rename is allowed on a case-insensitive disk', async () => {
+  put(api, 'casing.txt', 'x\n');
+  const r = await editor.rename(WS, 'sample-api', 'casing.txt', 'Casing.txt');
+  assert.equal(r.ok, true);
+  const names = fs.readdirSync(api);
+  assert.ok(names.includes('Casing.txt'), `expected Casing.txt in ${names.join(', ')}`);
+});
+
+test('delete moves the file to the Trash', async () => {
+  put(api, 'binme.txt', 'bin\n');
+  const bin = binned();
+  const r = await editor.remove(WS, 'sample-api', 'binme.txt', bin);
+  assert.deepEqual(r, { ok: true, path: 'binme.txt', dir: false, trashed: true });
+  assert.deepEqual(bin.seen, [path.join(api, 'binme.txt')]);
+  assert.equal(fs.existsSync(path.join(api, 'binme.txt')), false);
+});
+
+test('delete bins a LINK, never what it points at', async () => {
+  fs.symlinkSync('src/index.js', path.join(api, 'bin-link.js'));
+  const target = fs.readFileSync(path.join(api, 'src/index.js'), 'utf8');
+  const bin = binned();
+  const r = await editor.remove(WS, 'sample-api', 'bin-link.js', bin);
+  assert.equal(r.ok, true);
+  assert.deepEqual(bin.seen, [path.join(api, 'bin-link.js')]);
+  assert.equal(fs.existsSync(path.join(api, 'bin-link.js')), false);
+  assert.equal(fs.readFileSync(path.join(api, 'src/index.js'), 'utf8'), target);
+});
+
+test('a link that points out of the repo cannot be renamed or binned either', async () => {
+  // The guard refuses it for the same reason read() does: what it resolves to is not
+  // in this repo, and the Editor does not touch anything that is not.
+  const moved = await editor.rename(WS, 'sample-api', 'link-out.txt', 'link-elsewhere.txt');
+  assert.equal(moved.ok, false);
+  assert.match(moved.error, /outside sample-api/);
+  const gone = await editor.remove(WS, 'sample-api', 'link-out.txt', binned());
+  assert.equal(gone.ok, false);
+  assert.equal(fs.lstatSync(path.join(api, 'link-out.txt')).isSymbolicLink(), true);
+  assert.equal(fs.readFileSync(path.join(temp, 'outside.txt'), 'utf8'), 'top secret\n');
+});
+
+test('a file falls back to an unlink when the Trash refuses; a FOLDER never does', async () => {
+  put(api, 'nofinder.txt', 'x\n');
+  const r = await editor.remove(WS, 'sample-api', 'nofinder.txt', NO_TRASH);
+  assert.deepEqual(r, { ok: true, path: 'nofinder.txt', dir: false, trashed: false });
+  assert.equal(fs.existsSync(path.join(api, 'nofinder.txt')), false);
+
+  put(api, 'keepdir/inner.txt', 'still here\n');
+  const dir = await editor.remove(WS, 'sample-api', 'keepdir', NO_TRASH);
+  assert.equal(dir.ok, false);
+  assert.match(dir.error, /Trash/);
+  assert.equal(fs.readFileSync(path.join(api, 'keepdir/inner.txt'), 'utf8'), 'still here\n');
+});
+
+test('delete is refused for .git, for an escape and for nothing at all', async () => {
+  const bin = binned();
+  for (const rel of ['.git', '.git/config', '../outside.txt', '', 'nope.txt', 'dir-out/secret.txt']) {
+    const r = await editor.remove(WS, 'sample-api', rel, bin);
+    assert.equal(r.ok, false, `${rel} should have been refused`);
+  }
+  assert.deepEqual(bin.seen, []);
+  assert.equal(fs.existsSync(path.join(api, '.git/config')), true);
+  assert.equal(fs.readFileSync(path.join(temp, 'outside.txt'), 'utf8'), 'top secret\n');
+});
+
+test('delete removes a whole folder through the Trash', async () => {
+  put(api, 'bindir/inner.txt', 'gone\n');
+  const bin = binned();
+  const r = await editor.remove(WS, 'sample-api', 'bindir', bin);
+  assert.equal(r.ok, true);
+  assert.equal(r.dir, true);
+  assert.equal(fs.existsSync(path.join(api, 'bindir')), false);
+});
+
+test('renaming a link onto its own target is refused, not a destroyed file', async () => {
+  // `CLAUDE.md -> AGENTS.md` is the pair §4.16 names. A realpath-based "same file?"
+  // test read the two as one and fs.rename replaced the real file with the link,
+  // leaving a self-referential dangling symlink and no bytes anywhere.
+  put(api, 'AGENTS.md', 'the real file\n');
+  fs.symlinkSync('AGENTS.md', path.join(api, 'CLAUDE.md'));
+  const r = await editor.rename(WS, 'sample-api', 'CLAUDE.md', 'AGENTS.md');
+  assert.equal(r.ok, false);
+  assert.match(r.error, /already something called/);
+  assert.equal(fs.readFileSync(path.join(api, 'AGENTS.md'), 'utf8'), 'the real file\n');
+  assert.equal(fs.lstatSync(path.join(api, 'AGENTS.md')).isSymbolicLink(), false);
+  // …and the other way round eats the link just as happily.
+  const back = await editor.rename(WS, 'sample-api', 'AGENTS.md', 'CLAUDE.md');
+  assert.equal(back.ok, false);
+  assert.equal(fs.lstatSync(path.join(api, 'CLAUDE.md')).isSymbolicLink(), true);
+});
+
+test('a case-only rename is still allowed beside that', async () => {
+  put(api, 'casing2.txt', 'x\n');
+  const r = await editor.rename(WS, 'sample-api', 'casing2.txt', 'Casing2.txt');
+  assert.equal(r.ok, true);
+  assert.ok(fs.readdirSync(api).includes('Casing2.txt'));
+});
+
+test('create names a FILE in the middle of the path, not "already there"', async () => {
+  put(api, 'plain.txt', 'x\n');
+  const r = await editor.create(WS, 'sample-api', 'plain.txt/child.txt');
+  assert.equal(r.ok, false);
+  assert.match(r.error, /is a file, not a folder/);
+  assert.equal(fs.readFileSync(path.join(api, 'plain.txt'), 'utf8'), 'x\n');
+});

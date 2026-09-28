@@ -13,7 +13,8 @@
     "test:publish": "node --test scripts/test-publish.js",
     "package": "node scripts/package.js",
     "test:config": "node --test scripts/test-config.js",
-    "test:editor": "node --test scripts/test-editor.js"
+    "test:editor": "node --test scripts/test-editor.js",
+    "test:notes": "node --test scripts/test-notes.js scripts/test-noteedit.js"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",

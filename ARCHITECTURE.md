@@ -28,9 +28,15 @@ edit files you do not own.
   are a tap away; summarise counts, don't list.*
 - **Never write to the user's repos** except the explicit actions: `git pull --ff-only`
   (Pull main), starting/stopping dev processes, Publish building Switchboard's
-  source into a desktop app, and Save in the Editor (⌘S), which writes the one file the
-  user edited, in place; nothing else — no git, no formatting, no other file (§4.14).
-  No commits, no checkouts, no stashes. Squash and merge (§4.4) acts on GitHub
+  source into a desktop app, Save in the Editor (⌘S), which writes the one file the
+  user edited, in place; nothing else — no git, no formatting, no other file (§4.14);
+  and the Editor tree's own four — New file, New folder, Rename and Delete (three
+  channels; the first two share one), each of them one path the user named and nothing
+  near it. Delete goes to the Trash, and falls back to an `unlink` only for a FILE the
+  Trash refuses; a folder is never removed behind a failed Trash (§4.16). No commits,
+  no checkouts, no stashes, and nothing is ever
+  staged: a file made here is untracked, as it would be if a shell had made it. The
+  Notes tab writes nothing in a repo at all — its file lives beside the config (§4.15). Squash and merge (§4.4) acts on GitHub
   through `gh pr merge --squash -R owner/repo` and then deletes the merged branch
   there, as GitHub's own Delete branch button would — never on the checkout: nothing
   is checked out and no local branch is deleted.
@@ -78,6 +84,9 @@ switchboard/
   src/renderer/views/pr.js      — Pull request screen                             [R7]
   src/renderer/views/prs.js     — Pull requests screen: every open PR of yours    [R12]
   src/renderer/views/editor.js  — Editor tab (Monaco over the workspace's repos)  [R13]
+  src/main/notes.js             — the Notes tab's one markdown file per workspace    [M9]
+  src/renderer/noteedit.js      — SB.noteEditor: a block editor over markdown       [R14]
+  src/renderer/views/notes.js   — Notes tab, and the note a Grid square can show    [R14]
 ```
 
 ---
@@ -97,6 +106,10 @@ than one workspace, else `other`, which the single-workspace projects share.
 A **repo** is one of those immediate children (`sample-api-2`). Its **display name** is
 the directory name with the workspace's numeric suffix stripped (`sample-api-2` →
 `sample-api`), because the mock-up shows `sample-api`.
+
+A **note** is a workspace's scratch pad: one markdown file, edited in the Notes tab
+(§4.15) and kept beside the config rather than in any repo. A Grid folder square has one
+too — there, the id is the folder's path.
 
 ### Shapes (the single source of truth for both sides)
 
@@ -201,6 +214,16 @@ Shell = {                                 // the Terminal tab's login shell, NOT
                                           // a deliberate close from a crash.
   error: null | 'human sentence',
 }
+
+Note = {                                  // a workspace's scratch pad — §4.15
+  text: '# Release plan\n- ship it\n',     // markdown, one line per block on screen
+  mtimeMs: 1737000000000 | null,          // null when no file has been written yet; what
+                                          // the next save's conflict test compares against
+  size: 46,
+  missing: false,                         // true: nothing written yet, which is an empty note
+}                                         // or { ok:true, tooLarge:true, mtimeMs, size } past
+                                          // 2 MB, with NO text — a prefix would be written
+                                          // back over the whole file by the first autosave
 
 Link = { label: 'localhost:3000', url: 'http://localhost:3000', repo: 'sample-api', live: true }
 
@@ -489,9 +512,10 @@ The fourth workspace tab, **Editor** (added 2026-09-26, the user's ask: "somethi
 simple, like Sublime Text … light, no extensions … browse and edit files", and a button
 in the editor's top-right corner that opens it up full screen). Monaco — VS Code's
 editor, nothing else of VS Code — over the workspace's repos: a file tree with one top
-folder per repo, tabs, ⌘S, ⌘P, ⇧⌘F, modified-line markers against `HEAD`. Out of scope
-on purpose: creating, renaming or deleting files, any git operation, language servers,
-extensions, settings, split panes. The renderer side is R13; this is the channel area
+folder per repo, tabs, ⌘S, ⌘P, ⇧⌘F, modified-line markers against `HEAD`, and — since
+2026-09-28 — New file, New folder, Rename and Delete on the tree (§4.16). Out of scope
+on purpose: any git operation, language servers, extensions, settings, split panes. The
+renderer side is R13; this is the channel area
 `code` (`sb:editor` is the older "open the folder in VS Code" of §4.5 and has nothing to
 do with it).
 
@@ -595,6 +619,142 @@ does what the role did, `performClose:` to that window. Otherwise the event reac
 main page behind the panel, which closed an Editor tab or the whole window and left the
 panel up.
 
+### 4.15 Notes
+
+The fifth workspace tab, **Notes** (added 2026-09-28, the user's ask: "a place where I
+can just write my own README notes … I should be able to directly write the README
+inline … like how something like Notion works, where I can automatically select the
+heading by doing three hashes and then it pops up … it's more for my temporary notes …
+a single file per workspace"). One markdown file per workspace, edited in place: typing
+`### ` at the start of a line makes the line a heading and the `### ` disappears, `- `
+makes a bullet, `**bold**` goes bold as the second `*` is typed. There is no source view
+and no preview toggle, because what is on screen IS the document. Out of scope on
+purpose: more than one note per workspace, folders of notes, tables, images, attachments,
+search across notes, and any kind of sync. The renderer side is R14; this is the channel
+area `notes`.
+
+`id` is a workspace id OR — unlike the Editor, which refuses one — a Grid folder
+square's absolute path (§4.10): a square has a terminal, so it can have a scratch pad
+too. `notes.js` never uses either as a file name; see the invariants below.
+
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.notesRead(id)` | `sb:notes:read` | `{ ok, text, mtimeMs, size, missing }` — `missing:true` with `text:''` and `mtimeMs:null` when nothing has been written yet, which is an empty note and not a failure. `{ ok, tooLarge:true, mtimeMs, size }` and NO text for a file past `MAX_BYTES` (2 MB): a prefix would be worse than useless, because the first autosave would write it over the whole file |
+| `sb.notesWrite(id, text, {mtimeMs, force})` | `sb:notes:write` | `{ ok, mtimeMs, size, missing }` — `missing:true` in a SUCCESSFUL answer means the note is empty and no file was made. `{ ok:false, conflict:true, missing, mtimeMs, error }` when the file has moved underneath, `mtimeMs` being its current one so the renderer's Keep mine can go ahead knowingly; `{ ok:false, error }` for anything else, e.g. `could not save that note: the disk is full` |
+| `sb.notesReveal(id)` | `sb:notes:reveal` | `{ ok }` — the file in Finder, or the folder when there is no file yet. The way out of a note too large to open |
+| `sb.notesDirty(count)` | `sb:notes:dirty` | `{ ok }` — how many notes hold text that could NOT be written, whenever that number moves. Normally 0; the only note that ever reaches here is one whose file will not take it (a read-only folder, a full disk, a conflict waiting on an answer), and it joins `editorDirty` in the one question the app asks on the way out |
+| `sb.notesFlushed(id)` | `sb:notes:flushed` | `{ ok }` — the renderer answering `sb:evt:notesFlush`, handing back the generation it was sent; see below |
+
+**The file is beside the config, never in a repo.** `<dirname of the config file>/notes/`
+— `~/.switchboard/notes/` normally, and wherever `SWITCHBOARD_CONFIG` points for a test
+or a smoke, so a fixture run cannot write into the user's own. A file in the workspace
+folder was the obvious other place and is wrong: it would show up in `git status`, in the
+Changes tab and in the Editor's tree, and would be one `git add -A` from being committed
+to someone else's repository. The point of the tab is somewhere to write an idea down
+without thinking about any of that.
+
+**Every id is hashed into its file name.** `sample-2` → `sample-2-72b8587ce3.md`,
+`/Users/me/Projects/odds` → `odds-e1d2c8e200.md`: a readable stem so the folder makes
+sense in Finder, plus ten hex of SHA-1 over the WHOLE id. No exceptions, and that is the
+point — a scheme where some ids pass through verbatim collides the moment a workspace is
+called what another id hashes to, and on a case-insensitive volume it collides for `Odds`
+and `odds`. It is also why no id, however written (`../../etc/passwd`, `/etc/passwd`),
+can name a file outside the folder.
+
+**Nothing here ever deletes what someone wrote.** An empty note writes no file when
+there was none — a workspace that was merely looked at leaves nothing behind — and
+truncates the file when there was one. Emptying a note is the user's edit; an empty
+BUFFER because a read failed or has not landed yet is not, and the renderer keeps that
+apart with a `loaded` flag that no save path may run before (R14).
+
+**A save is refused when the file moved underneath it**, exactly as the Editor's Save is
+(§4.14): `opts.mtimeMs` is what the renderer last read or wrote — a number when it
+believes there is a file, `null` when it believes there is none — and either belief being
+wrong answers `{ conflict:true }` rather than overwriting. `opts.force` is the user's
+Keep mine. There is no watcher here either: a clean note is re-read on every window
+focus and follows the disk, and one with unsaved text is left alone until its next save
+finds the conflict and asks.
+
+**Writes for one note are serialised**, through a promise chain per file and a temp name
+carrying a counter as well as the pid. Three things can start a save — the typing
+debounce, a blur, the quit flush — and two overlapping ones through one temp path
+interleave a truncate with a write, hand the file to whichever `rename` lands first, and
+answer the newer one `ENOENT`. Unlike the Editor's Save this one IS a temp file renamed
+over the original, and for the opposite reason: nothing else holds this file open, it has
+no mode or hard links worth keeping, and it is rewritten whole every few seconds while
+someone types — so the thing to guard against is a crash mid-write leaving half a note.
+
+**An unsavable note is asked about, once.** A note writes itself, so the number main
+holds (`sb:notes:dirty`) is 0 almost always and the way out asks nothing. It is not 0
+when the file will not take the text — a read-only notes folder, a full disk, a conflict
+the user has not answered — and then `confirmDiscard()` puts up the same one question it
+puts up for the Editor's buffers, counting both. Without it the app exited in silence on
+text that could never be written: the bar in the page said so, and nothing on the way
+out did.
+
+**Closing the window is the other way out.** ⌘W and the red button end the renderer
+without quitting, and a note on a 400 ms debounce would go with it. So the window's
+`close` holds itself for one round trip while the renderer writes (`event.preventDefault()`,
+`flushNotes()`, then `close()` again, with a flag so the second pass goes through), and
+only then does the question above get asked — a note that saved fine is never asked
+about at all.
+
+**The quit waits for the last keystroke.** A note writes itself 400 ms after typing
+stops, so the only text at risk is the last few hundred milliseconds of it — and a page's
+`beforeunload` is ignored by Electron, so the renderer cannot be asked on the way out the
+way a browser would ask. Instead `before-quit`, after the publish wait and
+`stopEverything()` and while the window is still live, sends `sb:evt:notesFlush` and
+waits for `sb:notes:flushed` (2 s at the outside) and then for `notes.settle()`. After
+the publish wait on purpose: a build can take a minute, the window stays usable through
+it, and a flush at the top would miss everything typed while it ran. The event carries a
+generation the renderer hands back, because a quit can be CANCELLED after a flush has
+timed out — an unsaved Editor buffer, a failed `applyOnQuit()` — and the late answer to
+that one would otherwise satisfy the next quit's flush instantly. The smoke harness's
+own exit runs `flushNotes()` by hand for the reason it runs `stopEverything()` by hand:
+`app.exit()` fires no `before-quit`.
+
+### 4.16 Editor: making, renaming and removing a file
+
+The three writes the Editor's tree can do beside Save (added 2026-09-28, the user's ask:
+"it's not possible for me to create new files within the actual apps. That should be
+possible. There should be a right-click and a new file, and I should be able to rename
+files and so on"). Same channel area `code` as the rest of §4.14, the same arguments, and
+the same one guard in `main/editor.js` in front of them: nothing here can name a path
+Save could not.
+
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.codeCreate(id, repoName, path, {dir})` | `sb:code:create` | `{ ok, path, dir }` — an empty file, or a folder with `opts.dir`. Folders on the way are made as needed, so a name typed with slashes in it means all of it. An existing path is always `{ ok:false, error: '<path> is already there' }`, never an overwrite |
+| `sb.codeRename(id, repoName, from, to)` | `sb:code:rename` | `{ ok, from, to, dir }` — `to` is a whole repo-relative path, so renaming and moving are one operation and folders on the way are made. `{ ok:false, error: 'there is already something called <name> there' }` for a destination that is taken, `'<path> cannot be moved inside itself'` for a folder into its own subtree |
+| `sb.codeDelete(id, repoName, path)` | `sb:code:delete` | `{ ok, path, dir, trashed }` — the Trash, via `shell.trashItem`, passed in by `index.js` because `editor.js` never loads Electron (its tests run under plain `node`). A FILE whose trashing fails falls back to an `unlink` and answers `trashed:false`; a FOLDER never does — a recursive delete nobody can undo is not a thing to do behind a failure — and answers `could not move <path> to the Trash: <reason>` |
+
+**No git, ever.** A new file is untracked and `git ls-files -o --exclude-standard` shows
+it on the next listing with nothing staged (M3's `lsFiles`). `git add -N` would also
+work and is forbidden for the reason it always was: it mutates the user's index.
+
+**They act on the LEXICAL path, not on what the guard resolved.** `path.join(repoReal,
+rel)`, not `checkPath`'s `real`. The difference is a symlink: renaming or binning
+`CLAUDE.md -> AGENTS.md` has to move THE LINK, and following it would silently operate on
+a different file than the row that was clicked. The guard has already answered the
+question that mattered — whatever the path resolves to is inside this repo, and a link
+pointing OUT of it is refused outright, as it is for read and write — so which of the two
+ends is touched is this code's own decision, and it is the one the user pointed at.
+
+**A delete that could not reach the Trash says so.** The bar asked "move X to the
+Trash?", and that promise — a slip is one ⌘Z in Finder away — is the whole reason this is
+allowed at all. When `trashItem` fails and a FILE is unlinked instead, the answer carries
+`trashed: false` and the Editor's bar reads `deleted X — the Trash was not available, so
+this cannot be undone`. Reporting plain success there would be reporting a guarantee that
+did not hold.
+
+**A case-only rename is the one time an existing destination is allowed.** On APFS
+`readme.md` and `README.md` are the same file, so the "is something there?" test sees the
+source itself; refusing would make fixing a file's capitalisation impossible. The test is
+`realpath(src) === realpath(dst)`, and `fs.rename` does the right thing with it. The test is the two paths' `lstat` dev+ino, NOT
+their realpath: realpath follows links, so `CLAUDE.md -> AGENTS.md` and `AGENTS.md`
+resolved to one path, read as "the same file", and `fs.rename` replaced the real file with
+the link — a dangling self-reference, the bytes gone and never in the Trash. Measured.
+
 ### 4.7 Push events (main → renderer)
 `preload.js` exposes subscribe helpers returning an unsubscribe function:
 
@@ -608,16 +768,23 @@ sb.onTermState((state /*Shell*/) => {})  // 'sb:evt:termState' — spawned, exit
 sb.onEdit((e) => {})                 // 'sb:evt:edit' — {action:'copy'|'paste'|'selectAll'|'undo'|'redo'|'cut'|'close', text?, image?}
 sb.onAppearance((s) => {})           // 'sb:evt:appearance' — {appearance, effective}; see §4.8
 sb.onSidebar((s) => {})              // 'sb:evt:sidebar' — {visible}; see §4.9
+sb.onNotesFlush((id) => {})          // 'sb:evt:notesFlush' — write every unsaved note NOW, and
+                                     // answer sb:notes:flushed with the same `id`; §4.15
 ```
 
 `sb:evt:edit` exists because a menu accelerator wins over the renderer's keydown, and
 xterm's selection is **not** a DOM selection, so `role: 'copy'` copies nothing from the
 terminal. The Edit menu's Copy / Paste / Select All are therefore custom items that send
-this event. The renderer gives first refusal to the focused terminal, then to the
-Editor (R13), and only then falls back to the document: its own selection for Copy,
-`execCommand` for Select All, Undo and Redo, and — for a focused text field, the Grid's
-name field — the field's selection for Cut and `insertText` for Paste, since the menu's
-⌘V never lets the keystroke reach it. A Paste with `image: true` (below) is the one
+this event. The renderer gives first refusal to the focused terminal, then to a focused
+Note (R14), then to the Editor (R13), and only then falls back to the document: its own
+selection for Copy, `execCommand` for Select All, Undo and Redo, and — for a focused text
+field, the Grid's name field — the field's selection for Cut and `insertText` for Paste,
+since the menu's ⌘V never lets the keystroke reach it. That fallback is REFUSED for a
+contenteditable: `fieldIn()` matches `INPUT` and `TEXTAREA` alone, so Cut and Paste would
+do nothing in a note, and `execCommand('undo')` would run Chromium's own history over a
+DOM whose block model the note owns — leaving the two out of step and the next autosave
+persisting the difference. A note is the app's only contenteditable, and R14 implements
+all six itself. A Paste with `image: true` (below) is the one
 exception: if the terminal declines it, nothing else is offered it.
 
 **Undo, Redo and Cut became items too, and File ▸ Close with them** (added 2026-09-26,
@@ -835,6 +1002,32 @@ Measured: the host element in the square is the host element on the Terminal tab
 marker typed in one is in the other, and the shell's `startedAt` is unchanged across the
 round trip. Taking a workspace out of a square — only from the `⋯`'s Edit terminals,
 R10 — leaves its shell running.
+
+**A square can show that workspace's NOTE instead of its terminal** (added 2026-09-28,
+the user's ask: "there should be a note that pops up in the terminal box … when I click
+on it, it'll render that exact note inside of this box instead of the terminal, and then
+I can toggle between the two … I shouldn't be able to see both at the same time").
+A switch in the square's top-right corner, beside the `×`'s slot: the page glyph swaps
+the terminal for the note, the prompt glyph swaps it back, and the click lands the
+keyboard in whichever of the two just came up. Either/or on purpose — four panes in one
+window is already the most it can hold, and the point of a note here is somewhere to
+look while the terminal is busy, not beside it.
+
+Which squares are showing a note is kept by WORKSPACE ID, in `localStorage`, not by
+square: the same workspace can sit in two views, and a scratch pad belongs to the
+workspace rather than to where it happens to be on screen. A folder square gets one too
+(§4.15 takes its path as an id). The switch carries an amber dot when that workspace has
+something written down. The Grid preloads each square's note through R14 as it draws —
+four small reads — which both answers that question and leaves the note already open for
+the click.
+
+`views/notes.js` mounts the same slab into a square that the Notes tab shows, exactly as
+`views/terminal.js` mounts the same xterm, and for the same reason: two copies of the
+editor would be two unsaved buffers over one file. The terminal is NOT disposed while
+its square shows a note — `retirePanes()` keeps every pane whose id is in a Grid square
+whichever of the two the square is drawing — so the shell and its scrollback are
+untouched, and `landFocus()` prefers a square that is showing its terminal, because
+arriving at the Grid should not put the keyboard in someone's scratch pad.
 
 Three rules in `app.js` follow from that:
 
@@ -1062,13 +1255,19 @@ Never rejects; see §4.11 for what it reads and the one place it sends it.
 
 ### M8 `editor.js`
 The Editor's file access (§4.14): `tree(id)`, `read(id, repoName, rel)`, `write(id,
-repoName, rel, text, opts)`, `base(id, repoName, rel, oldPath)`, `stat(id, files)` and
-`search(id, query, opts)`. It is a module of its own so that everything that touches a
-file in a repo sits behind one guard: every path from the renderer goes through it
-(resolve the repo from the id without a scan, refuse `..`, `.git`, absolute paths and
-symlinks out, check the realpath), and the one write — the in-place `writeFile` of
-Save, behind the mtime check — is the only file the app itself ever writes into a repo
-(Pull main's writes are git's). Its own limits live here — 5 MB to open
+repoName, rel, text, opts)`, `base(id, repoName, rel, oldPath)`, `stat(id, files)`,
+`search(id, query, opts)`, and the tree's three writes of §4.16 — `create(id, repoName,
+rel, {dir})`, `rename(id, repoName, from, to)` and `remove(id, repoName, rel, {trash})`.
+It is a module of its own so that everything that touches a file in a repo sits behind
+one guard: every path from the renderer goes through it (resolve the repo from the id
+without a scan, refuse `..`, `.git`, absolute paths and symlinks out, check the
+realpath), and the five writes behind it — the in-place `writeFile` of Save behind its
+mtime check, an `open(…, 'wx')` or a `mkdir`, a `rename`, a `trashItem`, and the `unlink`
+a FILE falls back to when the Trash refuses — are the only files the app itself ever
+writes, moves or removes in a repo (Pull main's writes are git's). A folder is never
+removed behind a failed Trash. None of the four runs a git command, and `remove` takes its Trash function
+as an argument so that this module still requires nothing of Electron and its tests
+still run under plain `node`. Its own limits live here — 5 MB to open
 (`READ_MAX_BYTES`), 20 MB to save (`WRITE_MAX_BYTES`), 200 files a stat
 (`STAT_MAX_FILES`), 500 characters a query (`SEARCH_MAX_QUERY`); the git-side caps it
 relies on live in `git.js` (M3) — 3 MB for a `HEAD` base (`HEAD_BLOB_MAX_BYTES`),
@@ -1077,7 +1276,24 @@ relies on live in `git.js` (M3) — 3 MB for a `HEAD` base (`HEAD_BLOB_MAX_BYTES
 goes through `git.js` too. There is deliberately no watcher
 (§4.14). Like `git.js`, nothing throws: every failure resolves to `{ ok:false, error }`,
 and `scripts/test-editor.js` runs all of it against fictional scratch repos with plain
-`node --test` (`npm run test:editor`).
+`node --test` (`npm run test:editor`) — the three writes included: that a new file is
+untracked and staged nowhere, that a rename or a delete moves the LINK and not its
+target, that a link pointing out of the repo is refused either way, that `.git` and `..`
+are refused, and that a folder the Trash will not take is left alone.
+
+### M9 `notes.js`
+The Notes tab's one markdown file per workspace (§4.15): `read(id)`, `write(id, text,
+opts)`, `settle()`, and `fileFor(id)` / `keyFor(id)` / `notesDir()` for the sentence that
+has to name the file and for the tests. It is its own module rather than a
+corner of `editor.js` because it is the opposite kind of thing: the file is not in a repo
+and there is no repo to guard — the guard here is `keyFor()`, which hashes every id into
+a name that cannot leave `<config dir>/notes/`. `MAX_BYTES` (2 MB) is the only limit; a
+larger file is reported, never read as a prefix, because the renderer autosaves and a
+prefix would land on the whole file. Writes for one note are serialised through a promise
+chain per file, `settle()` is what the quit waits on, and — like `git.js` — nothing
+throws: every failure resolves to `{ ok:false, error }`. `scripts/test-notes.js` runs it
+against a scratch notes folder and `scripts/test-noteedit.js` runs the markdown half of
+R14's editor against a corpus, both with plain `node --test` (`npm run test:notes`).
 
 ---
 
@@ -1086,12 +1302,15 @@ and `scripts/test-editor.js` runs all of it against fictional scratch repos with
 ### R1 `index.html`
 Load order, all classic scripts, no `type=module`:
 `icons.js`, `dom.js`, `term-theme.js`, `markdown.js`, `diffview.js`, `views/workspace.js`,
-`views/logs.js`, `views/terminal.js`, `views/usage.js`, `views/grid.js`, `views/files.js`,
-`views/diff.js`, `views/pr.js`, `views/prs.js`, `views/editor.js`, `app.js` (last — it
+`views/logs.js`, `views/terminal.js`, `noteedit.js`, `views/notes.js`, `views/usage.js`,
+`views/grid.js`, `views/files.js`, `views/diff.js`, `views/pr.js`, `views/prs.js`,
+`views/editor.js`, `app.js` (last — it
 boots). `term-theme.js` must precede the two views that build `Terminal`s: both read the
 palette at construction; `markdown.js` must precede `diffview.js` and the two PR screens,
 which render every comment body through it; `prs.js` follows `pr.js`, whose gh failure
-bars it borrows; `views/editor.js` follows `term-theme.js` (Monaco's themes are built
+bars it borrows; `noteedit.js` precedes `views/notes.js`, which builds an editor from it,
+and both precede `views/grid.js`, whose squares mount a note the way they mount an xterm;
+`views/editor.js` follows `term-theme.js` (Monaco's themes are built
 from its palette) and `views/workspace.js` (it borrows the header).
 
 **Monaco is not in this list, and must never be put above it.** Its AMD `loader.js`
@@ -1189,7 +1408,7 @@ element already mounted (the reuse path), where every other view is torn down.
 `SB.layout.full()` / `SB.layout.setFull(on)` are its full screen (§4.9): the `.edfull`
 class on `.win`, dropped by `renderMain()` off the Editor's route and by ⌃⌘S.
 
-Routes: `{view:'workspace', wsId, tab:'changes'|'logs'|'terminal'|'editor'}`, `{view:'files', wsId, tab:'files'|'all'}`,
+Routes: `{view:'workspace', wsId, tab:'changes'|'logs'|'terminal'|'editor'|'notes'}`, `{view:'files', wsId, tab:'files'|'all'}`,
 `{view:'diff', wsId, repo, path}`, `{view:'pr', wsId, repo, tab:'overview'|'files'|'all'}`,
 `{view:'pr', owner, repo, number, tab}` (no workspace — a pull request opened from the
 list; its parent for the back caret and Esc is `prs`, not `workspace`),
@@ -1355,10 +1574,12 @@ gauge on screen up to date in place and answers whether the document now agrees 
 only then.
 
 ### R4 `views/workspace.js`
-The Changes tab and the shared header the Logs, Terminal and Editor tabs borrow (§6 R8,
-R13); its segmented control is `Changes | Logs | Terminal | Editor`, lit from a
-whitelist of the four rather than a logs/else test, which would light `Changes` for any
-tab it had not heard of. The
+The Changes tab and the shared header the Logs, Terminal, Editor and Notes tabs borrow
+(§6 R8, R13, R14); its segmented control is `Changes | Logs | Terminal | Editor | Notes`,
+lit from a whitelist of the five rather than a logs/else test, which would light
+`Changes` for any tab it had not heard of. Adding a tab takes two lines in `app.js` as
+well — `TABS.workspace` and `TAB_VIEWS` — because `normalize()` rewrites a tab it does
+not know to the remembered one before anything looks it up. The
 header's title (`h1.jump`) is a shortcut into this workspace's Terminal — the tab the
 user lives in — no-drag so the click is not eaten by the drag region, and the workspace
 name in the Files, Diff and Pull request breadcrumbs jumps there too. The repo name and
@@ -1415,6 +1636,138 @@ last good list up under a one-line "couldn't refresh" bar rather than blanking i
 full-width `brew install gh` / `gh auth login` bars are only for a list that never
 loaded. Empty: `no open pull requests`, with Open on GitHub. Exports `render` and
 `refresh(hard)`.
+
+### R14 `noteedit.js` and `views/notes.js`
+The Notes tab (§4.15; added 2026-09-28, the user's ask). The shared header, and below it
+one dark (or light — §4.8) slab holding a block editor: one writing column, a bar for
+what only this screen can say, and a word in the corner while it saves.
+
+```js
+SB.noteEditor = { create(opts), parseBlocks(md), blockToMd(spec), parseInline(s),
+                  inlineToMd(text, marks) }
+SB.views.notes = { render(state), mount(wsId, into), focus(wsId), has(wsId),
+                   preload(wsId), editAction(action, text), onKey(e), refresh(),
+                   flushAll(), dirty(), dispose(wsId), editor(wsId) }
+```
+
+**The root is persistent, and it is the same element every time** — the R13 contract, for
+a sharper reason than the Editor's. `renderMain()` rebuilds the main column for a run
+state, a shell spawn, a bell or a usage poll, several times a minute while anything is
+running, and detaching a focused contenteditable makes Chromium drop the selection: the
+caret comes back at the top of the note, mid-word. So `render(state)` hands back that
+workspace's root and only swaps a freshly built header into it. One editor per WORKSPACE,
+in the module's own `Map`, because the Notes tab and a Grid square are two places to look
+at the same thing and a second copy would be a second unsaved buffer over one file;
+`mount(wsId, into)` moves the same slab, as `views/terminal.js` moves the same xterm.
+
+**Blocks are the direct children of one contenteditable.** `div.nb[data-t]`, each holding
+one `div.nbc` and nothing else: `p`, `h1`…`h6`, `ul`, `ol`, `todo`, `quote`, `code`, `raw`
+and `hr`. A `raw` block is a line this editor has no block for, kept as its own source:
+either markdown it cannot DRAW — a table, an image, `[ref]: url`, `[^1]: …`, a line of
+HTML, a setext `===` — because drawing an image as the sentence `!alt text` would be a
+lie; or a line whose own re-serialisation would differ from it, which `parseBlocks()`
+catches by writing every block back out and comparing (an unclosed fence, `** bold **`,
+a task with a double gap). Everything else it cannot draw but CAN read as prose — a
+four-space code block, a footnote reference, a pipe in a sentence — is a paragraph of
+its literal text and is saved back unchanged. A bullet, a number and a checkbox are drawn by CSS — `.nb::before` — and are
+**not** nodes. That is load-bearing, not tidiness: an inline `contenteditable="false"`
+span has a caret position on either side of it, and Chromium will put the caret BEFORE
+the bullet, where a typed character lands outside `.nbc` and is lost at save time and
+where Backspace deletes the marker instead of the block. With no node there is no such
+position; the checkbox is hit-tested on `mousedown` against the text's left edge instead.
+
+**`normalize()` runs after every edit, and it is what makes contenteditable safe to build
+on.** At least one block, every direct child of the root a block (a bare text node from a
+select-all delete becomes a paragraph), one `.nbc` per block with any second one folded
+back into the first, no stray text node beside it, nothing inside it the inline model
+cannot hold — a `<span style>` from a paste, a `<b>` from a browser editing command, an
+empty `<em>` left by a deletion — and never a divider as the last block, since there
+would be nowhere left to type. It answers whether it changed anything, which is the cue
+to put the caret back by (block index, character offset).
+
+**Chromium's own editing is allowed only INSIDE one block.** Anything that would reach
+across two — typing over a selection, Option+Delete at a boundary, a paste, a drop — is
+refused in `beforeinput` and done over the block model instead, because Chromium's merge
+moves the tail's nodes into the head's `.nb` rather than its `.nbc`, and text outside
+`.nbc` is text the save silently loses. `historyUndo`, `historyRedo` and the four
+`format*` types are refused there too: the browser's undo stack must never rewrite a DOM
+the model owns.
+
+**Inline formatting is a model, not a tree shape.** A `.nbc`'s content is
+`{ text, marks }`, marks being character ranges `{s, e, t, href}` over `strong`, `em`,
+`code`, `del` and `link`. The input rules, ⌘B, the serializer and the parser all work in
+it, which is why toggling bold over a selection that already has italic inside it is
+arithmetic rather than DOM surgery; `readInline()` reads it out of the DOM and says when
+the DOM held something it had to drop, `renderInline()` writes it back.
+
+**Finishing a bold run does not bold the rest of the sentence.** Placing the caret after
+the `<strong>` is not enough on its own: Chromium computes a typing style from what is
+before the caret, so the next character goes inside the element whatever the Range said
+(measured — the bold ran to the end of the line). So the rule leaves a note of where the
+mark ended and the first keystroke past it clips the mark back to there and re-renders,
+after which the new text really is in a plain node. The same guard serves `` `code` ``.
+
+**The input rules.** On the space at the start of a block: `#`…`######` → a heading,
+`-` `*` `+` → a bullet, `1.` / `1)` → a number, `[]` / `[ ]` / `[x]` → a task, `>` → a
+quote — the marker is eaten. The head is matched with its whitespace runs collapsed and
+is disqualified only by whitespace at its ENDS, which is what makes `- [ ] ` reachable:
+the `- ` fires the bullet rule, and the `[ ] ` that follows then fires the task rule on
+a head that has a space in the middle of it. On the text becoming exactly three backticks or `---` → a
+code block or a divider. On the closing character of a pair: `**bold**`, `*italic*`,
+`` `code` ``, `~~strike~~`, `[text](url)`, and `***both***` for the two together. On a
+space after a bare URL → a link, and that one does NOT eat its space: the space is part
+of the sentence, not part of the shortcut. An underscore means nothing at all — typed,
+read or written. `_italic_` is a spelling markdown readers disagree about, the
+alternative is escaping every `snake_case` in the file, and a shortcut for it ate the
+underscores out of a typed path (`see /tmp/_x_` became `see /tmp/*x*`).
+
+**Keys.** `↩` splits the block (a list item makes another of its own kind, a heading makes
+a paragraph, an empty list item or quote steps back out instead); `⌫` at offset 0 unwinds
+what the block IS before it touches what is in it (outdent, then to a paragraph, then
+merge into the one above) — and a code or raw block becomes its LINES, one paragraph
+each, because carrying its newlines into one paragraph is where readInline turns every
+one of them into a space and a whole fence reads as a single run-on line. Forward
+`⌦` at the end of a block removes a DIVIDER and nothing else: it used to delete the
+whole neighbouring fence, so now it steps into it, as `⌫` does the other way. `⇥`/`⇧⇥` indent a list item and insert two spaces in code;
+`⌘B` / `⌘I` / `⌘E` / `⇧⌘X` toggle marks (and the two together are written and read as
+`***both***`, which the reader has a rule for — without it, ⌘B then ⌘I turned the whole
+line, heading or bullet included, into a raw source block), `⇧⌘1`…`⇧⌘3` / `⇧⌘0` set a heading (matched on
+`e.code`: with Shift held a US layout reports `!` `@` `#` `)` for the digit row), `⌘U` is
+swallowed so Chromium's own binding cannot put a `<u>` in the tree, and `⌘S` (through
+`app.js`, as the Editor's is) writes the note now. Inside a code block `↩` inserts a
+newline — the one block that holds them — and `⇧↩` steps out into a new paragraph.
+
+**Undo is this editor's own**, a stack of `{markdown, caret}` snapshots pushed on a 500 ms
+typing idle and around every structural change, bounded at 200 entries and 4 MB. It has
+to be: ⌘Z arrives as `sb:evt:edit` (§4.7), the browser's stack knows nothing of the
+transforms, and letting the two interleave desynchronises them. An undo that restores a
+marker the rule ate — `#` with the caret after it — arms a one-shot that lets the next
+space through, or a literal `# ` could never be typed. Copy and Cut serialise the
+selection as MARKDOWN, so text copied out of a note pastes back as itself — a WHOLE line
+with its `- ` or `## `, a partial one as the paragraph it is (escaped, so half a bullet
+does not paste back as a bullet). Paste parses the clipboard as markdown, as raw lines
+inside a code block, and as plain text when it holds no line break, so a pasted word does
+not split the paragraph it lands in. Select All then Cut empties the note: what a deleted
+range leaves behind takes its kind from whichever end still has text in it, and from
+neither when the whole note went — otherwise a one-line list wrote a stray `- ` back to
+the file and the note could never be empty again.
+
+**Saving.** `onChange` marks the pane dirty and writes 400 ms after typing stops; the
+window losing focus, the window closing and main's quit flush (§4.15) write immediately.
+Nothing may be written before the first read has landed `ok` — a `loaded` flag — or a
+blur during that one round trip would put an empty buffer over the note. The surface is
+`contenteditable="false"` until then, and for a note too large to open, because a
+surface that cannot save is one that throws away what is typed into it and then has it
+wiped by the read when that arrives. A note that was too large and has since shrunk goes
+back through the whole load, bar and all: unwinding only `loaded` left it editable and
+permanently unsavable. A save that failed is the one
+failure that loses what was typed, so it is a sticky line in the bar with Try again and
+is retried on its own every 4 s; a conflict offers `Keep mine` and `Reload`. A window
+focus re-reads every clean note and adopts the file; a dirty one is left alone. A pane
+off screen is retired by `retirePanes()` (R2) — the workspace on screen keeps its own
+whatever tab is showing, and so does every Grid square — and one that cannot be written
+is never retired, nor retried into a loop: only a save that actually landed tries the
+disposal again.
 
 ### R13 `views/editor.js`
 The Editor tab (§4.14; added 2026-09-26, the user's ask). The shared header, and below
@@ -1504,6 +1857,28 @@ workspace's open tabs (at most 30), the active one and which of them are preview
 (below), reopened lazily the first time that workspace's Editor is shown; a file that
 no longer reads is dropped quietly.
 
+**Making, renaming and removing a file** (§4.16) hangs off that same roving-row tree,
+so none of it is a per-row button: the heading carries a New file and a New folder, and
+a right-click on a row opens the menu (`Open`, `New file…`, `New folder…`, `Rename…`,
+`Delete`, `Copy path`, `Reveal in Finder`; no Rename or Delete on a repo's own row — that
+is the workspace, not this Editor's to bin). The menu is placed against the SLAB, not
+inside the tree: the tree scrolls and clips, and a menu in it would be cut off at the
+first row. Naming is a one-line field standing exactly where the row will be — first
+inside its folder for a new one, since the tree is sorted and the name is not known yet,
+and in the row's own place for a rename, with the stem selected and the extension left
+alone as Finder does. `↩` commits, `esc` cancels, and a blur decides deferredly, never
+from the event: Chromium blurs a focused element BEFORE a rebuild detaches it, so a
+re-listed tree arriving mid-word looks exactly like the user clicking away (the same trap
+the Grid's name field is written around, R10). Delete asks in the Editor's own bar, with
+`Move to Trash` as the button `↩` presses — never a dialog — and says so when an open
+file under it has unsaved changes. A rename with an unsaved tab under it is REFUSED
+(`save <name> before renaming it`): every affected tab is closed and reopened at the new
+path afterwards, which is the only way a Monaco model's URI follows its file, and a dirty
+one cannot survive that. An empty folder is the one thing `git ls-files` cannot report —
+it lists blobs — so a folder made here is remembered in the editor's own `newDirs` and
+folded back into every re-listing for as long as the window lives; a relaunch forgets it,
+exactly as git has.
+
 **Markdown preview.** A tab whose file name Monaco's markdown language would claim
 (`.md`, `.markdown`, `.mdown`, `.mkdn`, `.mkd`, `.mdwn`, `.mdtxt`, `.mdtext`) gets an
 eye beside the full-screen button, and the eye (or ⇧⌘V) swaps the source for
@@ -1592,7 +1967,7 @@ slab is refused rather than navigating the window.
 
 1. **Workspace / Changes** — header: name, sub line (`TASK-352 · 6 changes · 1 repo behind main`
    `· ● running 14s`), `Pull main`, `Start`/`Stop`. Segmented `Changes | Logs | Terminal |
-   Editor` (R4; the mock-up predates the last two). One row per
+   Editor | Notes` (R4; the mock-up predates the last three). One row per
    repo: name (150px), branch pill (`⎇ TASK-352 #218`), refresh icon button (only when on
    main), summary button (`4 files +84 −3 ›`) when it has changes else plain state text
    (`up to date` / `2 behind`), and — when running — its link(s) right-aligned.
@@ -1611,7 +1986,7 @@ slab is refused rather than navigating the window.
    nested under it with `path:line` linking into All diffs. All diffs: the diffs with review comments inline under the
    lines they sit on.
 
-8. **Terminal** — the same header, segmented `Changes | Logs | Terminal | Editor`, and a
+8. **Terminal** — the same header, segmented `Changes | Logs | Terminal | Editor | Notes`, and a
    dark terminal filling the body: a login shell in the workspace directory. When the shell
    has exited, the `.exit` footer from screen 2 with a single `New shell` button. A bell
    from a background workspace's shell (Claude finishing a turn) turns that workspace's
@@ -1629,7 +2004,7 @@ slab is refused rather than navigating the window.
     requested` when so, a checks dot, `3 comments`, `1d ago`, chevron. A row opens the
     pull request's Overview; Esc comes back.
 
-11. **Editor** — the same header, segmented `Changes | Logs | Terminal | Editor`, and
+11. **Editor** — the same header, segmented `Changes | Logs | Terminal | Editor | Notes`, and
     one slab filling the body, dark or light with the Terminal appearance. On the left
     the file tree: a folder per repo (a single repo starts open; of several, the one with
     the most changes), 24px rows, a chevron per folder, the git letter at the right of a
@@ -1645,7 +2020,26 @@ slab is refused rather than navigating the window.
     gone, the slab meets the window's edges, and a 38px band across its top carries the
     traffic lights, the workspace and branch, a blue dot when another workspace's
     terminal has rung, and at its right the one button that restores it; Esc restores it
-    too.
+    too. The tree's heading carries two icon buttons, New file and New folder, and a
+    right-click on any row opens a menu — `Open`, `New file…`, `New folder…`, `Rename…`,
+    `Delete`, `Copy path`, `Reveal in Finder`, with the two destructive ones missing on a
+    repo's own row. Naming happens in the tree itself: a one-line field where the row
+    will be, `↩` to commit and `esc` to cancel. Delete asks in the Editor's own bar —
+    `move <name> to the Trash?` with `Move to Trash` and `Cancel` — never a dialog.
+
+12. **Notes** — the same header, segmented `Changes | Logs | Terminal | Editor | Notes`,
+    and one slab filling the body, dark or light with the Terminal appearance. Inside it
+    a single writing column, 740px wide and centred: headings, paragraphs, bullets,
+    numbers, tasks with a real checkbox, quotes, code blocks and dividers, all drawn as
+    themselves — there is no source view. An empty note says `Write it down…`; an empty
+    line under the caret says `Type “#” for a heading, “-” for a list, “[]” for a task`.
+    A line the editor has no block for — a table, an image, `[ref]: url`, a line of HTML,
+    an unclosed fence — is shown as its own source, in monospace behind a dashed rule,
+    and saved back byte for byte. A save
+    that failed, or a note something else has edited since, is one line at the top of the
+    slab with `Keep mine` and `Reload`; `saving…` and `saved` appear briefly in the
+    bottom-right corner and then go. The same slab is what a Grid square shows when its
+    switch is on (§4.10).
 
 Clicking the branch pill opens the PR screen on its Overview. Clicking a summary button
 opens Files. Clicking a file row opens Diff. The workspace name — the header title, the
@@ -1688,4 +2082,33 @@ The back caret and Esc go back.
 - The Editor follows the Terminal appearance (`effective`), repainting in place.
 - Full screen hides the rail and the header; Esc or the button restores them, and the
   terminal's scrollback and focus are intact afterwards.
+- The Editor's tree makes a file, makes a folder, renames and deletes: the new file is
+  in the tree and open in a tab immediately and staged nowhere (`git status` reads
+  `??`), a rename carries its open tab with it, a delete is in the Trash and its tab is
+  closed, and `.git`, `..`, an absolute path and a symlink out of the repo are all
+  refused with a sentence.
+- Opening a note and saving it changes not one byte of the file — for anything typed in
+  it, and for anything it cannot draw: a table, an image, a reference definition, a
+  setext heading, an unclosed fence. `npm run test:notes` holds that against a corpus,
+  and asserts which blocks each line becomes as well as that the bytes match; the corpus
+  covers the markdown half (`parseBlocks` / `blockToMd`), and the DOM half — the
+  `data-*` source fields `makeBlock` writes and `specOf` reads — is checked in the
+  smoke harness, where the real contenteditable is.
+- Typing `### ` at the start of a line in a note makes it a heading and the marker goes;
+  `- `, `1. `, `[] `, `> `, three backticks and `---` do the same for their blocks, and
+  `**bold**`, `*italic*`, `` `code` `` and `~~strike~~` apply as the closing character is
+  typed — and the rest of the sentence after one is NOT bold.
+- A note writes itself 400 ms after typing stops, on blur, and on the way out of a quit;
+  an empty buffer never overwrites a note that has not finished loading, and a note
+  something else changed since asks rather than clobbering it.
+- A Grid square's switch shows that workspace's note in place of its terminal and back
+  again, with the shell and its scrollback untouched either way, and ⌘V with the caret
+  in the note goes into the note rather than into the shell behind it. Typing in a
+  square's note survives an app re-render: the caret stays where it was, not at the top.
+- ⌘. and ⌘Enter keep their app-wide meaning with the caret in a terminal or in Monaco,
+  and step aside only for a note.
+- ⌘A then Cut empties a note whatever shape it is — a one-line list, a heading, a fence,
+  a note that opens with a divider — and one keystroke never destroys a whole code block
+  it happens to be next to.
+- Renaming a symlink onto the file it points at is refused, not a destroyed file.
 - Every screen matches the mock-up's spacing, type and colour.

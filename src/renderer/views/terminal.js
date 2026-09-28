@@ -572,6 +572,10 @@ window.SB = window.SB || {};
   function focusedPane() {
     var active = document.activeElement;
     if (!active) return null;
+    // A Grid square can show that workspace's note instead of its terminal, and the
+    // note is a contenteditable that sits in the same cell. Without this, ⌘V with the
+    // caret in the note would type the clipboard into the live shell behind it.
+    if (active.isContentEditable === true) return null;
     var found = null;
     panes.forEach(function (pane) {
       if (!found && !pane.disposed && pane.host.contains(active)) found = pane;
