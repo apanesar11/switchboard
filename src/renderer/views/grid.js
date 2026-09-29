@@ -11,8 +11,8 @@
 // The data (views, which one is showing) belongs to app.js — SB.grid — because
 // views never write state. What lives here is only what a rebuild would otherwise
 // lose: the name being typed, the square that is choosing, the Delete that has
-// been clicked once, the view whose terminals are being edited. Every render is a
-// fresh tree, as everywhere else in the app.
+// been clicked once, the view that is being edited. Every render is a fresh tree,
+// as everywhere else in the app.
 window.SB = window.SB || {};
 
 (function (SB) {
@@ -24,15 +24,16 @@ window.SB = window.SB || {};
   var CELLS = 4;
   var NOTE_KEY = 'switchboard.grid.notes';     // the squares showing a note, by workspace id
 
-  var editing = null;     // null | { mode: 'new' | 'rename', id, text, fresh }
+  var editing = null;     // null | { text, fresh } — the view being made, its name as typed
   var picking = null;     // null | { viewId, index } — the square that is choosing
   var armed = null;       // the view whose Delete has been clicked once
   var menu = null;        // the view whose ⋯ menu is open
   var menuFresh = false;  // the menu was just opened: its first item gets focus, once
   var wanted = null;      // the workspace just put in a square: its terminal gets focus
-  var arranging = null;   // the view whose terminals are being edited: the × shows, Add does not
-  var arrangeFresh = false; // the edit was just entered: Done gets focus, once
+  var arranging = null;   // null | { id, text, fresh } — the view being edited, its name as typed
   var choosing = false;   // the folder sheet is up: a second click must not raise a second one
+  var pressing = false;   // a mouse button is down: what it pressed has not been clicked yet
+  var released = null;    // what is waiting for that click to land
   // Which squares are showing their workspace's note instead of its terminal, by
   // workspace id rather than by square: the same workspace can sit in two views, and a
   // scratch pad is about the workspace, not about where it happens to be on screen.
@@ -80,7 +81,7 @@ window.SB = window.SB || {};
     else noted[wsId] = true;
     saveNoted();
     // NOT `wanted`: that flag is consumed by landFocus, which bails — leaving it armed
-    // — whenever a name is being typed, a square is choosing or the terminals are being
+    // — whenever a name is being typed, a square is choosing or the view is being
     // edited, and an arbitrary later render then pulls the keyboard into this square.
     // The click was on the switch, so this focuses what came up itself.
     SB.render();
@@ -119,12 +120,13 @@ window.SB = window.SB || {};
 
   // ── naming a view ─────────────────────────────────────────────────────────
 
-  function startEdit(mode, view) {
-    editing = { mode: mode, id: view ? view.id : null, text: mode === 'rename' ? view.name : '', fresh: true };
+  function startNew() {
+    saveName();                       // a view that was being edited keeps what was typed
+    arranging = null;
+    editing = { text: '', fresh: true };
     armed = null;
     picking = null;
     menu = null;
-    arranging = null;
     SB.render();
   }
 
@@ -132,8 +134,7 @@ window.SB = window.SB || {};
     if (!editing) return;
     var e = editing;
     editing = null;
-    if (e.mode === 'new') SB.grid.create(e.text);
-    else SB.grid.rename(e.id, e.text);
+    SB.grid.create(e.text);
     SB.render();                      // an empty name creates nothing, and still needs the input gone
   }
 
@@ -142,20 +143,56 @@ window.SB = window.SB || {};
     SB.render();
   }
 
-  // The one text field in the app. Its value is kept in `editing` and put back on
-  // every rebuild — a bell or a run state arriving mid-word must not eat the word.
+  // A rebuild between a mousedown and its mouseup detaches what was pressed, and the
+  // click never arrives. The name field's blur is exactly that moment — the press on a
+  // ×, a ‹ or Done is what took focus out of the field — so what the blur decides
+  // waits for the press to finish, and runs after the click it became.
+  function whenReleased(fn) {
+    if (pressing) released = fn;
+    else fn();
+  }
+
+  function release() {
+    pressing = false;
+    var fn = released;
+    released = null;
+    if (fn) setTimeout(fn, 0);
+  }
+
+  document.addEventListener('mousedown', function () { pressing = true; }, true);
+  document.addEventListener('mouseup', release, true);
+  window.addEventListener('blur', release);      // let go of outside the window
+
+  // The name field: the + turned into one for a new view, or the selected segment
+  // while its view is being edited. Its value is kept in `editing` / `arranging` and
+  // put back on every rebuild, caret and all — a bell or a run state arriving mid-word
+  // must not eat the word.
   function nameInput() {
+    var box = editing || arranging;
+    var fresh = box === editing;
+    function keep() { box.text = input.value; box.sel = [input.selectionStart, input.selectionEnd]; }
     var input = h('input.vname', {
       type: 'text',
-      value: editing.text,
-      placeholder: editing.mode === 'new' ? 'Name this view' : '',
-      'aria-label': editing.mode === 'new' ? 'Name for the new view' : 'New name',
+      value: box.text,
+      placeholder: fresh ? 'Name this view' : '',
+      'aria-label': fresh ? 'Name for the new view' : 'Name of this view',
+      maxlength: '60',
       spellcheck: 'false',
       autocomplete: 'off',
-      onInput: function () { if (editing) editing.text = input.value; },
+      onInput: keep,
+      onKeyup: keep,
+      onMouseup: keep,
       onKeydown: function (e) {
-        if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
-        else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelEdit(); }
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          if (editing) commitEdit();
+          else { saveName(); setTimeout(focusDone, 0); }   // named; Done is the way out
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (editing) cancelEdit();
+          else cancelArrange();
+        }
       },
       onBlur: function () {
         // Deferred, and never decided from the event itself: Chromium blurs a focused
@@ -164,16 +201,23 @@ window.SB = window.SB || {};
         // would look exactly like the user leaving the field and commit half a name.
         // After the rebuild, focus is back in the new input (app.js restores it by
         // position) or it has really gone somewhere else.
-        setTimeout(function () {
-          if (!editing) return;
-          var now = document.querySelector('.seg input.vname');
-          if (now && document.activeElement === now) return;
-          if (editing.text.trim()) commitEdit();
-          else cancelEdit();
-        }, 0);
+        setTimeout(function () { whenReleased(settle); }, 0);
       }
     });
+    if (box.sel) {
+      try { input.setSelectionRange(box.sel[0], box.sel[1]); } catch (_) { /* not a text field */ }
+    }
     return input;
+  }
+
+  // Focus has left the name field, for good: what it says is the name.
+  function settle() {
+    if (!editing && !arranging) return;
+    var now = document.querySelector('.seg input.vname');
+    if (now && document.activeElement === now) return;
+    if (arranging) saveName();
+    else if (editing.text.trim()) commitEdit();
+    else cancelEdit();
   }
 
   function focusInput() {
@@ -190,35 +234,50 @@ window.SB = window.SB || {};
   // show their own state. Both were cut as wasted space.
 
   // The views are the tabs — the same control the workspace screen switches
-  // Changes / Logs / Terminal with — plus a + that becomes the name field.
+  // Changes / Logs / Terminal with — plus a + that becomes the name field. While a
+  // view is being edited its own segment is the name field, with a ‹ › either side.
   function segment(view) {
     var list = views();
     if (!list.length && !editing) return null;
     var seg = h('div.seg');
-    list.forEach(function (v) {
-      if (editing && editing.mode === 'rename' && editing.id === v.id) {
-        seg.appendChild(nameInput());
+    list.forEach(function (v, i) {
+      var on = !!view && v.id === view.id;
+      if (on && arranging) {
+        seg.appendChild(nameBox(v, i, list.length));
         return;
       }
-      var on = !!view && v.id === view.id;
       seg.appendChild(h('button' + (on ? '.on' : ''), {
         type: 'button',
-        onClick: function () { if (!on) { armed = null; picking = null; menu = null; arranging = null; SB.grid.select(v.id); } }
+        onClick: function () { if (!on) show(v); }
       }, v.name));
     });
-    if (editing && editing.mode === 'new') seg.appendChild(nameInput());
+    if (editing) seg.appendChild(nameInput());
     else {
       seg.appendChild(h('button.add', {
         type: 'button',
         title: 'New view',
         'aria-label': 'New view',
-        onClick: function () { startEdit('new', null); }
+        onClick: function () { startNew(); }
       }, '+'));
     }
     return seg;
   }
 
-  // Rename, Edit terminals and Delete sit behind the ⋯, and Delete asks once: a
+  // Another view's segment was clicked. The edit follows the selection: the view now
+  // showing is the one the name field, the ‹ › and the × belong to, so several views
+  // can be put in order in one visit.
+  function show(v) {
+    armed = null;
+    picking = null;
+    menu = null;
+    if (arranging) {
+      saveName();
+      arranging = { id: v.id, text: v.name, fresh: true };
+    }
+    SB.grid.select(v.id);
+  }
+
+  // Edit and Delete sit behind the ⋯, and Delete asks once: a
   // view is four clicks to rebuild, but that is still four clicks nobody should lose
   // to a slip. The menu is in-page like the picker — a native popup would need a
   // dialog for the confirm and never shows in a smoke screenshot.
@@ -270,13 +329,8 @@ window.SB = window.SB || {};
       h('button.mi', {
         type: 'button',
         role: 'menuitem',
-        onClick: function () { startEdit('rename', view); }
-      }, 'Rename'),
-      h('button.mi', {
-        type: 'button',
-        role: 'menuitem',
         onClick: function () { startArrange(view); }
-      }, 'Edit terminals'),
+      }, 'Edit'),
       h('button.mi' + (del ? '.bad' : ''), {
         type: 'button',
         role: 'menuitem',
@@ -287,26 +341,56 @@ window.SB = window.SB || {};
       }, del ? 'Delete “' + view.name + '”' : 'Delete'));
   }
 
-  // ── editing the terminals ─────────────────────────────────────────────────
+  // ── editing a view ────────────────────────────────────────────────────────
+  //
+  // Edit is the one mode for everything about a view that can change: its name, its
+  // place in the row, and what is in its squares. Rename and Edit terminals used to be
+  // two items and two modes; they are one, entered on purpose from the ⋯ and left with
+  // Done.
   //
   // Taking a workspace out of a square used to be a × on every square, all the time
-  // — one slip of the hand away, on a screen the hand is busy in. Now the × exists
-  // only while the view is being edited, a mode entered on purpose from the ⋯ and
-  // left with Done. In it the squares can lose a workspace and gain nothing: Add is
-  // gone from the empty ones, and the terminals do not take the landing focus.
-  // Switching view, or leaving the screen, ends it as it ends everything mid-flight.
+  // — one slip of the hand away, on a screen the hand is busy in. The × still exists
+  // only in here. An empty square offers Add as it always does, so a square can be
+  // emptied and filled again in the same visit, and the terminals do not take the
+  // landing focus. Leaving the screen ends it as it ends everything mid-flight;
+  // switching view carries it to the view switched to (see show).
+
+  function editingView(view) {
+    return !!arranging && !!view && arranging.id === view.id;
+  }
 
   function startArrange(view) {
-    arranging = view.id;
-    arrangeFresh = true;
+    arranging = { id: view.id, text: view.name, fresh: true };
     menu = null;
     armed = null;
     picking = null;
     SB.render();
   }
 
+  // What the field says becomes the view's name. An empty field is not a name: the
+  // view keeps the one it had, and the field goes back to saying it.
+  function saveName() {
+    var view = arranging ? viewById(arranging.id) : null;
+    if (!view) return;
+    var typed = arranging.text;
+    var name = typed.trim().slice(0, 60) || view.name;
+    arranging.text = name;
+    if (name !== view.name) SB.grid.rename(view.id, name);
+    else if (name !== typed) SB.render();
+  }
+
   function stopArrange() {
-    if (arranging === null) return;
+    if (!arranging) return;
+    saveName();
+    arranging = null;
+    SB.render();
+    setTimeout(focusDots, 0);
+  }
+
+  // Escape in the name field: what was typed is dropped, and so is the mode. What was
+  // taken out of a square or moved along the row has already happened and stays.
+  function cancelArrange() {
+    if (!arranging) return;
     arranging = null;
     SB.render();
     setTimeout(focusDots, 0);
@@ -317,14 +401,48 @@ window.SB = window.SB || {};
     if (el) el.focus();
   }
 
+  // One place along the row. The button pressed keeps the focus so it can be pressed
+  // again — it has moved with its segment, where app.js's restore by position would
+  // not find it — and at the end of the row, where it goes dead, the other one takes it.
+  function moveBy(view, by) {
+    var list = views();
+    var at = -1;
+    for (var i = 0; i < list.length; i++) if (list[i].id === view.id) at = i;
+    if (at === -1) return;
+    SB.grid.move(view.id, at + by);
+    setTimeout(function () {
+      var el = document.querySelector('.seg .vedit .mv.' + (by < 0 ? 'l' : 'r'));
+      if (!el || el.disabled) el = document.querySelector('.seg .vedit .mv:not([disabled])');
+      if (el) el.focus();
+    }, 0);
+  }
+
+  // The selected segment, opened up: its name as a field, and a ‹ › either side that
+  // moves it along the row. A view on its own has nowhere to go and gets no arrows.
+  function nameBox(view, at, count) {
+    function mv(by) {
+      var label = by < 0 ? 'Move left' : 'Move right';
+      return h('button.mv.' + (by < 0 ? 'l' : 'r'), {
+        type: 'button',
+        title: label,
+        'aria-label': label,
+        disabled: at + by < 0 || at + by >= count,
+        onClick: function () { moveBy(view, by); }
+      }, by < 0 ? '‹' : '›');
+    }
+    return h('div.vedit',
+      count > 1 ? mv(-1) : null,
+      nameInput(),
+      count > 1 ? mv(1) : null);
+  }
+
   // Where the ⋯ was: what this mode is for, and the one way out of it.
-  function doneBar(view) {
-    var filled = view.cells.filter(Boolean).length;
+  function doneBar() {
     return h('div.more.arr',
-      h('span.note', null, filled ? 'Click × to take a workspace out of this view' : 'Nothing to take out of this view'),
+      h('span.hint', null, 'Rename or move this view, add or take out its terminals'),
       h('button.btn.sm.done', {
         type: 'button',
-        title: 'Stop editing the terminals',
+        title: 'Finish editing this view',
         onClick: function () { stopArrange(); }
       }, 'Done'));
   }
@@ -350,7 +468,7 @@ window.SB = window.SB || {};
     });
     box.appendChild(h('button.ib.dots' + (open ? '.on' : ''), {
       type: 'button',
-      title: 'Rename or delete this view, or edit its terminals',
+      title: 'Edit or delete this view',
       'aria-label': 'Options for ' + view.name,
       'aria-haspopup': 'menu',
       'aria-expanded': open ? 'true' : 'false',
@@ -370,7 +488,7 @@ window.SB = window.SB || {};
     var usage = SB.views.usage;
     var gauge = usage && typeof usage.gauge === 'function' ? usage.gauge() : null;
     if (gauge) hd.appendChild(gauge);
-    if (view && !editing) hd.appendChild(arranging === view.id ? doneBar(view) : more(view));
+    if (view && !editing) hd.appendChild(editingView(view) ? doneBar() : more(view));
     return hd;
   }
 
@@ -398,9 +516,9 @@ window.SB = window.SB || {};
       dot ? h('span.dot.' + dot) : null,
       h('span.sp'),
       noteToggle(ws.id),
-      // The × only while the terminals are being edited (see startArrange): a square
+      // The × only while the view is being edited (see startArrange): a square
       // stays in the mode after losing its workspace, so several can go in one visit.
-      arranging === view.id ? h('button.x', {
+      editingView(view) ? h('button.x', {
         type: 'button',
         title: 'Take ' + ws.id + ' out of this view',
         'aria-label': 'Take ' + ws.id + ' out of this view',
@@ -490,10 +608,6 @@ window.SB = window.SB || {};
 
   function emptyCell(state, view, index) {
     var el = h('div.cell.free');
-    if (arranging === view.id) {                         // remove-only: nothing to add here
-      el.appendChild(h('span.sec', null, 'empty'));
-      return el;
-    }
     if (picking && picking.viewId === view.id && picking.index === index) {
       el.appendChild(picker(state, view, index));
       return el;
@@ -525,7 +639,7 @@ window.SB = window.SB || {};
       h('span.name.folder', { title: dir }, name),
       h('span.sp'),
       noteToggle(dir),
-      arranging === view.id ? h('button.x', {
+      editingView(view) ? h('button.x', {
         type: 'button',
         title: 'Take ' + name + ' out of this view',
         'aria-label': 'Take ' + name + ' out of this view',
@@ -541,7 +655,7 @@ window.SB = window.SB || {};
     // folder is not there any more") is what says so when the folder has gone.
     if (!ws && !isFolder(wsId)) return goneCell(view, index, wsId);
 
-    var el = h('div.cell.filled' + (arranging === view.id ? '.arr' : ''));
+    var el = h('div.cell.filled' + (editingView(view) ? '.arr' : ''));
     el.appendChild(ws ? head(view, index, ws) : folderHead(view, index, wsId));
     if (showingNote(wsId)) {
       var notes = SB.views.notes;
@@ -563,7 +677,7 @@ window.SB = window.SB || {};
     if (!view) {
       bd.appendChild(D.empty('Four terminals side by side. Make a view, then put a workspace in each square.', {
         title: 'no views yet',
-        action: { label: 'New view', onClick: function () { startEdit('new', null); } }
+        action: { label: 'New view', onClick: function () { startNew(); } }
       }));
       return bd;
     }
@@ -595,7 +709,14 @@ window.SB = window.SB || {};
     // bailed is a keyboard that jumps into a square minutes later.
     var just = wanted;
     wanted = null;
-    if (!view || editing || picking || menu !== null || arranging !== null) return;
+    if (!view || editing || picking || menu !== null) return;
+    // Being edited, the terminals take no focus at all. A square that was just filled
+    // hands it to Done: the picker's row is gone, and restoring by position would put
+    // the keyboard on whatever sits there now — the new square's ×, as likely as not.
+    if (arranging) {
+      if (just) setTimeout(focusDone, 0);
+      return;
+    }
     setTimeout(function () {
       var term = SB.views.terminal;
       var notes = SB.views.notes;
@@ -629,7 +750,7 @@ window.SB = window.SB || {};
     if (picking && (!view || picking.viewId !== view.id)) picking = null;
     if (armed && (!view || armed !== view.id)) armed = null;
     if (menu && (!view || menu !== view.id)) menu = null;
-    if (arranging && (!view || arranging !== view.id)) arranging = null;
+    if (arranging && (!view || arranging.id !== view.id)) arranging = null;
 
     var frag = D.frag(header(view), body(state, view));
     if (editing && editing.fresh) {
@@ -640,9 +761,9 @@ window.SB = window.SB || {};
       menuFresh = false;
       setTimeout(focusMenu, 0);        // once — a bell mid-menu keeps the item the user is on
     }
-    if (arranging !== null && arrangeFresh) {
-      arrangeFresh = false;
-      setTimeout(focusDone, 0);        // once — the way out is under the fingers, not a terminal
+    if (arranging && arranging.fresh) {
+      arranging.fresh = false;
+      setTimeout(focusInput, 0);       // once — the name, selected: typing renames it
     }
     landFocus(view);
     return frag;

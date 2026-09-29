@@ -146,9 +146,12 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
 - **Grid** — the row above the workspaces (⌘0): four terminals side by side, in views you
   make. Press **+**, name it, then put a workspace in each square; "Sample" for
   sample-1 to sample-4, "Everything else" for the rest, and switch between them the way
-  you switch tabs. The ⋯ at the right renames or deletes a view, and its **Edit
-  terminals** is the only place a square's × shows — so a slip of the hand cannot empty
-  one — with Done to finish; the bar beside the ⋯ is this session's Claude usage. A
+  you switch tabs. The ⋯ at the right holds **Edit** and Delete. Edit is one mode for
+  everything about the view showing: its tab becomes a name field to rename it, the ‹ ›
+  either side move it along the row, and the squares can lose a workspace (×) or gain
+  one (Add workspace) — click another tab to edit that one too, and Done to finish. It
+  is the only place a square's × shows, so a slip of the hand cannot empty one. The bar
+  beside the ⋯ is this session's Claude usage. A
   square *is* that workspace's Terminal — the same shell, the same scrollback, whether
   you look at it here or on its own tab — and taking it out of a square leaves the shell
   running. The button at a square's top right swaps the terminal for that workspace's

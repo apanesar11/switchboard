@@ -1047,10 +1047,19 @@ window.SB = window.SB || {};
     schedule();
   }
 
+  // Only the answer to the LAST save is adopted. Two changes a moment apart — a name
+  // typed and then a ‹ pressed — are two saves, and the first one's answer is the list
+  // as it was before the second change: adopting it would put the view back where it
+  // came from until the second answer arrived.
+  var saves = 0;
+
   function persistViews() {
     var a = api();
     if (!a || typeof a.saveGridViews !== 'function') return;
-    Promise.resolve(a.saveGridViews(state.grid.views)).then(adoptViews, noop);
+    var mine = ++saves;
+    Promise.resolve(a.saveGridViews(state.grid.views)).then(function (res) {
+      if (mine === saves) adoptViews(res);
+    }, noop);
   }
 
   function selectView(id) {
@@ -1088,6 +1097,16 @@ window.SB = window.SB || {};
       var clean = String(name || '').trim().slice(0, 60);
       if (!view || !clean || clean === view.name) return;
       view.name = clean;
+      persistViews();
+      render();
+    },
+    // Where a view stands in the row: `to` is the place it ends up in.
+    move: function (id, to) {
+      var list = state.grid.views;
+      var from = list.indexOf(viewById(id));
+      var at = Math.max(0, Math.min(list.length - 1, Number(to) || 0));
+      if (from === -1 || at === from) return;
+      list.splice(at, 0, list.splice(from, 1)[0]);
       persistViews();
       render();
     },

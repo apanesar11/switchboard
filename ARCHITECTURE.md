@@ -1010,7 +1010,7 @@ the path as tooltip, no dot, no jump) and `shell.js` (opens in the path itself; 
 the session) has to tell the two apart. Choosing the folder a workspace already lives in
 puts that workspace in the square, not a second shell in its folder under another name.
 A folder that has since gone shows the shell's own sentence with Try again, and Edit
-terminals takes it out.
+takes it out.
 
 **A square is that workspace's Terminal.** `views/terminal.js` keeps one xterm and one
 shell per workspace and exposes `mount(wsId, into)`, which moves the same host into
@@ -1018,8 +1018,8 @@ whatever is showing it — a Grid square or the workspace's own Terminal tab. On
 screen is ever on, so the host simply moves; nothing is duplicated and nothing restarts.
 Measured: the host element in the square is the host element on the Terminal tab, the
 marker typed in one is in the other, and the shell's `startedAt` is unchanged across the
-round trip. Taking a workspace out of a square — only from the `⋯`'s Edit terminals,
-R10 — leaves its shell running.
+round trip. Taking a workspace out of a square — only from the `⋯`'s Edit, R10 —
+leaves its shell running.
 
 **A square can show that workspace's NOTE instead of its terminal** (added 2026-09-28,
 the user's ask: "there should be a note that pops up in the terminal box … when I click
@@ -1055,9 +1055,13 @@ Three rules in `app.js` follow from that:
   its shell has exited and it has left its square.
 * A bell from a square on screen has already been read: `bell()` ignores it and
   `renderMain()` clears the set on every navigation, as it does for the Terminal tab.
-* `SB.grid` — `create / rename / remove / select / assign` — is the only writer of
+* `SB.grid` — `create / rename / move / remove / select / assign` — is the only writer of
   `state.grid`. Every change is applied first and written after, so a click never waits
   on the round trip, and whatever main kept replaces the list when it answers.
+  `move(id, to)` puts a view at index `to` of the row; the order of `config.grid.views`
+  IS the order of the segments, so there is nothing else to store. Only the answer to
+  the LAST save is adopted: two changes a moment apart (a name typed, then a `‹`) are
+  two saves, and the first one's answer is the list as it was before the second change.
 
 The layout is CSS: `.grid` is `1fr 1fr` by `1fr 1fr` and fills the body; below 860px of
 body width (a container query) it is one column of fixed-height rows and the page
@@ -1545,7 +1549,7 @@ by tmux (§4.6), which is why that case is not garbage either.
 ### R10 `views/grid.js`
 The Grid screen (§4.10). Header: one row — the views as the same segmented control the
 workspace screen switches tabs with, plus a `+` that becomes the name field in place, and
-a `⋯` at the right edge holding Rename, Edit terminals and a Delete that asks once (the
+a `⋯` at the right edge holding Edit and a Delete that asks once (the
 item turns red and names the view; a second click deletes). No title and no count line: the selected
 segment is the title, and the squares show their own state. The menu is in-page (`.more`
 > `.menu`, hanging from the `⋯`, after the header in the DOM so its no-drag holds — §4.9);
@@ -1560,8 +1564,15 @@ render's landing focus put the user in a terminal; a bell mid-word would likewis
 committed half a name. After the tick, focus is back in the new element — `app.js`
 restores it by position — or it has really left. A hidden window fires no focus events
 at all, which is why the smoke harness gives its window page focus (`scripts` — R1).
+
+What the name field's blur decides also waits for a press in flight. The press on a `×`,
+a `‹` or Done is what takes focus out of the field, the blur fires on its mousedown, and
+a rebuild between a mousedown and its mouseup detaches what was pressed — Chromium then
+fires no click at all (measured: a render in that gap and the segment pressed never
+switched). So `whenReleased()` holds the decision until the mouseup and runs it a tick
+after, behind the click the press became.
 Body: four `.cell`s — a filled one is a 30px strip (the workspace's
-name, which opens its Terminal tab; its run dot; and, only while the terminals are being
+name, which opens its Terminal tab; its run dot; and, only while the view is being
 edited, a `×` to take it out) over `terminal.mount()`; an empty one is an `Add workspace`
 button that turns into a picker of the workspaces not already in this view, headed by a
 `Folder` › `Choose a folder…` row — first, because the list already overflows a square
@@ -1572,19 +1583,39 @@ explains itself and offers Clear. A folder square's strip is the folder's name a
 label (the path is its tooltip), no dot and no jump: nothing runs there and no screen
 sits behind it.
 
-**Edit terminals** is the only way a workspace leaves a square. The `×` used to sit on
-every square all the time, one slip away on the screen the hand is busiest in; now it
-exists only while the view is being edited — a mode entered from the `⋯` and left with
+**Edit** is the one mode for everything about a view that can change (2026-09-29, the
+user's ask: "it should literally just be 'edit' and 'delete' … we don't need two separate
+settings for 'rename' and 'edit terminals'"). It is entered from the `⋯` and left with
 the Done that takes the `⋯`'s place in the header, beside a line saying what the mode is
-for. In it a square can lose its workspace and gain nothing: the empty squares say
-`empty` instead of offering Add, the filled squares' heads are tinted (`.cell.arr`) and
-their `×` drawn as a button, and the landing focus stays out of the terminals — Done
-gets it on entry. Removing a workspace keeps the mode, so several can go in one visit.
-Switching view or leaving the screen ends it, as it ends everything mid-flight.
+for (`.more.arr` > `.hint` — not `.note`, which is the Notes slab's class). In it:
+
+* **The name.** The selected segment becomes `.vedit`: the name as a field
+  (`input.vname`, focused and selected on entry, so typing renames) inside the same
+  raised pill the selected segment is. What the field says becomes the name when focus
+  leaves it, on Enter — which hands the focus to Done rather than leaving, so Enter
+  twice is rename-and-finish — and on Done. An empty field is not a name: the view keeps
+  the one it had. Escape drops what was typed and the mode with it. The field's text and
+  caret are put back on every rebuild.
+* **Its place in the row.** A `‹` and a `›` either side of the field move the view one
+  place along (`SB.grid.move`). The one at the end of the row is disabled, and a view on
+  its own gets neither. The button pressed keeps the focus — it has moved with its
+  segment, where `app.js`'s restore by position would not find it.
+* **Its squares.** The filled squares' heads are tinted (`.cell.arr`) and carry a `×`
+  drawn as a button; the empty ones offer `Add workspace` as they always do, so a square
+  can be emptied and filled again in one visit. This is the only place a `×` exists: it
+  used to sit on every square all the time, one slip away on the screen the hand is
+  busiest in. Removing a workspace keeps the mode. A square just filled hands the focus
+  to Done — the terminals take no landing focus while the view is being edited, and the
+  restore by position would otherwise land on whatever replaced the picker's row.
+
+Clicking another segment carries the edit to that view — the name typed is saved first —
+so several views can be renamed and put in order in one visit. The `+` ends the edit and
+becomes the new view's name field. Leaving the screen ends it, as it ends everything
+mid-flight.
 
 What it keeps between rebuilds is only what a rebuild would lose: the name being typed,
-the square that is choosing, the open menu, the armed Delete, the view whose terminals
-are being edited, and the workspace just placed — whose terminal gets focus, because the picker row the user clicked no longer
+the square that is choosing, the open menu, the armed Delete, the view that is being
+edited, and the workspace just placed — whose terminal gets focus, because the picker row the user clicked no longer
 exists and `app.js`'s path-based focus restore would land on whatever now sits at that
 position. All of it is dropped when the Grid is rendered after another screen: `render()`
 asks whether `#main` still holds a `.gridhd` from the previous rebuild. Landing on the

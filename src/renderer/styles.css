@@ -611,7 +611,7 @@ aside .it.on .ic{color:var(--ink)}
 .cellhd .x{display:inline-flex;align-items:center;justify-content:center;flex:none;
   width:22px;height:22px;border-radius:var(--r-md);color:var(--sec);font-size:15px;line-height:1}
 .cellhd .x:hover{background:var(--tint-2);color:var(--ink)}
-/* While the terminals are being edited (the only time a × exists) it reads as the
+/* While the view is being edited (the only time a × exists) it reads as the
    button it is, and the square's head says the square is up for it. */
 .cell.arr .cellhd{background:var(--tint-2)}
 .cell.arr .cellhd .x{border:1px solid var(--line);background:var(--surface);color:var(--ink)}
@@ -642,14 +642,26 @@ aside .it.on .ic{color:var(--ink)}
 .seg input.vname::placeholder{color:var(--sec);font-weight:400}
 .seg .add{padding:4px 11px;font-size:15px;line-height:1;color:var(--sec)}
 .seg .add:hover{color:var(--ink)}
+/* The selected segment while its view is being edited: one raised pill, as the
+   selected segment is, holding the name as a field and a ‹ › either side that moves
+   it along the row. The field is bare — the pill is its edge. */
+.seg .vedit{display:inline-flex;align-items:center;border-radius:var(--r-seg);
+  background:var(--surface);box-shadow:var(--sh-seg)}
+.seg .vedit input.vname{width:132px;padding:0 4px;background:transparent;box-shadow:none}
+.seg .vedit input.vname:first-child{padding-left:10px}
+.seg .vedit input.vname:last-child{padding-right:10px}
+.seg .vedit .mv{width:24px;height:26px;padding:0;font-size:15px;line-height:1;color:var(--sec)}
+.seg .vedit .mv[disabled]{opacity:.3;pointer-events:none}
 /* The header is one row: the segment, and a ⋯ beside it for the view showing. No
    h1 — the selected segment is the title — and no count line under it. */
 .hd.gridhd{display:flex;align-items:center;gap:6px}
 .hd.gridhd .seg{margin-top:0}
 .more{position:relative;display:flex;flex:none;margin-left:auto}
-/* Editing the terminals: a note and Done where the ⋯ was. The note gives way first. */
+/* Editing the view: a hint and Done where the ⋯ was. The hint gives way first. It is
+   .hint and not .note: that is the Notes slab's class (§4.15), and the slab's
+   background, edge and margin were being drawn behind this line. */
 .more.arr{flex:0 1 auto;min-width:0;align-items:center;gap:10px}
-.more.arr .note{font-size:var(--fs-xs);color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.more.arr .hint{font-size:var(--fs-xs);color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .ib.dots{width:28px;height:28px;border-color:transparent;background:transparent;color:var(--sec)}
 .ib.dots:hover,.ib.dots.on{background:var(--tint-2);color:var(--ink)}
 /* The menu hangs from the ⋯ at the right edge. It is a descendant of the header's drag region and
