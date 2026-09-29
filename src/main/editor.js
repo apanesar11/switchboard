@@ -21,11 +21,12 @@
 //     path that is absolute or holds an empty, `.`, `..` or `.git` segment, and anything
 //     whose REAL path — every symlink resolved — lands outside the repo or inside a
 //     `.git` folder. A symlink pointing out of the repo is the case the segment test
-//     cannot see and the realpath test exists for.
+//     cannot see and the realpath test exists for. A parked git dir (`.git.disabled`,
+//     git.js) is a `.git` folder by another name and is refused as one.
 //   * guard() resolves a repo WITHOUT workspaces.scan(): a scan runs several git commands
 //     per repo (status, numstat, remote), which is wrong for a stat poll every 3 s.
-//     lookup() + repoDirsIn() + displayName() are the rules scan() itself uses, so the
-//     answer is the same repo, for the cost of discover() alone.
+//     lookup() + reposOf() are the rules scan() itself uses, so the answer is the same
+//     repo, for the cost of discover() alone.
 //   * Save is the one write, and it writes exactly the file the user edited (§0): no git
 //     command of any kind, no formatting, no other file. It writes IN PLACE — open, truncate,
 //     write — never a temp file renamed over the original: a rename gives the file a new
@@ -72,22 +73,21 @@ const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 // ---------------------------------------------------------------------------
 
 /**
- * workspaceRepos(id) → { ok, id, repos: [{ name, dir }] } in the order scan() reports them:
- * the workspace's child repos, or the folder itself for a single-repo workspace (the rule
- * at workspaces.js scan()). An absolute-path id is a Grid folder square — a terminal and
- * nothing more — and is refused here, before lookup() is asked.
+ * workspaceRepos(id) → { ok, id, repos: [{ name, dir, nested }] } in the order scan() reports
+ * them: the folder itself when it is a repo, then its child repos (workspaces.reposOf()).
+ * `nested` is the child repos a folder's own tree and search leave out. An absolute-path id
+ * is a Grid folder square — a terminal and nothing more — and is refused here, before
+ * lookup() is asked.
  */
 async function workspaceRepos(id) {
   const want = typeof id === 'string' ? id.trim() : '';
   if (!want || path.isAbsolute(want)) return { ok: false, error: `no workspace called ${id}` };
   const ws = await workspaces.lookup(want);
   if (!ws || !ws.dir) return { ok: false, error: `no workspace called ${want}` };
-  let dirs = workspaces.repoDirsIn(ws.dir);
-  if (!dirs.length && fs.existsSync(path.join(ws.dir, '.git'))) dirs = [ws.dir];
   return {
     ok: true,
     id: ws.id,
-    repos: dirs.map(dir => ({ name: workspaces.displayName(path.basename(dir), ws.id), dir })),
+    repos: workspaces.reposOf(ws).map(r => ({ name: r.name, dir: r.dir, nested: r.nested })),
   };
 }
 
@@ -96,7 +96,8 @@ async function workspaceRepos(id) {
 const HFS_IGNORABLE = /[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g;
 
 function isDotGit(name) {
-  return name.replace(HFS_IGNORABLE, '').toLowerCase() === '.git';
+  const plain = name.replace(HFS_IGNORABLE, '').toLowerCase();
+  return plain === '.git' || plain === git.PARKED_GIT;
 }
 
 /** A repo-relative path the guard will consider at all: `a/b.txt`, nothing cleverer. */
@@ -221,7 +222,7 @@ async function tree(id) {
   const ws = await workspaceRepos(id);
   if (!ws.ok) return ws;
   const repos = await Promise.all(ws.repos.map(async repo => {
-    const r = await git.lsFiles(repo.dir);
+    const r = await git.lsFiles(repo.dir, { exclude: repo.nested });
     return {
       name: repo.name,
       files: r.ok ? r.files : [],
@@ -445,7 +446,7 @@ async function search(id, query, opts) {
   if (!ws.ok) return ws;
 
   const answers = await Promise.all(ws.repos.map(repo =>
-    git.grep(repo.dir, q, { caseSensitive: !!o.caseSensitive, regex: !!o.regex })));
+    git.grep(repo.dir, q, { caseSensitive: !!o.caseSensitive, regex: !!o.regex, exclude: repo.nested })));
   const matches = [];
   const errors = [];
   const seen = new Set();

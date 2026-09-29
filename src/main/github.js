@@ -14,6 +14,8 @@ const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
+const git = require('./git');
+
 const TTL_MS = 60 * 1000;
 const NOT_INSTALLED = 'gh is not installed';
 const NOT_SIGNED_IN = 'gh is not signed in';
@@ -191,26 +193,10 @@ function isGitHubHost(host) {
 /**
  * The repo's git dir and its COMMON git dir. They differ inside a worktree, where `.git` is a
  * file holding `gitdir: <path>`, HEAD lives in that per-worktree dir and config lives in the
- * common one named by `commondir`.
+ * common one named by `commondir`. git.js's answer, so a parked git dir is found here too.
  */
 function gitDirs(repoDir) {
-  const dotGit = path.join(repoDir, '.git');
-  let stat;
-  try { stat = fs.statSync(dotGit); } catch (_) { return null; }
-  let gitDir = dotGit;
-  if (!stat.isDirectory()) {
-    let pointer;
-    try { pointer = fs.readFileSync(dotGit, 'utf8'); } catch (_) { return null; }
-    const m = pointer.match(/^gitdir:\s*(.+)$/m);
-    if (!m) return null;
-    gitDir = path.resolve(repoDir, m[1].trim());
-  }
-  let commonDir = gitDir;
-  try {
-    const common = fs.readFileSync(path.join(gitDir, 'commondir'), 'utf8').trim();
-    if (common) commonDir = path.resolve(gitDir, common);
-  } catch (_) { /* not a worktree */ }
-  return { gitDir, commonDir };
+  return git.gitDirs(repoDir);
 }
 
 /** origin's URL straight out of .git/config — no process, ~0.1 ms. */
@@ -233,12 +219,7 @@ function originUrlFromConfig(repoDir) {
 
 /** Fallback for a config this parser cannot read (url.insteadOf rewrites, includes). */
 function originUrlFromGit(repoDir) {
-  return new Promise((resolve) => {
-    execFile('git', ['-C', repoDir, 'remote', 'get-url', 'origin'], {
-      env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' }),
-      timeout: 5000, encoding: 'utf8', windowsHide: true,
-    }, (err, stdout) => resolve(err ? null : String(stdout || '').trim() || null));
-  });
+  return git.originUrl(repoDir);
 }
 
 /** { owner, repo, host } for a repo directory, or null when it has no GitHub origin. */

@@ -29,6 +29,9 @@ const MAX_BUFFER = 16 * 1024 * 1024;
 const PATCH_MAX_LINES = 2000;          // ARCHITECTURE §4.3
 const UNTRACKED_STAT_MAX_BYTES = 2 * 1024 * 1024;
 const UNTRACKED_STAT_MAX_FILES = 300;  // a stray un-ignored build dir must not stall a scan
+const UNTRACKED_STAT_CONCURRENCY = 8;
+const BINARY_SNIFF_BYTES = 8000;       // git's own FIRST_FEW_BYTES: a NUL in these is a binary file
+const COUNT_CHUNK_BYTES = 64 * 1024;
 const ALL_DIFFS_MAX_FILES = 200;
 const ALL_DIFFS_CONCURRENCY = 8;
 
@@ -60,13 +63,44 @@ const FETCH_TIMEOUT_MS = 10000;
 // behind-count and every "up to date" derived from them is a guess at that point.
 const STALE_AFTER_MS = 10 * 60 * 1000;
 
+// A PARKED git dir: a repo whose `.git` has been renamed to `.git.disabled`, which is how an
+// umbrella folder of repos is hidden from an IDE that shows only the outermost repository.
+// git itself cannot see one, so every command here names it (`--git-dir`, `--work-tree`) and
+// the repo reads exactly as it would attached. A folder with a `.git` is never parked,
+// whatever else is in it.
+const PARKED_GIT = '.git.disabled';
+
+function isDirectory(p) {
+  try { return fs.statSync(p).isDirectory(); } catch (e) { return false; }
+}
+
+/** parkedGitDir(dir) → the absolute `.git.disabled` of a parked repo, or null. */
+function parkedGitDir(dir) {
+  if (fs.existsSync(path.join(dir, '.git'))) return null;
+  const parked = path.join(dir, PARKED_GIT);
+  return isDirectory(parked) ? parked : null;
+}
+
+/**
+ * What a listing of `dir` must leave out, as pathspecs: a parked git dir — git skips `.git`
+ * by name and nothing else, so `.git.disabled` would otherwise be a folder of untracked
+ * files — and `exclude`, the repos nested in this one that the workspace lists as rows of
+ * their own. `literal`, so a name is never read as a glob.
+ */
+function keepOut(dir, exclude) {
+  const names = (parkedGitDir(dir) ? [PARKED_GIT] : []).concat(Array.isArray(exclude) ? exclude : []);
+  return names.filter(Boolean).map((name) => ':(exclude,literal)' + name);
+}
+
 /** Run git in `dir`. Never rejects: resolves {code, stdout, stderr, overflow}. */
 function run(dir, args, opts) {
   const o = opts || {};
+  const parked = parkedGitDir(dir);
+  const where = parked ? ['-C', dir, '--git-dir=' + parked, '--work-tree=' + dir] : ['-C', dir];
   return new Promise((resolve) => {
     execFile(
       'git',
-      ['-C', dir].concat(args),
+      where.concat(args),
       {
         env: GIT_ENV,
         maxBuffer: o.maxBuffer || MAX_BUFFER,
@@ -135,11 +169,14 @@ async function mapLimit(items, limit, fn) {
 // ---------------------------------------------------------------------------
 async function readStatus(dir, opts) {
   const untracked = (opts && opts.untracked) || 'all';
+  // Only an untracked listing can see what keepOut() names, and a status with nothing to
+  // leave out is the command it always was.
+  const left = untracked === 'all' ? keepOut(dir, opts && opts.exclude) : [];
   const r = await run(dir, [
     'status', '--porcelain=v2', '--branch', '-z',
     untracked === 'all' ? '-uall' : '-uno',
     '--ignore-submodules=dirty',
-  ]);
+  ].concat(left.length ? ['--'].concat(left) : []));
   if (r.code !== 0) {
     return { ok: false, error: sentence(r, 'git status failed in ' + path.basename(dir) + '.'), records: [] };
   }
@@ -296,7 +333,40 @@ async function readNumstat(dir) {
 }
 
 /**
- * Line counts for ONE untracked file:
+ * countLines(file) → { add, del: 0, binary } — what `git diff --no-index --numstat` answers
+ * for /dev/null against a regular file, without the process. git's own two rules: a NUL in
+ * the first 8000 bytes is a binary file, and a line is what ends in \n, the last one
+ * counting whether or not it does. Checked against git file by file, the edges included (no
+ * final newline, CRLF, a lone CR, a NUL at byte 7999 and at 8000, UTF-16).
+ */
+async function countLines(file) {
+  const fh = await fs.promises.open(file, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(COUNT_CHUNK_BYTES);
+    let pos = 0;
+    let lines = 0;
+    let last = -1;
+    for (;;) {
+      const { bytesRead } = await fh.read(buf, 0, buf.length, pos);
+      if (!bytesRead) break;
+      if (pos === 0 && buf.subarray(0, Math.min(bytesRead, BINARY_SNIFF_BYTES)).indexOf(0) !== -1) {
+        return { add: 0, del: 0, binary: true };
+      }
+      for (let i = 0; i < bytesRead; i++) if (buf[i] === 0x0a) lines++;
+      last = buf[bytesRead - 1];
+      pos += bytesRead;
+    }
+    if (pos > 0 && last !== 0x0a) lines++;
+    return { add: lines, del: 0, binary: false };
+  } finally {
+    await fh.close();
+  }
+}
+
+/**
+ * Line counts for ONE untracked file. A regular file is counted here, by countLines(): a
+ * git process per file is ~30 ms, and a folder of 300 untracked images made one scan take
+ * nine seconds. Anything else — a symlink, whose "content" is its target — is still git's:
  *   git diff --no-index --numstat -z -- /dev/null <file>
  * EXIT 1 MEANS SUCCESS here (the two inputs differ). Exit 0 means identical,
  * exit > 1 is a real error. The output always uses the three-field rename layout
@@ -304,13 +374,19 @@ async function readNumstat(dir) {
  * `git add -N` would also work and is forbidden: it mutates the user's index.
  */
 async function untrackedNumstat(dir, relPath) {
+  const file = path.join(dir, relPath);
   let size = 0;
+  let regular = false;
   try {
-    size = fs.statSync(path.join(dir, relPath)).size;
+    size = fs.statSync(file).size;
+    regular = fs.lstatSync(file).isFile();
   } catch (e) {
     return null;
   }
   if (size > UNTRACKED_STAT_MAX_BYTES) return { add: 0, del: 0, binary: false };
+  if (regular) {
+    try { return await countLines(file); } catch (e) { /* unreadable here: let git say why */ }
+  }
   const r = await run(dir, ['diff', '--no-index', '--numstat', '-z', '--no-color', '--', '/dev/null', relPath]);
   if (r.code > 1) return null;
   const fields = nulFields(r.stdout);
@@ -337,9 +413,12 @@ function statusLetter(rec) {
  * FileChange = { path, status, add, del, binary, oldPath } per ARCHITECTURE §2.
  * `branch` carries the same fields branchInfo() returns, so a caller that wants
  * both pays for only one `git status`.
+ * `exclude` names the repos nested in this one (keepOut()): a workspace folder that is a
+ * repo holds its child repos, and without it each is an untracked "file" of its parent.
  */
-async function changes(dir) {
-  const [st, numstat] = await Promise.all([readStatus(dir, { untracked: 'all' }), readNumstat(dir)]);
+async function changes(dir, opts) {
+  const exclude = (opts && opts.exclude) || null;
+  const [st, numstat] = await Promise.all([readStatus(dir, { untracked: 'all', exclude }), readNumstat(dir)]);
   if (!st.ok) {
     return {
       ok: false,
@@ -354,12 +433,16 @@ async function changes(dir) {
   const files = [];
   let add = 0;
   let del = 0;
-  let untrackedBudget = UNTRACKED_STAT_MAX_FILES;
+
+  // The first UNTRACKED_STAT_MAX_FILES untracked files get line counts, a few at a time.
+  const counted = st.records.filter((rec) => rec.untracked).slice(0, UNTRACKED_STAT_MAX_FILES);
+  const counts = await mapLimit(counted, UNTRACKED_STAT_CONCURRENCY, (rec) => untrackedNumstat(dir, rec.path));
+  const untrackedStat = new Map(counted.map((rec, i) => [rec, counts[i]]));
 
   for (const rec of st.records) {
     let stat = null;
     if (rec.untracked) {
-      if (untrackedBudget-- > 0) stat = await untrackedNumstat(dir, rec.path);
+      stat = untrackedStat.get(rec) || null;
     } else {
       stat = numstat.get(rec.path) || null;
       // `git status` and `git diff -M` can disagree on rename detection, so a
@@ -476,10 +559,10 @@ async function fileDiff(dir, relPath, opts) {
  * allDiffs(dir) → { ok, error, files: [{ path, status, oldPath, add, del, patch,
  *                   binary, truncated, error }], omitted }
  * One diff process per changed file, eight at a time. Capped at 200 files;
- * `omitted` says how many were left out.
+ * `omitted` says how many were left out. `exclude` is changes()'s.
  */
-async function allDiffs(dir) {
-  const ch = await changes(dir);
+async function allDiffs(dir, opts) {
+  const ch = await changes(dir, opts);
   if (!ch.ok) return { ok: false, error: ch.error, files: [], omitted: 0 };
 
   const wanted = ch.files.slice(0, ALL_DIFFS_MAX_FILES);
@@ -555,17 +638,22 @@ const JUNK = new Set(['.DS_Store', 'Thumbs.db']);
  * An untracked nested repo or linked worktree (a clone in vendor/, a worktree under
  * .claude/worktrees/) is one `-o` entry with a trailing slash — git does not look inside
  * another repository — and loses the slash, so it is the same kind of path: a named row
- * whose read() says it is a folder, not a nameless file under it.
+ * whose read() says it is a folder, not a nameless file under it. The nested repos named in
+ * `exclude` are the exception: the workspace shows each as a tree of its own, so they are
+ * left out of this one, as a parked git dir always is (keepOut()).
  */
 async function lsFiles(dir, opts) {
   const o = opts || {};
   const max = o.max || LS_FILES_MAX;
   const runOpts = { maxBuffer: LS_FILES_MAX_BUFFER };
+  // Only the two untracked listings can see a parked git dir or a nested repo (keepOut()).
+  const left = keepOut(dir, o.exclude);
+  const rest = left.length ? ['--'].concat(left) : [];
   const [cached, others, deleted, excluded] = await Promise.all([
     run(dir, ['ls-files', '-z', '-c'], runOpts),
-    run(dir, ['ls-files', '-z', '-o', '--exclude-standard'], runOpts),
+    run(dir, ['ls-files', '-z', '-o', '--exclude-standard'].concat(rest), runOpts),
     run(dir, ['ls-files', '-z', '-d'], runOpts),
-    run(dir, ['ls-files', '-z', '-o', '-i', '--exclude-standard', '--directory'], runOpts),
+    run(dir, ['ls-files', '-z', '-o', '-i', '--exclude-standard', '--directory'].concat(rest), runOpts),
   ]);
   // Overflow first: maxBuffer kills git, so a cut stream also reads as killed and exit 1.
   if (!cached.overflow && cached.timedOut) {
@@ -769,11 +857,12 @@ function matchSpans(lines, query, o) {
 }
 
 /**
- * grep(dir, query, { caseSensitive, regex, max, timeout })
+ * grep(dir, query, { caseSensitive, regex, max, timeout, exclude })
  *   → { ok, error, matches: [{ path, line, text, offset, ranges }], truncated }
  *
  * Find in files over what is ON DISK — the files lsFiles() lists: tracked, plus untracked
- * ones .gitignore does not exclude. Never the index, never an unsaved buffer.
+ * ones .gitignore does not exclude, less `exclude` as lsFiles() leaves it out. Never the
+ * index, never an unsaved buffer.
  *   -I                          binary files are skipped (git's test: a NUL in the first 8000 bytes)
  *   --no-color --no-column      a user's color.grep=always or grep.column=true would reshape the records
  *   --no-recurse-submodules     a user's submodule.recurse=true makes git refuse --untracked outright
@@ -801,7 +890,9 @@ async function grep(dir, query, opts) {
   const flags = (mode) => [
     'grep', '-z', '-n', '-I', '--untracked', '--exclude-standard', '--no-color', '--no-column',
     '--no-recurse-submodules', '--max-count', String(GREP_MAX_PER_FILE),
-  ].concat(o.caseSensitive ? [] : ['-i'], [mode, '-e', String(query), '--']);
+    // --untracked reads a parked git dir's own files (HEAD, config, the sample hooks) like
+    // any other untracked text; keepOut() is what stops a search from matching them.
+  ].concat(o.caseSensitive ? [] : ['-i'], [mode, '-e', String(query), '--'], keepOut(dir, o.exclude));
   const runOpts = { timeout: o.timeout || GREP_TIMEOUT_MS };
 
   let r = await run(dir, flags(o.regex ? '-P' : '-F'), runOpts);
@@ -966,9 +1057,12 @@ async function remoteInfo(dir, remote) {
 /**
  * The repo's git dir, and the COMMON git dir shared with its worktrees. They differ inside a
  * worktree, where `.git` is a FILE holding `gitdir: <path>`: FETCH_HEAD is per-worktree and
- * lives in the first, refs live in the second.
+ * lives in the first, refs live in the second. Null when `dir` is not a repo at all.
  */
 function gitDirs(dir) {
+  const parked = parkedGitDir(dir);
+  // A parked git dir is always a folder, and a worktree's is never parked.
+  if (parked) return { gitDir: parked, commonDir: parked };
   const dotGit = path.join(dir, '.git');
   let st;
   try { st = fs.statSync(dotGit); } catch (e) { return null; }
@@ -1079,6 +1173,10 @@ module.exports = {
   // exported for workspaces.js and for tests
   parseRemoteUrl,
   isMainName,
+  // a repo's git dir, parked or not — for workspaces.js, github.js and editor.js
+  gitDirs,
+  parkedGitDir,
+  PARKED_GIT,
   FETCH_TIMEOUT_MS,
   STALE_AFTER_MS,
 };

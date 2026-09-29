@@ -186,6 +186,12 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   `~/.switchboard/config.json` under `workspaces` as `"name": { "dir": "folder" }` and it
   joins the rail, the folder itself being its one repo. Projects with a single workspace
   share the **Other** group; a project gets a group of its own as soon as it has two.
+- **Umbrella repos** — when a folder of repos is a repository itself (it tracks the README,
+  scripts and docs around its children), it is the first row of its own workspace, above
+  the repos inside it, with its branch, its changes, Pull main and the Editor like any
+  other. Its git folder may be parked as `.git.disabled` — the rename some setups use to
+  hide the outer repository from an IDE — and Switchboard reads it where it is, without
+  attaching it.
 - **Links** — once a server is listening, its address shows on the repo's row. Click it
   and it opens in your default browser. Configured ngrok tunnels can appear beside a repo.
 - **Changes** — per repo, a GitHub-style summary (`4 files +84 −3`). Tap it for the file

@@ -27,6 +27,10 @@ personal paths, credentials, or local configuration backups.
      workspace `dir` values are absolute. Setting a root enables discovery of
      its child folders with at least two immediate Git repositories; use
      explicit absolute `dir` entries without a root for a curated selection.
+     A discovered folder that is a Git repository itself (a `.git`, or one
+     parked as `.git.disabled`) is listed as the first repo of its workspace,
+     under the workspace's name without its numeric suffix; nothing needs
+     declaring for it.
    - `workspaces.<id>.dir` declares a folder, including a single Git repository.
      Relative directories resolve under `root`; `~/` works here too. A discovered
      workspace with the same ID takes precedence, so choose unambiguous IDs.

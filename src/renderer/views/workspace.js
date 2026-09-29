@@ -503,7 +503,10 @@ SB.views = SB.views || {};
     var checking = busy(pullKey(ws.id, repo.name));
     var row = h('div.repo' + (checking ? '.busy' : ''));
 
-    row.appendChild(h('span.rn', { title: repo.dirName || repo.name }, repo.name));
+    // The workspace folder, when it is a repo too, is a row like the repos inside it; only
+    // its tooltip says which one it is.
+    var folder = repo.dirName || repo.name;
+    row.appendChild(h('span.rn', { title: repo.root ? folder + ' — the workspace folder itself' : folder }, repo.name));
     row.appendChild(branchPill(ws, repo, prs));
     if (repo.onMain && !repo.error) row.appendChild(refreshButton(ws, repo, checking));
 

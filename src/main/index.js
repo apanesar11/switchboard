@@ -1152,7 +1152,7 @@ handle('sb:diff:all', async (id, repoName) => {
   for (const repo of repos) {
     let result;
     try {
-      result = await git.allDiffs(repo.dir);
+      result = await git.allDiffs(repo.dir, { exclude: repo.nested });
     } catch (err) {
       errors.push({ repo: repo.name, error: String((err && err.message) || err) });
       continue;

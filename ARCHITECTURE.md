@@ -98,14 +98,27 @@ immediate children include git repos: `sample-1 … sample-4`, `example-1`,
 `example-2`, `demo`. It can also be a **single repo** — a folder that is the repo
 itself, with nothing nested (`switchboard`, and any app that is one repository) — which
 discovery never finds on its own, so the config declares it (§3, `workspaces.<id>.dir`);
-its one repo is the folder. Its **project** is the id with a trailing `-<n>` stripped
-(`sample-2` → `sample`). Only one copy of a project may run at a time. Its **section**
+its one repo is the folder. A folder of repos can be a repo **itself** as well — an
+umbrella that tracks the glue around its children (a README, scripts, docs) — and then
+the folder is the workspace's first repo and its children follow. Its **project** is the
+id with a trailing `-<n>` stripped (`sample-2` → `sample`). Only one copy of a project may run at a time. Its **section**
 is the rail heading it sits under: the project's own name when that project has more
 than one workspace, else `other`, which the single-workspace projects share.
 
-A **repo** is one of those immediate children (`sample-api-2`). Its **display name** is
-the directory name with the workspace's numeric suffix stripped (`sample-api-2` →
-`sample-api`), because the mock-up shows `sample-api`.
+A **repo** is one of those immediate children (`sample-api-2`), or the workspace folder
+when that is a repo. Its **display name** is the directory name with the workspace's
+numeric suffix stripped (`sample-api-2` → `sample-api`, and the folder `sample-2` →
+`sample`), because the mock-up shows `sample-api`. A name is how every call finds its
+repo, so no two repos of a workspace share one: a folder whose name a child already
+answers to keeps its full folder name, and is `.` if that is taken too.
+
+A repo's git dir may be **parked**: `.git` renamed to `.git.disabled`, which is how an
+umbrella folder is hidden from an IDE that shows only the outermost repository. It is a
+repo all the same — `git.js` names the git dir on every command (`--git-dir`,
+`--work-tree`) — and nothing in the app attaches or parks one. A folder with a `.git` is
+never parked, whatever else it holds. Discovery does not count a parked CHILD: the
+two-child rule is about `.git`, and only the workspace folder itself is looked at for a
+parked git dir.
 
 A **note** is a workspace's scratch pad: one markdown file, edited in the Notes tab
 (§4.15) and kept beside the config rather than in any repo. A Grid folder square has one
@@ -138,6 +151,10 @@ Repo = {
   name: 'sample-api',                     // display name
   dirName: 'sample-api-2',
   dir: '/Users/…/apps/sample-2/sample-api-2',
+  root: false,                            // true for the workspace folder itself — always the
+                                          // first repo when there is one
+  nested: [],                             // on the root: its child repos' folder names, which
+                                          // git leaves out of the root's own listings
   branch: 'TASK-352',
   detached: false,
   head: '8740cb4…' | null,                // full HEAD sha — the only identity a detached repo has
@@ -526,7 +543,7 @@ repo-relative with `/` separators.
 
 | `window.sb` | channel | returns |
 |---|---|---|
-| `sb.codeTree(id)` | `sb:code:tree` | `{ ok, repos: [{ name, files: [path…], ignored: [path…], truncated, error }] }` — `files` is every file git would show: tracked plus untracked-not-ignored, minus tracked files deleted from the worktree, deduplicated; `ignored` is every file `.gitignore` keeps out of git — `.env.local`, a `config.json`, a `debug.log` — which the tree shows too, dimmed, because being kept out of git is the usual reason someone needs to open a file. Ignored *folders* stay out whole (`node_modules/`, `dist/`, `.next/`: git prints each as one entry with `--directory` rather than walking it, and every such entry is dropped, so a file inside one is in neither list), and `.DS_Store` / `Thumbs.db` are dropped from the ignored list, as VS Code hides them. Four listings run side by side (`git ls-files -z -c`, `-o --exclude-standard`, `-d`, `-o -i --exclude-standard --directory`), tracked files first and ignored ones last, so the cap of 100 000 per repo over both lists (`truncated: true`) costs ignored files before untracked ones and those before any tracked one: one `-c -o` call printed every untracked path before the first tracked one, and an un-ignored `node_modules` filled the tree with nothing else. An untracked or ignored listing that fails or times out is that same cut, not a failed repo. An untracked nested repo or linked worktree is one `-o` entry, `vendor/lib/`; it loses the slash and is a row like any file, whose read says it is a folder. One entry per repo in the order `workspaces.scan` gives them, the folder itself for a single-repo workspace. A repo git cannot list gets `files: []` and an `error` sentence; it never fails the call. Find in files (`sb.codeSearch`) still searches only `files`: `git grep --untracked --exclude-standard` does not read ignored files |
+| `sb.codeTree(id)` | `sb:code:tree` | `{ ok, repos: [{ name, files: [path…], ignored: [path…], truncated, error }] }` — `files` is every file git would show: tracked plus untracked-not-ignored, minus tracked files deleted from the worktree, deduplicated; `ignored` is every file `.gitignore` keeps out of git — `.env.local`, a `config.json`, a `debug.log` — which the tree shows too, dimmed, because being kept out of git is the usual reason someone needs to open a file. Ignored *folders* stay out whole (`node_modules/`, `dist/`, `.next/`: git prints each as one entry with `--directory` rather than walking it, and every such entry is dropped, so a file inside one is in neither list), and `.DS_Store` / `Thumbs.db` are dropped from the ignored list, as VS Code hides them. Four listings run side by side (`git ls-files -z -c`, `-o --exclude-standard`, `-d`, `-o -i --exclude-standard --directory`), tracked files first and ignored ones last, so the cap of 100 000 per repo over both lists (`truncated: true`) costs ignored files before untracked ones and those before any tracked one: one `-c -o` call printed every untracked path before the first tracked one, and an un-ignored `node_modules` filled the tree with nothing else. An untracked or ignored listing that fails or times out is that same cut, not a failed repo. An untracked nested repo or linked worktree is one `-o` entry, `vendor/lib/`; it loses the slash and is a row like any file, whose read says it is a folder. One entry per repo in the order `workspaces.scan` gives them, the folder itself for a single-repo workspace; a workspace folder that is a repo as well as a folder of repos is the first entry, and its tree leaves out the child repos (each is an entry of its own) and a parked `.git.disabled`. A repo git cannot list gets `files: []` and an `error` sentence; it never fails the call. Find in files (`sb.codeSearch`) still searches only `files`: `git grep --untracked --exclude-standard` does not read ignored files |
 | `sb.codeRead(id, repoName, path)` | `sb:code:read` | `{ ok, text, mtimeMs, size, bom }` for UTF-8 text up to 5 MB (a BOM is stripped from `text` and reported as `bom: true`); `{ ok, binary: true, mtimeMs, size }` when the first 8 KB hold a NUL or the bytes are not valid UTF-8; `{ ok, tooLarge: true, mtimeMs, size }` over 5 MB; `{ ok:false, missing: true, error: '<path> is not there any more' }`; `{ ok:false, error: '<path> is a folder' }` — a submodule's gitlink, an untracked nested repo and a linked worktree each list as one path |
 | `sb.codeWrite(id, repoName, path, text, {mtimeMs, bom, force})` | `sb:code:write` | Save. `{ ok, mtimeMs, size }` from a fresh stat, or `{ ok:false, conflict: true, missing, mtimeMs, error: '<name> changed on disk since it was opened' }` (`… was deleted on disk`) — see below. `text` is a string of at most 20 MB |
 | `sb.codeBase(id, repoName, path, oldPath?)` | `sb:code:base` | The `HEAD` version, for the markers: `git cat-file blob HEAD:<oldPath or path>`. `{ ok, text }` when the blob exists, holds no NUL and is at most 3 MB; `{ ok, text: null }` when `HEAD` has no such path or there is no `HEAD` yet (every line is then "added"); `{ ok, text: null, skip: true }` for a binary or oversize blob (no markers at all). `oldPath` is a rename's, from `FileChange.oldPath`. A path that goes through a symlink (`CLAUDE.md -> AGENTS.md`, or a file in a linked folder) is asked for by where it really is in the repo, since the read shows the target's text and `HEAD`'s blob for the link is only the target's name — diffed against each other, an unchanged file was all modified. A path with no link in it keeps git's spelling, which is what `HEAD` knows it by after a case-only rename not yet committed |
@@ -538,10 +555,11 @@ repo-relative with `/` separators.
 **One path guard, in `main/editor.js`, for read, write, base and stat.** It resolves
 `(id, repoName)` without a `scan()` — that runs several git commands per repo, and a
 stat poll every 3 s cannot afford it: `workspaces.lookup(id)` gives the folder,
-`workspaces.repoDirsIn` its repos (or the folder itself when it has a `.git` and no repo
+`workspaces.reposOf` its repos (the folder itself when it is a repo, then its repo
 children), and the one whose display name is `repoName` wins. Then the path: a
-non-empty string, no NUL, not absolute, and no segment that is empty, `.`, `..` or
-`.git` (in any case — a Mac's disk is case-insensitive). Then the disk: the realpath of
+non-empty string, no NUL, not absolute, and no segment that is empty, `.`, `..`,
+`.git` or `.git.disabled` — a parked git dir is a `.git` by another name — (in any case:
+a Mac's disk is case-insensitive). Then the disk: the realpath of
 the file — or, for a file that is not there yet, of its parent folder — must be the
 repo's realpath or under it, and never under its `.git`; a symlink pointing out of the
 repo is refused like `../`. The sentences: `<path> is outside <repo>`, `<repo> is not a
@@ -1129,10 +1147,14 @@ discovered). Mark the one whose package.json is this app's own `self`, with
 Give each its `section`: its project when that project has more than one
 workspace, else `other`. Sort by section in the config's project order with `other`
 last, then by project, then by id.
-`scan(id, {fetch})` → `Workspace` with `repos` — the child repos, or the folder itself
-when it has no repo children and is a repo (a single-repo workspace) — calling `git.js`
-per repo **in parallel** and folding in `pr` from the cached PR summary if present.
-Never throws: a repo that fails gets `error` and empty change data.
+`reposOf(ws)` → `[{ name, dirName, dir, root, nested }]`, no git: the folder itself when
+it is a repo (a `.git`, or a parked `.git.disabled`), then its child repos. A single-repo
+workspace is the first half alone, a plain folder of repos the second, an umbrella both.
+It is the one rule for which repos a workspace has and what each is called, shared by
+`scan()` and the Editor's path guard (M8).
+`scan(id, {fetch})` → `Workspace` with `repos` — `reposOf()`'s, in that order — calling
+`git.js` per repo **in parallel** and folding in `pr` from the cached PR summary if
+present. Never throws: a repo that fails gets `error` and empty change data.
 `lookup(id)` → the `Workspace` (no repos) the rail shows under that id, or null — the one
 place a bare id turns back into a folder, so a declared workspace resolves to its
 declared `dir`. `dirOf(id)` → the absolute folder a terminal for `id` opens in: an
@@ -1143,19 +1165,36 @@ themselves — that is how `website` used to answer "unknown workspace".
 
 ### M3 `git.js`
 Pure functions over a repo directory, all `execFile('git', […], {cwd})`, no shell:
-`branchInfo(dir)`, `divergence(dir, branch)`, `changes(dir)` (tracked numstat + status +
-untracked, NUL-separated parsing), `fileDiff(dir, path, {untracked})`, `allDiffs(dir)`,
-`pullMain(dir)`, `remoteInfo(dir)`, `fetch(dir)`. Handle: no upstream, missing
-`origin/main`, detached HEAD, renames, binary files, paths with spaces and unicode.
+`branchInfo(dir)`, `divergence(dir, branch)`, `changes(dir, {exclude})` (tracked numstat +
+status + untracked, NUL-separated parsing), `fileDiff(dir, path, {untracked})`,
+`allDiffs(dir, {exclude})`, `pullMain(dir)`, `remoteInfo(dir)`, `fetch(dir)`. Handle: no
+upstream, missing `origin/main`, detached HEAD, renames, binary files, paths with spaces
+and unicode.
 
-For the Editor (§4.14), three readers that never write: `lsFiles(dir, {max})` → `{ ok,
+A **parked** repo (§2) is handled in one place: `run()` adds `--git-dir=<dir>/.git.disabled
+--work-tree=<dir>` when `dir` has no `.git` and has that folder, so every function above
+and below reads, fetches and pulls it as it would an attached one; `gitDirs(dir)` answers
+with the parked folder, which is where `lastFetch()` and `github.js` look for FETCH_HEAD,
+HEAD and the config. git skips a folder called `.git` and nothing else, so the listings
+that can see untracked files — `status -uall`, `ls-files -o`, `grep --untracked` — are
+given `:(exclude,literal).git.disabled` for a parked repo, and `:(exclude,literal)<name>`
+for every name in `exclude`: the workspace folder's child repos (`Repo.nested`), each of
+which would otherwise be one untracked "file" of an umbrella that does not gitignore it.
+
+An untracked file's line counts are counted in-process (`countLines()`), not by a
+`git diff --no-index --numstat` per file: a process each is ~30 ms, and a folder of 300
+untracked images made one scan take nine seconds. The rules are git's — a NUL in the first
+8 000 bytes is binary, a line is what ends in `\n` and the last one counts without it —
+and anything that is not a regular file (a symlink) is still asked of git.
+
+For the Editor (§4.14), three readers that never write: `lsFiles(dir, {max, exclude})` → `{ ok,
 files, ignored, truncated, error }` (`files`: tracked first, then untracked-not-ignored,
 less what the worktree has deleted; `ignored`: the files `.gitignore` excludes, by name,
 with ignored folders left out whole and `.DS_Store` / `Thumbs.db` dropped — four
 `ls-files` calls side by side — the two lists together cut at `LS_FILES_MAX`, 100 000,
 ignored files first), `headBlob(dir, relPath)` → `{ ok, text, skip }` (`git cat-file blob HEAD:…`,
 `HEAD_BLOB_MAX_BYTES`, 3 MB, as its `maxBuffer`) and `grep(dir, query, {caseSensitive,
-regex, max})` → `{ ok, matches: [{path, line, text, offset, ranges}], truncated, error }`
+regex, max, exclude})` → `{ ok, matches: [{path, line, text, offset, ranges}], truncated, error }`
 (`GREP_MAX_MATCHES`, 2 000; `GREP_MAX_PER_FILE`, 200; the 400/80-character window; and
 `matchSpans()`, the one bounded pass that finds `ranges` — at most `GREP_MAX_RANGES`, 50,
 a line, under a `GREP_REGEX_MS`, 250 ms, `vm` timeout for a regex). `-z` on anything that

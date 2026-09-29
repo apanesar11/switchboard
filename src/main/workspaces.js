@@ -18,6 +18,12 @@
 // there on the two are the same thing: scan() reports the single repo as the
 // workspace's one repo, named after the folder.
 //
+// A folder of repos can be a repo ITSELF as well — an umbrella that tracks the glue
+// around its children (a README, scripts, docs) and gitignores the children. That is
+// the single-repo rule and the folder-of-repos rule both holding at once, and
+// reposOf() says so: the folder is the first repo, its children follow. Its git dir
+// may be PARKED (`.git.disabled`, git.js) and it is a repo all the same.
+//
 // One of those single repos is THIS APP. A workspace whose package.json is
 // Switchboard's own is marked `self`, and is never startable — its devCommand is
 // null and its processes [] whatever the folder or the config says — because the
@@ -90,6 +96,11 @@ function repoDirsIn(workspaceDir) {
     .filter(isRepo);
 }
 
+/** Is the workspace folder a repo in its own right — attached, or parked (git.js)? */
+function isRepoRoot(workspaceDir) {
+  return isRepo(workspaceDir) || !!git.parkedGitDir(workspaceDir);
+}
+
 /** 'sample-2' → 'sample'; 'demo' → 'demo'. */
 function projectOf(id) {
   return id.replace(/-\d+$/, '');
@@ -108,6 +119,38 @@ function displayName(dirName, wsId) {
     return dirName.slice(0, -suffix.length);
   }
   return dirName;
+}
+
+/**
+ * reposOf(ws) → [{ name, dirName, dir, root, nested }] — the repos of a workspace, in the
+ * order every screen lists them. No git: this is the rule scan() and the Editor's path
+ * guard share, so the two can never disagree about which repo a name means.
+ *
+ * The folder itself comes first when it is a repo (`root: true`), then its child repos.
+ * A single-repo workspace is the first half alone, a plain folder of repos the second.
+ *
+ * The folder is named as a child would be — `sample-2` is `sample`, beside `sample-api` —
+ * unless a child already answers to that, when it keeps its full folder name, and `.` if
+ * even that is taken: a name is how every call after this one finds the repo, so two repos
+ * may never share one. (`.` is free: no child starts with a dot.)
+ *
+ * `nested` is the child repos' folder names, which git is told to leave out of the
+ * folder's own listings (git.js keepOut()): an umbrella that does not gitignore its
+ * children would otherwise count each one as an untracked file of its own.
+ */
+function reposOf(ws) {
+  if (!ws || !ws.dir) return [];
+  const children = repoDirsIn(ws.dir).map((dir) => {
+    const dirName = path.basename(dir);
+    return { name: displayName(dirName, ws.id), dirName, dir, root: false, nested: [] };
+  });
+  if (!isRepoRoot(ws.dir)) return children;
+
+  const dirName = path.basename(ws.dir);
+  const taken = new Set(children.map((c) => c.name));
+  const name = [displayName(dirName, ws.id), dirName].find((n) => !taken.has(n)) || '.';
+  const root = { name, dirName, dir: ws.dir, root: true, nested: children.map((c) => c.dirName) };
+  return [root].concat(children);
 }
 
 /**
@@ -207,7 +250,8 @@ function declaredDir(cfg, id, decl) {
  * directories that each contain a `.git` entry, minus the exclude list.
  *
  * A root may itself be a Git repo or contain disabled Git metadata; neither
- * changes the two-child rule. Loose single repos are declared explicitly.
+ * changes the two-child rule — it only adds the folder to the workspace's repos
+ * (reposOf()). Loose single repos are declared explicitly.
  *
  * Those single repos get on the rail one at a time, by being DECLARED: a
  * `workspaces.<id>.dir` in the config (relative to the root, or absolute) is a
@@ -267,12 +311,13 @@ async function discover() {
   return out;
 }
 
-function emptyRepo(dir, wsId, error) {
-  const dirName = path.basename(dir);
+function emptyRepo(entry, error) {
   return {
-    name: displayName(dirName, wsId),
-    dirName,
-    dir,
+    name: entry.name,
+    dirName: entry.dirName,
+    dir: entry.dir,
+    root: entry.root,
+    nested: entry.nested,
     branch: null,
     head: null,
     detached: false,
@@ -291,12 +336,12 @@ function emptyRepo(dir, wsId, error) {
   };
 }
 
-async function scanRepo(dir, wsId, fetched) {
-  const dirName = path.basename(dir);
+async function scanRepo(entry, fetched) {
+  const dir = entry.dir;
   // One `git remote get-url origin` answers both questions: which GitHub repo this is (for
   // the PR lookup) and whether there is any origin at all (for the freshness numbers). A
   // local-path or file:// origin parses to no owner/repo but is perfectly fetchable.
-  const [ch, origin] = await Promise.all([git.changes(dir), git.originUrl(dir)]);
+  const [ch, origin] = await Promise.all([git.changes(dir, { exclude: entry.nested }), git.originUrl(dir)]);
   const remote = git.parseRemoteUrl(origin);
   const hasOrigin = origin !== null;
 
@@ -311,7 +356,7 @@ async function scanRepo(dir, wsId, fetched) {
   const fetchError = hasOrigin && fetched && !fetched.ok ? fetched.error : null;
 
   if (!ch.ok) {
-    const repo = emptyRepo(dir, wsId, ch.error);
+    const repo = emptyRepo(entry, ch.error);
     repo.remote = remote ? { owner: remote.owner, repo: remote.repo } : null;
     repo.hasOrigin = hasOrigin;
     repo.fetchedAt = fetchedAt;
@@ -331,9 +376,13 @@ async function scanRepo(dir, wsId, fetched) {
   }
 
   return {
-    name: displayName(dirName, wsId),
-    dirName,
+    name: entry.name,
+    dirName: entry.dirName,
     dir,
+    // The workspace folder itself, when it is a repo as well as a folder of them, and the
+    // child repos its own listings leave out (reposOf()).
+    root: entry.root,
+    nested: entry.nested,
     branch: b.branch,
     // The full HEAD sha (null on an unborn HEAD). A DETACHED repo has no branch name, so
     // this is the only identity its pill can show — without it the pill falls back to the
@@ -424,18 +473,18 @@ async function scan(id, opts) {
     };
   }
 
-  // A folder of repos scans its children. A single-repo workspace has none — the
-  // folder IS the repo — so it scans itself, as its one repo, named after the folder.
-  let dirs = repoDirsIn(ws.dir);
-  if (!dirs.length && isRepo(ws.dir)) dirs = [ws.dir];
+  // A folder of repos scans its children, and itself first when it is a repo too. A
+  // single-repo workspace has no children — the folder IS the repo — so it scans itself,
+  // as its one repo, named after the folder.
+  const entries = reposOf(ws);
 
   const fetched = new Map();
   if (doFetch) {
-    const results = await Promise.all(dirs.map((d) => git.fetch(d)));
-    dirs.forEach((d, i) => fetched.set(d, results[i]));
+    const results = await Promise.all(entries.map((e) => git.fetch(e.dir)));
+    entries.forEach((e, i) => fetched.set(e.dir, results[i]));
   }
 
-  const repos = await Promise.all(dirs.map((d) => scanRepo(d, ws.id, fetched.get(d) || null)));
+  const repos = await Promise.all(entries.map((e) => scanRepo(e, fetched.get(e.dir) || null)));
 
   let files = 0;
   let add = 0;
@@ -539,6 +588,7 @@ module.exports = {
   lookup,
   dirOf,
   // exported so index.js can resolve a repoName to a directory without re-deriving the rules
+  reposOf,
   repoDirsIn,
   displayName,
   projectOf,
