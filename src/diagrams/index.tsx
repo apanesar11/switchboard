@@ -8,7 +8,7 @@
 //   SBDiagrams.mount(element, props)   once — the root lives for the window's life
 //   SBDiagrams.update(props)           the workspace on screen, whether it is shown
 //   SBDiagrams.flush()                 write what the editor holds, now (quit, blur)
-//   SBDiagrams.editAction(action)      Edit ▸ Undo / Redo / Paste for the canvas
+//   SBDiagrams.editAction(action, image, text)  Edit ▸ Undo / Redo / Copy / Cut / Paste for the canvas
 //   SBDiagrams.fullscreen()            is the diagram full screen — Esc's first say
 //   SBDiagrams.leaveFullscreen()
 //   SBDiagrams.refreshAnswers(fresh)   ask main again who can answer
@@ -99,13 +99,17 @@ const api = {
   },
 
   /**
-   * Edit ▸ Undo / Redo / Paste, when the canvas has the keyboard. False leaves the
+   * Edit ▸ Undo / Redo / Copy / Cut / Paste, when the canvas has the keyboard. False leaves the
    * action to the rest of the app — a box's own text field takes Undo and Paste the
    * way any field does (app.js's document fallback).
    */
-  editAction(action: string, image: boolean): boolean | Promise<boolean> {
+  editAction(action: string, image: boolean, text = ""): boolean | Promise<boolean> {
     if (!editor || !props?.active) return false
     if (isTextField(document.activeElement)) return false
+    // Copy, Cut and Paste of boxes: what is selected, put down again at the pointer.
+    if (action === "copy") return editor.copy()
+    if (action === "cut") return editor.cut()
+    if (action === "paste" && !image) return editor.pasteBoxes(text)
     if (action === "undo") {
       editor.undo()
       return true

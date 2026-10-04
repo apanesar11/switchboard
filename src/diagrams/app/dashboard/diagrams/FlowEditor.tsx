@@ -22,11 +22,14 @@
 // while you are editing it, label and line style for an arrow. Backspace
 // deletes, ⌘Z / ⇧⌘Z undo and redo, ⌘D duplicates.
 //
-// A box's toolbar also leads with ✦ Answer (⌘↵): the box's text goes to an
+// A box's toolbar also leads with ✦ Answer (⌘↵, or Switchboard's ⌘I): the box's text goes to an
 // OpenAI model (lib/diagrams/ai.ts, app/api/diagrams/answer) and the answer
 // comes back as one box — or up to four when it has parts — hanging off the
 // box's right side, placed the way Tab would place them, as one undo step.
 // The chevron beside it picks the model and the reasoning effort.
+// Switchboard: any number of boxes can be waiting on an answer at once, one
+// answer per box; a drag-select takes every box it touches, not only the ones
+// wholly inside it; and deleting a box from a branch closes the gap it leaves.
 //
 // It edits the SAME spec every other part of the Diagrams feature reads.
 // layoutDiagram() turns the spec into the canvas, and flowSpecFromCanvas()
@@ -70,6 +73,7 @@ import {
   ReactFlow,
   ReactFlowProvider,
   ResizeControlVariant,
+  SelectionMode,
   SmoothStepEdge,
   addEdge,
   applyEdgeChanges,
@@ -143,6 +147,7 @@ import {
   OPPOSITE_DIRECTION,
   placeTabChild,
   placeTabChildren,
+  tidyAfterDelete,
   UNTITLED_FLOW_LABEL,
   type FlowCanvasEdge,
   type FlowCanvasNode,
@@ -191,6 +196,7 @@ import {
   useAnswerStatus,
 } from "@/lib/diagrams/ai-client"
 import type { AnswerSettings, AnswerStatus, AnswerStep, ProviderId, ProviderStatus } from "@/lib/bridge"
+import { writeClipboard } from "@/lib/bridge"
 import type { ProductId } from "@/lib/products"
 import { FIT_VIEW_OPTIONS } from "./DiagramCanvas"
 import {
@@ -242,10 +248,14 @@ const REVEAL_MARGIN = { left: 84, right: 32, top: 72, bottom: 64 }
  */
 type Tool = "select" | "hand" | "shape" | "note" | "text"
 
-/** The ✦ Answer being waited for. */
+/** A ✦ Answer being waited for. */
 type Asking = {
   /** The box that asked. */
   id: string
+  /** Switchboard: what it asked, for the card when several are on their way. */
+  question: string
+  /** Switchboard: when it was asked, for its "· 12s" wherever that is shown. */
+  startedAt: number
   /** Switchboard: who is answering, and its name for the strip. */
   provider: ProviderId
   name: string
@@ -541,6 +551,40 @@ function deselected<T extends { selected?: boolean }>(items: T[]): T[] {
   return items.map((item) => (item.selected ? { ...item, selected: false } : item))
 }
 
+// Switchboard: what ⌘C copied — the boxes selected and the arrows between them, for
+// ⌘V to put down again. Kept here, for every diagram the bundle shows, so a copy
+// pastes into another diagram too; the system clipboard gets only their words (for
+// pasting anywhere else), and `text` is those words: ⌘V puts the boxes down only while
+// the clipboard still holds them, so text copied since, from anywhere, never pastes
+// boxes from an older copy.
+type FlowCopy = {
+  text: string
+  nodes: { id: string; position: { x: number; y: number }; width?: number; height?: number; data: FlowBoxNodeData }[]
+  edges: {
+    source: string
+    target: string
+    sourceHandle: string | null
+    targetHandle: string | null
+    data: FlowEdgeData
+  }[]
+}
+let flowCopy: FlowCopy | null = null
+
+/** A box's words as the clipboard gets them: its label, and its second line under it. */
+function clipboardWords(box: FlowBoxNodeData): string {
+  const label =
+    normalizeFlowText(box.label) ||
+    (box.shape === "image" ? "Image" : box.shape === "note" ? "Note" : UNTITLED_FLOW_LABEL)
+  const detail = box.detail ? normalizeFlowText(box.detail) : ""
+  return detail ? `${label}\n${detail}` : label
+}
+
+/** Clipboard text compared the way it comes back: line endings and the ends aside. */
+function sameClipboard(a: string, b: string): boolean {
+  const plain = (text: string) => text.replace(/\r\n?/g, "\n").trim()
+  return plain(a) === plain(b)
+}
+
 function newEdgeId(): string {
   return `edge-${Math.random().toString(36).slice(2, 10)}`
 }
@@ -592,8 +636,8 @@ type EditorContextValue = {
   soleNodeId: string | null
   /** False while the hand tool is out: nothing reacts to hovering then. */
   interactive: boolean
-  /** The box whose ✦ Answer is being waited for. */
-  answeringId: string | null
+  /** Switchboard: the boxes whose ✦ Answers are being waited for. */
+  answeringIds: ReadonlySet<string>
 }
 
 // How the boxes and arrows reach the editor's state. A context rather than
@@ -831,7 +875,7 @@ function EditableFlowNode({ id, data, selected }: NodeProps) {
             : "border-brand/40 opacity-0 group-hover:opacity-100",
         )}
       />
-      {editor !== null && editor.answeringId === id ? (
+      {editor !== null && editor.answeringIds.has(id) ? (
         <div
           aria-hidden="true"
           className="pointer-events-none absolute -inset-2 animate-pulse rounded-xl border-2 border-violet-400 dark:border-violet-500"
@@ -911,6 +955,14 @@ export type FlowEditorHandle = {
   undo: () => void
   redo: () => void
   paste: (files: File[]) => void
+  /**
+   * Switchboard: Edit ▸ Copy, Cut and Paste over the canvas, for boxes — false when
+   * there is nothing of the canvas's for them to do (no box selected; text on the
+   * clipboard that isn't a copy of boxes), which leaves them to the rest of the app.
+   */
+  copy: () => boolean
+  cut: () => boolean
+  pasteBoxes: (text: string) => boolean
 }
 
 type Props = {
@@ -983,29 +1035,31 @@ function FlowEditorCanvas({
   // Which box the shape tool places — the last one picked from its menu.
   const [shapeChoice, setShapeChoice] = useState<FlowBoxShape>("rounded")
 
-  // ✦ Answer. One at a time: `asking` is the answer being waited for (the
-  // box that asked, and what it asked with), `askRef` the way to cancel it.
+  // ✦ Answer. Switchboard: any number at once, one per box — `askings` are
+  // the answers being waited for, oldest first (the box that asked, and what
+  // it asked with), `askRef` the box and the way to cancel each, by serial.
   const answerStatus = useAnswerStatus()
-  const [asking, setAsking] = useState<Asking | null>(null)
-  const askRef = useRef<AbortController | null>(null)
+  const [askings, setAskings] = useState<Asking[]>([])
+  const askRef = useRef(new Map<number, { id: string; controller: AbortController }>())
+  const answeringIds = useMemo(() => new Set(askings.map((entry) => entry.id)), [askings])
   // Counts the answers asked for, to tell one wait from the next.
   const askCountRef = useRef(0)
   // How many boxes the last answer added, while "· Undo" is offered for it.
   const [answered, setAnswered] = useState<number | null>(null)
-  // Switchboard: what a CLI has done so far for the answer being waited for, how the
-  // last answer went, and why the last one didn't come.
-  const [steps, setSteps] = useState<AnswerStep[]>([])
+  // Switchboard: what each CLI has done so far for the answer being waited for (by
+  // serial), how the last answer went, and why the last one didn't come.
+  const [steps, setSteps] = useState<Record<number, AnswerStep[]>>({})
   const [answerNote, setAnswerNote] = useState<AnswerNote | null>(null)
   const [failure, setFailure] = useState<AnswerFailure | null>(null)
-  // Leaving the diagram cancels an answer still on its way — upstream too.
-  useEffect(
-    () => () => {
-      const controller = askRef.current
-      askRef.current = null
-      controller?.abort()
-    },
-    [],
-  )
+  // Leaving the diagram cancels every answer still on its way — upstream too.
+  useEffect(() => {
+    const running = askRef.current
+    return () => {
+      const controllers = [...running.values()].map((run) => run.controller)
+      running.clear()
+      for (const controller of controllers) controller.abort()
+    }
+  }, [])
   useEffect(() => {
     if (answered === null) return
     const timer = setTimeout(() => setAnswered(null), ANSWERED_NOTICE_MS)
@@ -1087,6 +1141,9 @@ function FlowEditorCanvas({
       undo: () => shortcutsRef.current.undo(),
       redo: () => shortcutsRef.current.redo(),
       paste: (files: File[]) => shortcutsRef.current.paste(files),
+      copy: () => shortcutsRef.current.copy(),
+      cut: () => shortcutsRef.current.cut(),
+      pasteBoxes: (text: string) => shortcutsRef.current.pasteBoxes(text),
     }),
     [flush],
   )
@@ -1871,6 +1928,105 @@ function FlowEditorCanvas({
     reveal({ ...rect, ...position })
   }
 
+  // ─── Switchboard: ⌘C, ⌘X and ⌘V ───
+
+  // Where the pointer last was over the canvas, in the window: where ⌘V puts
+  // what was copied.
+  const pointerRef = useRef<{ x: number; y: number } | null>(null)
+
+  // ⌘C: the boxes selected, and the arrows between them, kept for ⌘V — and
+  // their words, top to bottom, on the clipboard for pasting anywhere else.
+  function copyBoxes(): boolean {
+    const chosen = nodesRef.current.filter((node) => node.selected)
+    if (chosen.length === 0) return false
+    const ids = new Set(chosen.map((node) => node.id))
+    const text = [...chosen]
+      .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
+      .map((node) => clipboardWords(node.data as FlowBoxNodeData))
+      .join("\n")
+    flowCopy = {
+      text,
+      nodes: chosen.map((node) => ({
+        id: node.id,
+        position: { ...node.position },
+        width: node.width,
+        height: node.height,
+        data: { ...(node.data as FlowBoxNodeData) },
+      })),
+      edges: edgesRef.current
+        .filter((edge) => ids.has(edge.source) && ids.has(edge.target))
+        .map((edge) => ({
+          source: edge.source,
+          target: edge.target,
+          sourceHandle: edge.sourceHandle ?? null,
+          targetHandle: edge.targetHandle ?? null,
+          data: { ...((edge.data as FlowEdgeData | undefined) ?? { dashed: false }) },
+        })),
+    }
+    writeClipboard(text)
+    return true
+  }
+
+  // ⌘V: what ⌘C copied, as new boxes centred on the pointer — or the middle of
+  // the view, before the pointer has been over the canvas — arranged as they
+  // were, with the arrows between them, and selected. One undo step.
+  function pasteBoxes(text: string): boolean {
+    const copy = flowCopy
+    if (!copy || !sameClipboard(text, copy.text)) return false
+    if (!roomFor(copy.nodes.length, copy.edges.length)) return true
+    record()
+    lastRecordAt.current = 0
+    const left = Math.min(...copy.nodes.map((node) => node.position.x))
+    const top = Math.min(...copy.nodes.map((node) => node.position.y))
+    const right = Math.max(...copy.nodes.map((node) => node.position.x + (node.width ?? FLOW_NODE_WIDTH)))
+    const bottom = Math.max(...copy.nodes.map((node) => node.position.y + (node.height ?? 0)))
+    const bounds = wrapperRef.current?.getBoundingClientRect()
+    const pointer = pointerRef.current
+    const spot = screenToFlowPosition(
+      pointer ?? (bounds ? { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } : { x: 0, y: 0 }),
+    )
+    // On the grid, as everything placed or dragged is.
+    const snap = (value: number) => Math.round(value / SNAP_GRID[0]) * SNAP_GRID[0]
+    const dx = snap(spot.x - (left + right) / 2)
+    const dy = snap(spot.y - (top + bottom) / 2)
+    const current = nodesRef.current
+    const taken = current.map((node) => node.id)
+    const renamed = new Map<string, string>()
+    const added: Node[] = copy.nodes.map((node) => {
+      const id = nextFlowNodeId(taken, node.data.label)
+      taken.push(id)
+      renamed.set(node.id, id)
+      return {
+        id,
+        type: EDIT_NODE_TYPE,
+        position: { x: node.position.x + dx, y: node.position.y + dy },
+        width: node.width,
+        height: node.height,
+        data: { ...node.data },
+        selected: true,
+      }
+    })
+    const arrows = copy.edges.map((edge) =>
+      editableEdge(
+        {
+          id: newEdgeId(),
+          source: renamed.get(edge.source)!,
+          target: renamed.get(edge.target)!,
+          sourceHandle: edge.sourceHandle,
+          targetHandle: edge.targetHandle,
+        },
+        { ...edge.data },
+      ),
+    )
+    changeEditing(null)
+    nodesRef.current = [...deselected(current), ...added]
+    setNodes((now) => [...deselected(now), ...added])
+    setEdges((now) => [...deselected(now), ...arrows])
+    settleSelection()
+    reveal({ x: left + dx, y: top + dy, width: right - left, height: bottom - top })
+    return true
+  }
+
   // The second line, from the text toolbar. Added, it takes focus as it
   // mounts; removed, focus moves up to the label BEFORE it goes, so editing
   // never loses its place.
@@ -1892,7 +2048,8 @@ function FlowEditorCanvas({
   // switched off — to the model picked in the toolbar, then hangs the answer
   // off the box's right side. The canvas stays usable while it thinks.
   async function ask(node: Node) {
-    if (askRef.current) return
+    // Switchboard: one answer per box, but any number of boxes at once.
+    if (isAnswering(node.id)) return
     const box = node.data as FlowBoxNodeData
     const question = box.label.trim()
     if (!hasText(box) || !question) {
@@ -1925,19 +2082,27 @@ function FlowEditorCanvas({
       .filter((label) => label.length > 0)
       .slice(0, FLOW_AI_MAX_EXISTING)
     const controller = new AbortController()
-    askRef.current = controller
     askCountRef.current += 1
+    const serial = askCountRef.current
+    askRef.current.set(serial, { id: node.id, controller })
+    // Still this answer's to act on — not stopped, nor the editor gone.
+    const live = () => askRef.current.get(serial)?.controller === controller
+    const startedAt = Date.now()
     setAnswered(null)
     setFailure(null)
-    setSteps([])
-    setAsking({
-      id: node.id,
-      provider: provider.id,
-      name: provider.name,
-      cli: provider.kind === "cli",
-      serial: askCountRef.current,
-    })
-    const startedAt = Date.now()
+    setSteps((all) => ({ ...all, [serial]: [] }))
+    setAskings((list) => [
+      ...list,
+      {
+        id: node.id,
+        question,
+        startedAt,
+        provider: provider.id,
+        name: provider.name,
+        cli: provider.kind === "cli",
+        serial,
+      },
+    ])
     try {
       const { parts, files } = await requestFlowAnswer(
         {
@@ -1962,11 +2127,13 @@ function FlowEditorCanvas({
         // What a CLI is doing, a line at a time, for the card over the strip. The last
         // few are all it shows.
         (step) => {
-          if (askRef.current === controller) setSteps((list) => [...list.slice(-49), step])
+          if (live()) {
+            setSteps((all) => ({ ...all, [serial]: [...(all[serial] ?? []).slice(-49), step] }))
+          }
         },
       )
       // Stopped, or the editor went away, while it was on its way.
-      if (askRef.current !== controller) return
+      if (!live()) return
       setAnswerNote({
         by: provider.name,
         files: provider.kind === "cli" ? files : null,
@@ -1974,28 +2141,47 @@ function FlowEditorCanvas({
       })
       addAnswers(node.id, parts)
     } catch (err) {
-      if (askRef.current !== controller) return
+      if (!live()) return
       setFailure({
         message: err instanceof Error ? err.message : "Couldn't answer that",
         code: err instanceof AnswerError ? err.code : undefined,
       })
     } finally {
-      if (askRef.current === controller) {
-        askRef.current = null
-        setAsking(null)
+      if (live()) {
+        askRef.current.delete(serial)
+        doneAsking(serial)
       }
     }
   }
 
-  // Stop, or Escape: drops the answer being waited for, and cancels the
-  // request so it stops costing anything.
-  function stopAsking(): boolean {
-    const controller = askRef.current
-    if (!controller) return false
-    askRef.current = null
-    controller.abort()
-    setAsking(null)
-    return true
+  /** Switchboard: whether `id`'s answer is on its way. */
+  function isAnswering(id: string): boolean {
+    for (const run of askRef.current.values()) if (run.id === id) return true
+    return false
+  }
+
+  // An answer off the list, with what its CLI did.
+  function doneAsking(serial: number) {
+    setAskings((list) => list.filter((entry) => entry.serial !== serial))
+    setSteps((all) => {
+      const { [serial]: _gone, ...rest } = all
+      return rest
+    })
+  }
+
+  // Stop, or Escape: drops the answer `id` is waiting for, and cancels the
+  // request so it stops costing anything. Switchboard: with no box named,
+  // every answer on its way.
+  function stopAsking(id?: string): boolean {
+    let stopped = false
+    for (const [serial, run] of [...askRef.current]) {
+      if (id !== undefined && run.id !== id) continue
+      askRef.current.delete(serial)
+      run.controller.abort()
+      doneAsking(serial)
+      stopped = true
+    }
+    return stopped
   }
 
   // An answer onto the canvas: a box per part, each joined to the question's
@@ -2047,10 +2233,15 @@ function FlowEditorCanvas({
       parentId,
       fresh.map(({ id, width, height }) => ({ id, width, height })),
     )
+    // Switchboard: nor while something other than the question is selected —
+    // with several answers on their way, the box you moved on to (and asked
+    // about next, perhaps) keeps the selection and the view.
     const quiet =
       editingRef.current !== null ||
       isTextField(document.activeElement) ||
-      toolRef.current === "hand"
+      toolRef.current === "hand" ||
+      current.some((node) => node.selected && node.id !== parentId) ||
+      edgesRef.current.some((edge) => edge.selected)
     const added: Node[] = fresh.map(({ id, box, width, height }) => ({
       id,
       type: EDIT_NODE_TYPE,
@@ -2092,14 +2283,13 @@ function FlowEditorCanvas({
     })
   }
 
-  // Where the answer will land, while it is awaited: right of the question,
+  // Where each answer will land, while it is awaited: right of the question,
   // under any answers it already has — worked out from the canvas as it is
   // now, so it follows the question if moved. (Where the branch is re-centred
   // to once the answer is in isn't shown: it would sit on the answers there.)
-  const ghost = useMemo(() => {
-    if (asking === null) return null
+  const ghosts = useMemo(() => askings.flatMap((asking) => {
     const parent = nodes.find((node) => node.id === asking.id)
-    if (!parent) return null
+    if (!parent) return []
     // The boxes hanging off it the way Tab hangs them: right side to left
     // side, onto a box further right.
     const children = edges
@@ -2125,8 +2315,8 @@ function FlowEditorCanvas({
       targetY: position.y + ANSWER_GHOST_SIZE.height / 2,
       targetPosition: Position.Left,
     })
-    return { rect: { ...position, ...ANSWER_GHOST_SIZE }, path }
-  }, [asking, nodes, edges])
+    return [{ serial: asking.serial, rect: { ...position, ...ANSWER_GHOST_SIZE }, path }]
+  }), [askings, nodes, edges])
 
   // What the canvas accepts dropped on it: a box, note or text dragged off
   // the toolbar, or picture files from the desktop.
@@ -2184,9 +2374,42 @@ function FlowEditorCanvas({
   }, [nodes, edges])
   const editingNode =
     editingId === null ? null : (nodes.find((node) => node.id === editingId) ?? null)
+  // Switchboard: the CLI answer whose steps the card over the strip follows —
+  // the selected box's, or else the one asked for last.
+  const followed = useMemo(() => {
+    const clis = askings.filter((entry) => entry.cli)
+    return clis.find((entry) => entry.id === soleNodeId) ?? clis[clis.length - 1] ?? null
+  }, [askings, soleNodeId])
 
   function deleteSelection() {
     void deleteElements({ nodes: selectedNodes, edges: selectedEdges })
+  }
+
+  // Switchboard: a box deleted from a branch Tab built takes its gap with it —
+  // what is left of the tree closes up and re-centres on the boxes it hangs
+  // off, as Tab would have laid it out (tidyAfterDelete). Called just before
+  // React Flow removes them, so it is the same undo step as the delete.
+  function closeUp(going: Node[], goingEdges: Edge[]) {
+    if (going.length === 0) return
+    const cut = new Set(goingEdges.map((edge) => edge.id))
+    const moved = tidyAfterDelete(
+      nodesRef.current.map((node) => ({ id: node.id, ...rectOf(node) })),
+      edgesRef.current,
+      new Set(going.map((node) => node.id)),
+      edgesRef.current.filter((edge) => !cut.has(edge.id)),
+    )
+    if (moved.size === 0) return
+    // A free text Tab added and still empty puts the boxes it moved back when
+    // it goes; not the ones that have just closed up since.
+    for (const pending of tabMovesRef.current.values()) {
+      for (const id of moved.keys()) pending.delete(id)
+    }
+    setNodes((now) =>
+      now.map((node) => {
+        const to = moved.get(node.id)
+        return to ? { ...node, position: to } : node
+      }),
+    )
   }
 
   // ─── keyboard ───
@@ -2238,6 +2461,9 @@ function FlowEditorCanvas({
     paste: (files: File[]) => void
     answer: () => boolean
     escapeAsking: () => boolean
+    copy: () => boolean
+    cut: () => boolean
+    pasteBoxes: (text: string) => boolean
   }>({
     undo,
     redo,
@@ -2252,6 +2478,9 @@ function FlowEditorCanvas({
     paste: () => {},
     answer: () => false,
     escapeAsking: () => false,
+    copy: () => false,
+    cut: () => false,
+    pasteBoxes: () => false,
   })
   useEffect(() => {
     shortcutsRef.current = {
@@ -2282,32 +2511,32 @@ function FlowEditorCanvas({
         return true
       },
       paste: (files) => void addImages(files),
-      // ⌘↵: ✦ Answer for the box selected — or the one being typed in, which
+      copy: copyBoxes,
+      cut: () => {
+        if (!copyBoxes()) return false
+        deleteSelection()
+        return true
+      },
+      pasteBoxes,
+      // ⌘↵ or ⌘I: ✦ Answer for the box selected — or the one being typed in, which
       // it finishes first.
       answer: () => {
         const current = editingNode ?? soleNode
         if (!current || !hasText(current.data as FlowBoxNodeData)) return false
-        // One answer at a time: the key is spent — finishing the edit, on the
-        // box already being answered; saying why, on any other.
-        if (askRef.current && asking?.id === current.id) {
-          changeEditing(null)
-          return true
-        }
-        if (askRef.current) {
-          toast({
-            title: "Already answering another box",
-            description: "Wait for it to land, or stop it, to ask about this one.",
-          })
-          return true
-        }
+        // Switchboard: one answer per box, any number of boxes at once — on
+        // the box already being answered, the key just finishes the edit.
         changeEditing(null)
+        if (isAnswering(current.id)) return true
         void ask(current)
         return true
       },
       escapeAsking: () => {
-        if (!askRef.current) return false
+        if (askRef.current.size === 0) return false
+        // Switchboard: the selected box's answer — or, with nothing selected,
+        // the one answer on its way. With several, Escape needs to know which.
+        if (soleNode) return isAnswering(soleNode.id) && stopAsking(soleNode.id)
         const anything = nodes.some((node) => node.selected) || edges.some((edge) => edge.selected)
-        if (anything && soleNode?.id !== asking?.id) return false
+        if (anything || askRef.current.size > 1) return false
         return stopAsking()
       },
     }
@@ -2365,8 +2594,9 @@ function FlowEditorCanvas({
         void shortcuts.flush()
         return
       }
-      if (key === "enter" && !event.shiftKey && !event.isComposing) {
-        // A box's own text fields hand ⌘↵ to the canvas; other fields keep it.
+      // Switchboard: ⌘I answers too, exactly as ⌘↵ does.
+      if ((key === "enter" || key === "i") && !event.shiftKey && !event.isComposing) {
+        // A box's own text fields hand ⌘↵ and ⌘I to the canvas; other fields keep them.
         const boxText =
           event.target instanceof HTMLElement && event.target.dataset.flowText !== undefined
         if ((inField && !boxText) || !onCanvas(event.target)) return
@@ -2464,7 +2694,7 @@ function FlowEditorCanvas({
       resize,
       soleNodeId,
       interactive: tool !== "hand",
-      answeringId: asking?.id ?? null,
+      answeringIds,
     }),
     [
       editingId,
@@ -2480,7 +2710,7 @@ function FlowEditorCanvas({
       resize,
       soleNodeId,
       tool,
-      asking,
+      answeringIds,
     ],
   )
 
@@ -2499,6 +2729,9 @@ function FlowEditorCanvas({
           placing && "[&_.react-flow__pane]:!cursor-crosshair",
         )}
         onDoubleClick={onCanvasDoubleClick}
+        onPointerMove={(event) => {
+          pointerRef.current = { x: event.clientX, y: event.clientY }
+        }}
       >
         {nodes.length === 0 && uploading === 0 ? (
           // Under the canvas (which is transparent) rather than over it, so the
@@ -2522,8 +2755,9 @@ function FlowEditorCanvas({
           onConnect={onConnect}
           onReconnect={onReconnect}
           onNodeDragStart={() => record()}
-          onBeforeDelete={async () => {
+          onBeforeDelete={async ({ nodes: going, edges: goingEdges }) => {
             record()
+            closeUp(going, goingEdges)
             return true
           }}
           onNodeDoubleClick={(_, node) => {
@@ -2559,6 +2793,9 @@ function FlowEditorCanvas({
           // Select drags out a selection box; the hand drags the view, and
           // leaves the boxes alone.
           selectionOnDrag={tool === "select"}
+          // Switchboard: every box the selection box touches, not only the
+          // ones wholly inside it.
+          selectionMode={SelectionMode.Partial}
           panOnDrag={tool === "hand" ? true : PAN_BUTTONS}
           nodesDraggable={tool !== "hand"}
           nodesConnectable={tool !== "hand"}
@@ -2625,19 +2862,14 @@ function FlowEditorCanvas({
                 ai={
                   soleNode && hasText(soleNode.data as FlowBoxNodeData)
                     ? {
-                        state:
-                          asking === null
-                            ? "idle"
-                            : asking.id === soleNode.id
-                              ? "answering"
-                              : "elsewhere",
+                        state: answeringIds.has(soleNode.id) ? "answering" : "idle",
                         hasQuestion: (soleNode.data as FlowBoxNodeData).label.trim().length > 0,
                         status: answerStatus,
                         workspaceName,
                         onSettings: (patch) => void updateAnswerSettings(patch),
                         onOpenSettings,
                         onAnswer: () => void ask(soleNode),
-                        onStop: stopAsking,
+                        onStop: () => stopAsking(soleNode.id),
                       }
                     : undefined
                 }
@@ -2645,8 +2877,8 @@ function FlowEditorCanvas({
             )}
           </FloatingBar>
 
-          {ghost ? (
-            <ViewportPortal>
+          {ghosts.map((ghost) => (
+            <ViewportPortal key={ghost.serial}>
               <svg
                 aria-hidden="true"
                 className="pointer-events-none absolute left-0 top-0 overflow-visible"
@@ -2674,13 +2906,19 @@ function FlowEditorCanvas({
                 <span className="h-2 w-3/5 animate-pulse rounded bg-violet-100 dark:bg-violet-900/50" />
               </div>
             </ViewportPortal>
-          ) : null}
+          ))}
 
           <Panel position="bottom-center">
             {/* Switchboard: while a CLI reads the workspace, what it is doing — over the
                 strip, so a minute-long wait never looks stuck. */}
-            {asking !== null && asking.cli ? (
-              <AnswerActivity key={asking.serial} asking={asking} steps={steps} workspaceName={workspaceName} />
+            {followed !== null ? (
+              <AnswerActivity
+                key={followed.serial}
+                asking={followed}
+                steps={steps[followed.serial] ?? []}
+                others={askings.length - 1}
+                workspaceName={workspaceName}
+              />
             ) : null}
             <div className="mx-auto flex w-fit items-center gap-1 rounded-md border border-gray-200 bg-white/95 p-1 text-xs shadow-sm backdrop-blur-sm dark:border-gray-800 dark:bg-gray-950/95">
               <ToolButton label="Undo · ⌘Z" disabled={past.length === 0} onClick={undo}>
@@ -2693,8 +2931,10 @@ function FlowEditorCanvas({
               {/* Always on the page, so a screen reader hears it change — one
                   added already holding its words often isn't announced. */}
               <span className="sr-only" role="status">
-                {asking !== null
-                  ? `Answering with ${asking.name}`
+                {askings.length === 1
+                  ? `Answering with ${askings[0].name}`
+                  : askings.length > 1
+                    ? `Answering ${askings.length} boxes`
                   : failure !== null
                     ? failure.message
                     : answered !== null
@@ -2703,12 +2943,20 @@ function FlowEditorCanvas({
                         : `${answered} answers added`
                       : ""}
               </span>
-              {asking !== null ? (
+              {/* Switchboard: what is on its way and how the last one went, side by
+                  side — with several answers at once, one can land or fail while
+                  the others are still coming. */}
+              {askings.length > 0 ? (
                 <>
-                  <AskingStatus key={asking.serial} asking={asking} onStop={stopAsking} />
+                  <AskingStatus
+                    key={askings.length === 1 ? askings[0].serial : "several"}
+                    askings={askings}
+                    onStop={() => stopAsking()}
+                  />
                   <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-800" aria-hidden="true" />
                 </>
-              ) : failure !== null ? (
+              ) : null}
+              {failure !== null ? (
                 <>
                   <AnswerFailureLine
                     failure={failure}
@@ -3214,8 +3462,8 @@ function BoxBar({
 }
 
 type AiBar = {
-  /** Idle; waiting on this box's answer; or waiting on another box's. */
-  state: "idle" | "answering" | "elsewhere"
+  /** Idle, or waiting on this box's answer. Switchboard: other boxes' answers don't hold this one up. */
+  state: "idle" | "answering"
   /** Whether the box has any words to ask about. */
   hasQuestion: boolean
   /** Switchboard: who can answer on this Mac, and the settings — null until main has said. */
@@ -3254,17 +3502,14 @@ function AiControls({ ai }: { ai: AiBar }) {
     )
   }
   const provider = ai.status?.providers.find((option) => option.id === ai.status?.settings.provider)
-  const label =
-    ai.state === "elsewhere"
-      ? "Already answering another box"
-      : ai.hasQuestion
-        ? `Answer with ${provider?.name ?? "AI"} · ⌘↵`
-        : "Write a question in the box first"
+  const label = ai.hasQuestion
+    ? `Answer with ${provider?.name ?? "AI"} · ⌘I`
+    : "Write a question in the box first"
   return (
     <div className="flex items-center">
       <BarButton
         label={label}
-        disabled={ai.state !== "idle" || !ai.hasQuestion}
+        disabled={!ai.hasQuestion}
         onClick={ai.onAnswer}
         className={cx(
           "gap-1.5 rounded-r-none pl-1.5 pr-2 text-xs font-medium",
@@ -3588,24 +3833,32 @@ const EFFORT_LABELS: Record<string, string> = {
   max: "Max",
 }
 
-/** A ticking "· 12s", restarted by keying the component on the answer. */
-function useSeconds(): number {
-  const [seconds, setSeconds] = useState(0)
+/**
+ * A ticking "· 12s" since `since`. Switchboard: counted from when the answer was
+ * asked for rather than from when it was first shown, so the card can switch
+ * between answers on their way without restarting anyone's count.
+ */
+function useSeconds(since: number): number {
+  const elapsed = () => Math.max(0, Math.floor((Date.now() - since) / 1000))
+  const [seconds, setSeconds] = useState(elapsed)
   useEffect(() => {
-    const timer = setInterval(() => setSeconds((value) => value + 1), 1_000)
+    setSeconds(elapsed())
+    const timer = setInterval(() => setSeconds(elapsed()), 1_000)
     return () => clearInterval(timer)
-  }, [])
+  }, [since])
   return seconds
 }
 
 // "Answering with Claude Code · 12s" and a Stop, in the strip at the bottom of
-// the canvas. Keyed by the answer's serial, so the count restarts.
-function AskingStatus({ asking, onStop }: { asking: Asking; onStop: () => void }) {
-  const seconds = useSeconds()
+// the canvas. Switchboard: with several on their way, "Answering 3 boxes · 40s"
+// (the oldest's count) and a Stop that stops them all — each box's own toolbar
+// stops just its own.
+function AskingStatus({ askings, onStop }: { askings: Asking[]; onStop: () => void }) {
+  const seconds = useSeconds(askings[0].startedAt)
   return (
     <span className="flex items-center gap-1.5 px-1 text-violet-700 dark:text-violet-300">
       <RiLoader4Line className="size-3.5 animate-spin" aria-hidden="true" />
-      Answering with {asking.name}
+      {askings.length === 1 ? `Answering with ${askings[0].name}` : `Answering ${askings.length} boxes`}
       {/* Not announced: a screen reader would read the whole line out every second. */}
       <span aria-hidden="true" className="tabular-nums">
         · {seconds}s
@@ -3618,7 +3871,7 @@ function AskingStatus({ asking, onStop }: { asking: Asking; onStop: () => void }
           focusRing,
         )}
       >
-        Stop
+        {askings.length === 1 ? "Stop" : "Stop all"}
       </button>
     </span>
   )
@@ -3640,13 +3893,16 @@ const DONE_TEXT: Record<AnswerStep["kind"], string> = {
 function AnswerActivity({
   asking,
   steps,
+  others,
   workspaceName,
 }: {
   asking: Asking
   steps: AnswerStep[]
+  /** Switchboard: how many other answers are on their way too. */
+  others: number
   workspaceName?: string
 }) {
-  const seconds = useSeconds()
+  const seconds = useSeconds(asking.startedAt)
   const shown = steps.slice(-4)
   const reads = steps.filter((step) => step.kind === "read").length
   const done = steps.filter((step) => step.kind !== "think").length
@@ -3661,6 +3917,12 @@ function AnswerActivity({
           {seconds}s
         </span>
       </p>
+      {/* Switchboard: which box this is, once there is more than one to tell apart. */}
+      {others > 0 ? (
+        <p className="mb-1.5 truncate text-[11px] text-gray-500 dark:text-gray-400">
+          For “{asking.question}” · {others === 1 ? "1 more answer" : `${others} more answers`} on the way
+        </p>
+      ) : null}
       {shown.length === 0 ? (
         <p className="flex items-center gap-2 py-0.5 text-gray-500 dark:text-gray-400">
           <RiLoader4Line className="size-3.5 animate-spin text-violet-500" aria-hidden="true" />
@@ -4147,8 +4409,9 @@ const SHORTCUTS: [string, string][] = [
   ["Enter", "Edit the text"],
   ["↑ ↓ ← →", "Jump between boxes"],
   ["⇧ ↑ ↓ ← →", "Nudge the selection"],
-  ["⌘ ↵", "Answer with AI"],
+  ["⌘ I", "Answer with AI"],
   ["⌘ D", "Duplicate"],
+  ["⌘ C  ⌘ V", "Copy, paste at the pointer"],
   ["⌘ Z", "Undo"],
   ["⌫", "Delete"],
   ["Space", "Hold and drag to pan"],

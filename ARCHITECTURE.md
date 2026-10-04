@@ -804,6 +804,23 @@ the same names that call `window.sb` (`lib/diagrams/actions.ts`, `upload.ts`,
 `ai-client.ts`). It is the one React in the app, built by `scripts/build-diagrams.js`
 (§0).
 
+**Where the editor goes further than the admin's** (added 2026-10-04, the user's asks —
+"it automatically creates the new nodes so that it's perfectly shaped. We need to honor
+that"). A branch Tab builds is always laid out symmetrically: Tab, ✦ Answer's boxes and
+a delete all go through `lib/diagrams/flow-editor.ts`, which re-centres the whole tree
+on its top box and then pushes whatever it would now crowd (another tree, a note) up or
+down out of its way, whole, `FLOW_ROOM_GAP` clear — where the admin gives up on the
+layout when anything is in the way. A drag-select takes every box it touches
+(`SelectionMode.Partial`). Any number of boxes can wait on ✦ Answer at once, one answer
+per box: the strip says "Answering 3 boxes · Stop all", each box's toolbar stops its
+own, and an answer that lands while you have moved on to another box leaves your
+selection and the view alone. ⌘I answers as ⌘↵ does. Edit ▸ Copy, Cut and Paste work on
+boxes: ⌘C keeps the selected boxes and the arrows between them for the bundle (any
+diagram) and puts their words on the clipboard; ⌘V puts new copies down centred on the
+pointer, but only while the clipboard still holds those words, so text copied since
+never pastes an older copy. `npm run test:diagrams` covers the layout
+(`scripts/test-flow-layout.js`).
+
 **A diagram belongs to a workspace and lives on this Mac.** One JSON file per diagram —
 the admin's row, `{ id, name, kind, createdAt, updatedAt, archivedAt, spec }` minus the
 product — in `<config dir>/diagrams/<workspace>-<hash>/<id>.json`, beside the config like
@@ -2210,7 +2227,7 @@ every key off while it is not: React Flow listens on the whole document, and Bac
 on the Terminal would otherwise delete the boxes selected on a canvas nobody can see.
 
 **Keys.** app.js asks `onKey` after the Editor and Notes: Esc leaves a full-screen
-diagram before it means back, and ⌘↵ over the canvas is ✦ Answer (the editor's own
+diagram before it means back, and ⌘↵ (or ⌘I) over the canvas is ✦ Answer (the editor's own
 listener) and never Start. The editor's own Esc, in the capture phase, stops propagation
 when it uses one, so app.js never sees it.
 

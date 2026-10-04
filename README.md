@@ -142,21 +142,25 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   left and click the canvas to place it; with a box selected, Tab adds the next one joined
   to its right and starts you typing, ⇧Tab steps back, the arrow keys move between boxes
   and ⌘D duplicates. Drag from a box's dot to draw an arrow. Drop, paste or pick a picture
-  to put it on the canvas. A toolbar floats over whatever is selected: shape, colour and
-  outline for a box, size and style for its text, label and line for an arrow. It saves as
-  you go; ⌘Z and ⇧⌘Z undo and redo. The picker over the canvas switches between diagrams
-  (← and → step through them), **New diagram** makes one, and **Actions** archives or
-  deletes the one on screen. Each diagram is a file in `~/.switchboard/diagrams/`, one
-  folder per workspace — never in your repo.
+  to put it on the canvas. Tab keeps a branch symmetrical around the box it hangs off,
+  and so do ✦ Answer's boxes and a delete; anything in the branch's way moves aside. A
+  drag-select takes every box it touches, and ⌘C / ⌘V copy boxes and paste them at the
+  pointer. A toolbar floats over whatever is selected: shape, colour and outline for a
+  box, size and style for its text, label and line for an arrow. It saves as you go; ⌘Z
+  and ⇧⌘Z undo and redo. The picker over the canvas switches between diagrams (← and →
+  step through them), **New diagram** makes one, and **Actions** archives or deletes the
+  one on screen. Each diagram is a file in
+  `~/.switchboard/diagrams/`, one folder per workspace — never in your repo.
 
-  **✦ Answer** leads a box's toolbar (and ⌘↵): write a question in a box and the answer
-  comes back as one to four boxes hanging off it, as one undo step. The chevron beside it
-  picks who answers — **Claude Code** or **Codex**, which run in the workspace's folder and
-  read its code before they answer (slower; a card over the canvas shows each file they
-  open), or the **Claude API** or **OpenAI API**, which see only the diagram and answer in
-  seconds. The CLIs can only read: Claude Code gets nothing but its read and search tools,
-  and Codex runs in its read-only sandbox. Install and sign in to the CLI you use on each
-  Mac; Switchboard finds it, and picks the first one that can answer.
+  **✦ Answer** leads a box's toolbar (and ⌘I or ⌘↵): write a question in a box and the
+  answer comes back as one to four boxes hanging off it, as one undo step. Several boxes
+  can wait on their answers at once. The chevron beside it picks who answers — **Claude
+  Code** or **Codex**, which run in the workspace's folder and read its code before they
+  answer (slower; a card over the canvas shows each file they open), or the **Claude API**
+  or **OpenAI API**, which see only the diagram and answer in seconds. The CLIs can only
+  read: Claude Code gets nothing but its read and search tools, and Codex runs in its
+  read-only sandbox. Install and sign in to the CLI you use on each Mac; Switchboard finds
+  it, and picks the first one that can answer.
 - **Settings** — the row under Usage, or ⌘,: who answers ✦ Answer on this Mac, one row
   each — whether a CLI is installed and signed in, and the keys for the two APIs with the
   model each one uses. A key is checked with its provider before it is kept, encrypted with

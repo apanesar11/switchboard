@@ -204,7 +204,7 @@ SB.views = SB.views || {};
     // Only while the canvas has the keyboard: the slab, or nowhere in particular.
     if (active && active !== document.body && !view.slab.contains(active)) return false;
     try {
-      var out = b.editAction(action, !!image);
+      var out = b.editAction(action, !!image, typeof text === 'string' ? text : '');
       return !!out;
     } catch (err) {
       console.error('[switchboard] diagrams: edit:', err);

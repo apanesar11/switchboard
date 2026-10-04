@@ -74,6 +74,7 @@ type Bridge = {
   diagramsSaveImage(bytes: Uint8Array, type: string): Promise<{ ok: true; src: string } | { ok: false; error: string }>
   diagramsClipboardImage(): Promise<{ ok: true; bytes: Uint8Array; type: string } | { ok: false; error: string }>
   diagramsDirty(count: number): Promise<unknown>
+  writeClipboard(text: string): Promise<unknown>
   answerStatus(opts?: { fresh?: boolean }): Promise<AnswerStatus | { ok: false; error: string }>
   answerSetSettings(patch: Partial<AnswerSettings>): Promise<AnswerStatus | { ok: false; error: string }>
   answerStart(
@@ -121,6 +122,14 @@ export async function call<K extends keyof Bridge>(
   } catch (err) {
     return { ok: false, error: message(err) }
   }
+}
+
+/**
+ * Puts `text` on the system clipboard, through main — a page can't write it outside a
+ * gesture, and an Edit menu item arriving over IPC is not one.
+ */
+export function writeClipboard(text: string): void {
+  void call("writeClipboard", text)
 }
 
 /** A push event's subscription, or a no-op when the preload has none. */

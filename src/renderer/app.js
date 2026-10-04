@@ -1779,9 +1779,10 @@ window.SB = window.SB || {};
     var done = term && typeof term.editAction === 'function'
       ? term.editAction(e.action, e.text) : false;
     if (done) return;
-    // The Diagrams canvas: Undo and Redo are its own, and a pasted screenshot goes onto
-    // it as a picture — before the line below throws an image paste away. Only while
-    // the canvas has the keyboard; a box's text field gets the document's fallback.
+    // The Diagrams canvas: Undo and Redo are its own, Copy, Cut and Paste move its
+    // selected boxes, and a pasted screenshot goes onto it as a picture — before the
+    // line below throws an image paste away. Only while the canvas has the keyboard; a
+    // box's text field gets the document's fallback.
     var dg = SB.views.diagrams;
     if (dg && typeof dg.editAction === 'function') {
       try {

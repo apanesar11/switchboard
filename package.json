@@ -18,7 +18,7 @@
     "test:notes": "node --test scripts/test-notes.js scripts/test-noteedit.js",
     "build:diagrams": "node scripts/build-diagrams.js",
     "check:diagrams": "tsc -p src/diagrams/tsconfig.json",
-    "test:diagrams": "node --test scripts/test-diagrams.js"
+    "test:diagrams": "node --test scripts/test-diagrams.js scripts/test-flow-layout.js"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",

@@ -237,31 +237,30 @@ export type FlowTreeEdge = Pick<
   "source" | "target" | "sourceHandle" | "targetHandle"
 >
 
-/**
- * Where Tab puts a new box hanging off `parentId`'s right side, and where the
- * boxes around it move so the branching stays symmetrical: every box sits
- * level with the midpoint of the first and last boxes hanging off it, those
- * boxes stack FLOW_TAB_GAP_Y apart, and a box's whole branch moves with it.
- *
- * "Hanging off" means the arrows Tab draws — right side to left side, onto a
- * box further right — and only where that is the one such arrow into the box.
- * A box two branches merge into, or a loop back to an earlier box, stays put
- * and anchors whatever hangs off it. The tidying covers the one tree the
- * parent belongs to; its top box stays where it is and nothing moves sideways.
- *
- * If the tidied tree would land on a box outside it, nothing moves and the new
- * box goes where nextChildPosition puts it instead.
- */
-export function placeTabChild(
-  boxes: FlowTreeBox[],
-  edges: FlowTreeEdge[],
-  parentId: string,
-  child: { id: string; width: number; height: number },
-): { position: { x: number; y: number }; moved: Map<string, { x: number; y: number }> } {
-  const byId = new Map(boxes.map((box) => [box.id, box]))
-  const parent = byId.get(parentId)
-  if (!parent) throw new Error(`No box "${parentId}"`)
+type FlowPoint = { x: number; y: number }
 
+/**
+ * Switchboard: what a box pushed out of a tree's way keeps from it — twice the
+ * gap between the boxes Tab stacks, so it never reads as one of them.
+ */
+export const FLOW_ROOM_GAP = FLOW_TAB_GAP_Y * 2
+
+// The trees Tab builds. A box hangs off another when the one arrow into it of
+// the kind Tab draws — right side to left side, from a box further left — comes
+// from that box. A box two branches merge into, or a loop back to an earlier
+// box, hangs off nothing and is the top of a tree of its own.
+type FlowTrees = {
+  parentOf: Map<string, string>
+  childrenOf: Map<string, string[]>
+}
+
+function flowTrees(
+  byId: Map<string, FlowTreeBox>,
+  edges: FlowTreeEdge[],
+  // New boxes, whose y means nothing yet: they go after their siblings, in
+  // this order.
+  fresh: string[] = [],
+): FlowTrees {
   const sources = new Map<string, Set<string>>()
   for (const edge of edges) {
     const from = byId.get(edge.source)
@@ -270,45 +269,60 @@ export function placeTabChild(
     if (edge.sourceHandle !== "right" || edge.targetHandle !== "left") continue
     sources.set(to.id, (sources.get(to.id) ?? new Set()).add(from.id))
   }
-  const treeParent = new Map<string, string>()
-  const children = new Map<string, FlowTreeBox[]>()
+  const parentOf = new Map<string, string>()
+  const childrenOf = new Map<string, string[]>()
   for (const [id, from] of sources) {
     if (from.size !== 1) continue
     const [source] = from
-    treeParent.set(id, source)
-    children.set(source, [...(children.get(source) ?? []), byId.get(id)!])
+    parentOf.set(id, source)
+    childrenOf.set(source, [...(childrenOf.get(source) ?? []), id])
   }
   // Top to bottom as they stand, so tidying never reorders a branch.
-  for (const list of children.values()) {
-    list.sort((a, b) => a.y - b.y || a.x - b.x || a.id.localeCompare(b.id))
+  const late = new Map(fresh.map((id, index) => [id, index]))
+  for (const list of childrenOf.values()) {
+    list.sort((a, b) => {
+      const lateA = late.get(a)
+      const lateB = late.get(b)
+      if (lateA !== undefined || lateB !== undefined) {
+        return (lateA ?? -1) - (lateB ?? -1)
+      }
+      const boxA = byId.get(a)!
+      const boxB = byId.get(b)!
+      return boxA.y - boxB.y || boxA.x - boxB.x || a.localeCompare(b)
+    })
   }
+  return { parentOf, childrenOf }
+}
 
-  const siblings = children.get(parentId) ?? []
-  const last = siblings[siblings.length - 1]
-  const fresh: FlowTreeBox = {
-    id: child.id,
-    x: last ? last.x : parent.x + parent.width + FLOW_TAB_GAP_X,
-    y: 0,
-    width: child.width,
-    height: child.height,
+/** The top of the tree `id` is in: every step up moves strictly left, so it ends. */
+function topOf(trees: FlowTrees, id: string): string {
+  let top = id
+  for (let up = trees.parentOf.get(top); up !== undefined; up = trees.parentOf.get(top)) {
+    top = up
   }
-  children.set(parentId, [...siblings, fresh])
-  treeParent.set(fresh.id, parentId)
+  return top
+}
 
-  // Ends: every step up moves strictly left.
-  let top = parent
-  for (let up = treeParent.get(top.id); up !== undefined; up = treeParent.get(top.id)) {
-    top = byId.get(up)!
-  }
-
+/**
+ * The tree under `topId` laid out the way Tab lays it out: every box level
+ * with the midpoint of the first and last boxes hanging off it, those boxes
+ * stacked FLOW_TAB_GAP_Y apart, and a box's whole branch moving with it. The
+ * top box stays where it is and nothing moves sideways.
+ */
+function layoutTree(
+  at: Map<string, FlowTreeBox>,
+  trees: FlowTrees,
+  topId: string,
+): Map<string, FlowTreeBox> {
   // Each box's branch as a block: how far it reaches above and below the
   // box's centre, and where every box in it sits relative to that centre.
   type Block = { above: number; below: number; centres: Map<string, number> }
-  function branch(box: FlowTreeBox): Block {
-    const centres = new Map([[box.id, 0]])
+  function branch(id: string): Block {
+    const box = at.get(id)!
+    const centres = new Map([[id, 0]])
     let above = box.height / 2
     let below = box.height / 2
-    const blocks = (children.get(box.id) ?? []).map(branch)
+    const blocks = (trees.childrenOf.get(id) ?? []).map(branch)
     if (blocks.length === 0) return { above, below, centres }
     // Stacked from 0 down, FLOW_TAB_GAP_Y between neighbouring blocks…
     const stacked: number[] = []
@@ -321,76 +335,278 @@ export function placeTabChild(
     const shift = (stacked[0] + stacked[stacked.length - 1]) / 2
     blocks.forEach((block, index) => {
       const offset = stacked[index] - shift
-      for (const [id, centre] of block.centres) centres.set(id, centre + offset)
+      for (const [child, centre] of block.centres) centres.set(child, centre + offset)
       above = Math.max(above, block.above - offset)
       below = Math.max(below, block.below + offset)
     })
     return { above, below, centres }
   }
 
-  const tree = branch(top).centres
+  const top = at.get(topId)!
   const centre = top.y + top.height / 2
   const placed = new Map<string, FlowTreeBox>()
-  for (const [id, offset] of tree) {
-    const box = id === fresh.id ? fresh : byId.get(id)!
+  for (const [id, offset] of branch(topId).centres) {
+    const box = at.get(id)!
     placed.set(id, { ...box, y: Math.round(centre + offset - box.height / 2) })
   }
+  return placed
+}
 
-  // Only what tidying itself would cause: a box already overlapping one
-  // outside the tree doesn't count against it.
-  const outside = boxes.filter((box) => !tree.has(box.id))
-  const collides = [...placed.values()].some((rect) =>
-    outside.some(
-      (other) =>
-        overlaps(rect, other) &&
-        (rect.id === fresh.id || !overlaps(byId.get(rect.id)!, other)),
-    ),
-  )
-  if (collides) {
-    return {
-      position: nextChildPosition(parent, siblings, boxes, child),
-      moved: new Map(),
-    }
-  }
+/** Whether two boxes share any of the canvas's width — one could land on the other going up or down. */
+function sameColumn(a: FlowRect, b: FlowRect): boolean {
+  return a.x < b.x + b.width + FLOW_CLEARANCE && b.x < a.x + a.width + FLOW_CLEARANCE
+}
 
-  const moved = new Map<string, { x: number; y: number }>()
-  for (const rect of placed.values()) {
-    if (rect.id !== fresh.id && rect.y !== byId.get(rect.id)!.y) {
-      moved.set(rect.id, { x: rect.x, y: rect.y })
-    }
-  }
-  const spot = placed.get(fresh.id)!
-  return { position: { x: spot.x, y: spot.y }, moved }
+/** The room between two boxes in one column, top to bottom — less than 0 when they overlap. */
+function gapBetween(a: FlowRect, b: FlowRect): number {
+  return Math.max(b.y - (a.y + a.height), a.y - (b.y + b.height))
 }
 
 /**
- * placeTabChild for several new boxes at once — an AI answer in parts — added
- * one after another as Tab would add them, so the branch ends up just as
- * symmetrical. Returns where each new box goes and where any existing box
- * moves to (its final place, after every new box has gone in).
+ * Switchboard: pushes whatever a freshly laid-out tree would now crowd up or
+ * down out of its way, rather than giving up on the layout. `at` holds every
+ * box where it now is (the tree already laid out) and is moved in place;
+ * `was` is where they were before the change, and a box missing from it is
+ * new.
+ *
+ * Crowding is coming within FLOW_ROOM_GAP of a box in the same column, and
+ * closer than the two were before — so an arrangement someone made by hand,
+ * boxes already close or overlapping, doesn't count against the tree. What is
+ * crowded moves with every box its arrows hold it to, away from the box that
+ * crowded it, until it is FLOW_ROOM_GAP clear of everything already settled —
+ * and anything that lands on in turn moves on the same way.
+ */
+function makeRoom(
+  at: Map<string, FlowTreeBox>,
+  was: Map<string, FlowRect>,
+  tree: Set<string>,
+  edges: FlowTreeEdge[],
+): void {
+  // The room a pair must keep: FLOW_ROOM_GAP, or what they had before when
+  // that was less.
+  const needed = (a: string, b: string) => {
+    const before = [was.get(a), was.get(b)]
+    return before[0] && before[1] && sameColumn(before[0], before[1])
+      ? Math.min(FLOW_ROOM_GAP, gapBetween(before[0], before[1]))
+      : FLOW_ROOM_GAP
+  }
+
+  // Everything outside the tree, in the pieces its arrows hold together.
+  const outside = [...at.keys()].filter((id) => !tree.has(id))
+  const root = new Map(outside.map((id) => [id, id]))
+  const find = (id: string): string => {
+    let r = id
+    while (root.get(r) !== r) r = root.get(r)!
+    root.set(id, r)
+    return r
+  }
+  for (const edge of edges) {
+    if (root.has(edge.source) && root.has(edge.target)) {
+      root.set(find(edge.source), find(edge.target))
+    }
+  }
+  const pieces = new Map<string, string[]>()
+  for (const id of outside) {
+    const r = find(id)
+    pieces.set(r, [...(pieces.get(r) ?? []), id])
+  }
+
+  const settled = new Set(tree)
+  const waiting = new Set(pieces.values())
+  // Each pass moves one piece and settles it, so this ends.
+  while (waiting.size > 0) {
+    let crowded: { piece: string[]; box: FlowRect; by: FlowRect } | null = null
+    search: for (const piece of waiting) {
+      for (const id of piece) {
+        const box = at.get(id)!
+        for (const other of settled) {
+          const by = at.get(other)!
+          if (sameColumn(box, by) && gapBetween(box, by) < needed(id, other)) {
+            crowded = { piece, box, by }
+            break search
+          }
+        }
+      }
+    }
+    if (crowded === null) return
+    waiting.delete(crowded.piece)
+
+    // Away from the box that crowded it: down if it sits lower, up if higher.
+    const down =
+      crowded.box.y + crowded.box.height / 2 >= crowded.by.y + crowded.by.height / 2
+    // Every shift that would leave a pair too close, as an open range…
+    const ranges: [number, number][] = []
+    for (const id of crowded.piece) {
+      const box = at.get(id)!
+      for (const other of settled) {
+        const by = at.get(other)!
+        if (!sameColumn(box, by)) continue
+        const room = needed(id, other)
+        ranges.push([by.y - box.y - box.height - room, by.y + by.height + room - box.y])
+      }
+    }
+    // …and the smallest one way that is in none of them. The furthest end of
+    // them all always is, so there is one.
+    const ends = down
+      ? ranges.map(([, high]) => Math.ceil(high)).filter((end) => end >= 0).sort((a, b) => a - b)
+      : ranges.map(([low]) => Math.floor(low)).filter((end) => end <= 0).sort((a, b) => b - a)
+    const shift =
+      ends.find((end) => ranges.every(([low, high]) => end <= low || end >= high)) ?? 0
+    for (const id of crowded.piece) {
+      const box = at.get(id)!
+      at.set(id, { ...box, y: box.y + shift })
+      settled.add(id)
+    }
+  }
+}
+
+/**
+ * Lays out again the tree each of `anchors` is in, the way Tab lays one out,
+ * and makes room for it — see layoutTree and makeRoom. `boxes` and `edges`
+ * are the canvas as it now is, any new boxes (`fresh`) included at their x;
+ * `was` is where the boxes were before the change. Returns where every box
+ * ends up.
+ */
+function tidyTrees(
+  boxes: FlowTreeBox[],
+  edges: FlowTreeEdge[],
+  anchors: string[],
+  fresh: string[],
+  was: Map<string, FlowRect>,
+): Map<string, FlowTreeBox> {
+  const at = new Map(boxes.map((box) => [box.id, box]))
+  const trees = flowTrees(at, edges, fresh)
+  const tops = new Set(anchors.filter((id) => at.has(id)).map((id) => topOf(trees, id)))
+  for (const top of tops) {
+    const placed = layoutTree(at, trees, top)
+    for (const [id, box] of placed) at.set(id, box)
+    makeRoom(at, was, new Set(placed.keys()), edges)
+  }
+  return at
+}
+
+/** The boxes `after` puts somewhere other than where `boxes` has them. */
+function movesFrom(
+  boxes: FlowTreeBox[],
+  after: Map<string, FlowTreeBox>,
+  skip: Set<string> = new Set(),
+): Map<string, FlowPoint> {
+  const moved = new Map<string, FlowPoint>()
+  for (const box of boxes) {
+    const to = after.get(box.id)
+    if (to && !skip.has(box.id) && (to.x !== box.x || to.y !== box.y)) {
+      moved.set(box.id, { x: to.x, y: to.y })
+    }
+  }
+  return moved
+}
+
+/**
+ * Where Tab puts a new box hanging off `parentId`'s right side, and where the
+ * boxes around it move so the branching stays symmetrical: every box sits
+ * level with the midpoint of the first and last boxes hanging off it, those
+ * boxes stack FLOW_TAB_GAP_Y apart, and a box's whole branch moves with it.
+ *
+ * "Hanging off" means the arrows Tab draws — right side to left side, onto a
+ * box further right — and only where that is the one such arrow into the box.
+ * A box two branches merge into, or a loop back to an earlier box, stays put
+ * and anchors whatever hangs off it. The tidying covers the one tree the
+ * parent belongs to; its top box stays where it is and nothing moves sideways.
+ *
+ * Switchboard: whatever the tidied tree would land on is pushed up or down out
+ * of its way (makeRoom), so the tree is always laid out — where the admin's
+ * gives up on the tidying and stacks the new box under whatever it would hit.
+ */
+export function placeTabChild(
+  boxes: FlowTreeBox[],
+  edges: FlowTreeEdge[],
+  parentId: string,
+  child: { id: string; width: number; height: number },
+): { position: FlowPoint; moved: Map<string, FlowPoint> } {
+  const { positions, moved } = placeTabChildren(boxes, edges, parentId, [child])
+  return { position: positions.get(child.id)!, moved }
+}
+
+/**
+ * placeTabChild for several new boxes at once — an AI answer in parts — in
+ * the order given, under the boxes already hanging off the parent, so the
+ * branch ends up just as it would after a Tab for each. Returns where each new
+ * box goes and where any existing box moves to.
  */
 export function placeTabChildren(
   boxes: FlowTreeBox[],
   edges: FlowTreeEdge[],
   parentId: string,
   children: { id: string; width: number; height: number }[],
-): { positions: Map<string, { x: number; y: number }>; moved: Map<string, { x: number; y: number }> } {
-  let current = [...boxes]
-  const wired = [...edges]
-  const positions = new Map<string, { x: number; y: number }>()
-  const moved = new Map<string, { x: number; y: number }>()
-  for (const child of children) {
-    const step = placeTabChild(current, wired, parentId, child)
-    for (const [id, to] of step.moved) (positions.has(id) ? positions : moved).set(id, to)
-    current = current.map((box) => {
-      const to = step.moved.get(box.id)
-      return to ? { ...box, ...to } : box
-    })
-    current.push({ ...child, ...step.position })
-    positions.set(child.id, step.position)
-    wired.push({ source: parentId, target: child.id, sourceHandle: "right", targetHandle: "left" })
+): { positions: Map<string, FlowPoint>; moved: Map<string, FlowPoint> } {
+  const byId = new Map(boxes.map((box) => [box.id, box]))
+  const parent = byId.get(parentId)
+  if (!parent) throw new Error(`No box "${parentId}"`)
+
+  // In the column of the boxes already hanging off the parent — the lowest of
+  // them, as Tab has always lined a new one up — or FLOW_TAB_GAP_X right of it.
+  const siblings = flowTrees(byId, edges).childrenOf.get(parentId) ?? []
+  const last = siblings.length > 0 ? byId.get(siblings[siblings.length - 1]) : undefined
+  const x = last ? last.x : parent.x + parent.width + FLOW_TAB_GAP_X
+  const fresh = children.map((child) => ({ ...child, x, y: parent.y }))
+  const wired = [
+    ...edges,
+    ...fresh.map((child) => ({
+      source: parentId,
+      target: child.id,
+      sourceHandle: "right",
+      targetHandle: "left",
+    })),
+  ]
+
+  const ids = fresh.map((child) => child.id)
+  const after = tidyTrees(
+    [...boxes, ...fresh],
+    wired,
+    [parentId],
+    ids,
+    new Map(boxes.map((box) => [box.id, box])),
+  )
+  const positions = new Map<string, FlowPoint>()
+  for (const id of ids) {
+    const spot = after.get(id)!
+    positions.set(id, { x: spot.x, y: spot.y })
   }
-  return { positions, moved }
+  return { positions, moved: movesFrom(boxes, after) }
+}
+
+/**
+ * Switchboard: where the boxes that are left move once `deleted` go — each
+ * tree a deleted box hung off laid out again the way Tab lays it out, so the
+ * boxes around the gap close up and re-centre on the box they hang off, and
+ * room made for the tree as placeTabChild makes it. A deleted box that was the
+ * top of its tree leaves what hung off it where it is.
+ *
+ * `boxes` and `edges` are the canvas before the delete; `keptEdges` the
+ * arrows that stay, when the delete takes arrows of its own as well.
+ */
+export function tidyAfterDelete(
+  boxes: FlowTreeBox[],
+  edges: FlowTreeEdge[],
+  deleted: ReadonlySet<string>,
+  keptEdges?: FlowTreeEdge[],
+): Map<string, FlowPoint> {
+  const before = flowTrees(new Map(boxes.map((box) => [box.id, box])), edges)
+  // The nearest box each deleted one hung off that is staying.
+  const anchors: string[] = []
+  for (const id of deleted) {
+    let up = before.parentOf.get(id)
+    while (up !== undefined && deleted.has(up)) up = before.parentOf.get(up)
+    if (up !== undefined) anchors.push(up)
+  }
+  if (anchors.length === 0) return new Map()
+
+  const kept = boxes.filter((box) => !deleted.has(box.id))
+  const arrows = (keptEdges ?? edges).filter(
+    (edge) => !deleted.has(edge.source) && !deleted.has(edge.target),
+  )
+  const after = tidyTrees(kept, arrows, anchors, [], new Map(kept.map((box) => [box.id, box])))
+  return movesFrom(kept, after)
 }
 
 /**
