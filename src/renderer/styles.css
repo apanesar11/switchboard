@@ -1254,9 +1254,12 @@ aside .empty p{font-size:var(--fs-xs)}
 @media (prefers-reduced-motion:reduce){
   .win.edfull aside{transition:none}
 }
-/* 38px, content centred on y=24 — the traffic lights' own centre with
-   trafficLightPosition {x:18,y:18}, which is where .rail sits with the rail closed. */
-.edband{display:none;align-items:center;gap:10px;height:var(--titlebar);flex:none;padding:10px 8px 0 0;
+/* As much room under the traffic lights as over them. Measured on macOS 26 they are
+   14px, from y=18 to y=32 (trafficLightPosition y:18), so the band is 18 + 14 + 18
+   and its 1px border, with the row centred on theirs at y=25. At --titlebar's 38px
+   they hung 5px off the border (2026-10-04). The Diagrams tab's full-screen band
+   (DiagramsPage.tsx) is the same 51px; change one, change both. */
+.edband{display:none;align-items:center;gap:10px;height:51px;flex:none;padding:0 8px 0 0;
   background:var(--ed-side);border-bottom:1px solid var(--ed-line);
   font-size:var(--fs-xs);color:var(--t-dim);-webkit-app-region:drag}
 /* Plus the 10px gap: the text starts at x=92. The lights end at x=70 on paper (18px in,

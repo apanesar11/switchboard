@@ -36,6 +36,7 @@ import {
   RiArrowRightSLine,
   RiDeleteBinLine,
   RiFlowChart,
+  RiFullscreenExitLine,
   RiFullscreenLine,
   RiInboxUnarchiveLine,
 } from "@remixicon/react"
@@ -602,10 +603,16 @@ export function DiagramsPage({
               )}
             >
               {fullscreen ? (
-                // A window drag region, as the title bar it covers was, with room on
-                // the left for the traffic lights it now sits under.
+                // A window drag region, as the title bar it covers was, under the
+                // traffic lights. Measured on macOS 26 they are 14px, from y=18 to
+                // y=32 (trafficLightPosition y:18), so the band is 18 + 14 + 18 and
+                // its 1px border: as much room under them as over them, and the row
+                // centred on theirs at y=25. At 38px they hung 5px off the border.
+                // The Editor's .edband is the same 51px; change one, change both.
+                // The text starts at x=92, clear of the larger lights. The way out
+                // is the enter button's icon turned around; Esc still works.
                 <div
-                  className="flex h-[38px] shrink-0 items-center justify-between gap-3 border-b border-gray-200 bg-white pl-[84px] pr-3 dark:border-gray-800 dark:bg-gray-950"
+                  className="flex h-[51px] shrink-0 items-center justify-between gap-3 border-b border-gray-200 bg-white pl-[92px] pr-3 dark:border-gray-800 dark:bg-gray-950"
                   style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
                 >
                   <p className="truncate text-[13px] font-medium text-gray-900 dark:text-gray-50">
@@ -613,12 +620,14 @@ export function DiagramsPage({
                     <span className="font-normal text-gray-500"> · {wsName}</span>
                   </p>
                   <Button
-                    variant="secondary"
-                    className="h-[26px] rounded-lg px-2.5 text-xs shadow-none"
+                    variant="ghost"
+                    className="size-[26px] shrink-0 rounded-md p-0 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-50"
                     style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+                    aria-label="Exit full screen"
+                    title="Exit full screen"
                     onClick={() => setFullscreen(false)}
                   >
-                    Close · Esc
+                    <RiFullscreenExitLine className="size-4" aria-hidden="true" />
                   </Button>
                 </div>
               ) : null}
