@@ -102,7 +102,7 @@ type Bridge = {
   answerSetSettings(patch: Partial<AnswerSettings>): Promise<AnswerStatus | { ok: false; error: string }>
   answerStart(
     id: string,
-    req: { provider: ProviderId; wsId: string; system: string; user: string; schema: unknown },
+    req: { provider: ProviderId; wsId: string; system: string; user: string; schema: unknown; operation?: "condense" },
   ): Promise<AnswerResult>
   answerStop(id: string): Promise<unknown>
   onAnswerStep(cb: (id: string, step: AnswerStep) => void): () => void

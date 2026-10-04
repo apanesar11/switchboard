@@ -174,6 +174,14 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   Settings: **Web access** (on) lets whichever answers open a link in the question or
   search the web, only when the question needs it; **Subtext** (off) adds a line of detail
   under each answer box.
+
+  **✦ Condense** appears when you drag-select several connected text nodes, including
+  sibling branches with the same parent (⌘I also works). It replaces the discussion
+  with a few readable concept nodes, keeps the original parent connected, and preserves
+  unselected branches. It uses the selected discussion as its evidence. The originals
+  stay until the summary is ready; **Stop** cancels it and **Undo** restores the entire
+  discussion in one step. If the selected discussion changes while it thinks, retry
+  with the updated selection.
 - **Settings** — the row under Usage, or ⌘,: who answers ✦ Answer on this Mac, one row
   each — whether a CLI is installed and signed in, and the keys for the two APIs with the
   model each one uses — and the Web access and Subtext switches. A key is checked with its provider before it is kept, encrypted with

@@ -844,6 +844,19 @@ tool is a menu — a file, or **Google Images** (G): Google's own results in a p
 on the canvas's right, whose pictures drag straight onto it (below). `npm run
 test:diagrams` covers the layout and folding (`scripts/test-flow-layout.js`).
 
+**Condense replaces an explored discussion.** A rectangle selection of connected text
+nodes, or sibling branches sharing an outside parent, gets **✦ Condense** in the
+floating toolbar; ⌘I dispatches to it for multiple selected nodes. The complete selected
+graph and its outside parents go to the current AI provider. The prompt reconciles
+corrections and asks for a few standalone concepts, fewer than the selection and at
+most six. `lib/diagrams/answer.ts` validates every returned part before the editor
+changes anything. `lib/diagrams/condense.ts` keeps IDs and layout local: incoming arrows
+fan out to the summaries, outgoing continuations follow the final concept, and every
+unselected node survives. The replacement is one undo step. A content/connection
+fingerprint prevents a pending response from replacing a changed discussion; moves
+are allowed, and Stop, undo/redo, or leaving the diagram cancels it. Graph and prompt
+tests are in `scripts/test-condense.js` and `scripts/test-answer.js`.
+
 **A diagram belongs to a workspace and lives on this Mac.** One JSON file per diagram —
 the admin's row, `{ id, name, kind, createdAt, updatedAt, archivedAt, spec }` minus the
 product — in `<config dir>/diagrams/<workspace>-<hash>/<id>.json`, beside the config like
@@ -1019,6 +1032,12 @@ stays in the partition (`Partitions/sb-images` in Electron's Application Support
 main's own, and runs `fetchImage` itself, with Node's fetch standing in for the session.
 
 ### 4.18 ✦ Answer and Settings
+
+Condense uses the same provider and request lifecycle, with `operation: 'condense'`
+on `sb.answerStart`. Main validates this operation and disables web access regardless
+of saved Answer settings. Claude Code receives no built-in tools; Codex keeps its
+read-only sandbox with web search disabled. Every provider is instructed to condense
+only the supplied discussion, without researching new facts.
 
 ✦ Answer, on the Diagrams tab, puts a box's question to an AI and hangs the answer off it
 as one box per part — six repos are six boxes; the admin's cap of four is gone here (40 is

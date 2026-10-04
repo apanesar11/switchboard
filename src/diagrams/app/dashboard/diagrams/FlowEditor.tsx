@@ -207,9 +207,11 @@ import {
 import {
   AnswerError,
   requestFlowAnswer,
+  requestFlowCondense,
   updateAnswerSettings,
   useAnswerStatus,
 } from "@/lib/diagrams/ai-client"
+import { inspectFlowCondenseSelection, replaceFlowSelection } from "@/lib/diagrams/condense"
 import type { AnswerSettings, AnswerStatus, AnswerStep, ProviderId, ProviderStatus } from "@/lib/bridge"
 import { call, writeClipboard } from "@/lib/bridge"
 // Switchboard: Google Images beside the canvas, and pictures dragged out of it.
@@ -283,10 +285,13 @@ type Asking = {
   web: boolean
   /** Which answer this is, counted from 1 — keys its status, so its timer restarts. */
   serial: number
+  /** Switchboard: Condense replaces these boxes instead of answering one. */
+  mode?: "condense"
+  selectedIds?: string[]
 }
 
 /** Switchboard: how the last answer went, for "3 answers added · Claude Code read 6 files in 41s". */
-type AnswerNote = { by: string; files: number | null; seconds: number }
+type AnswerNote = { by: string; files: number | null; seconds: number; condensed?: number }
 
 /**
  * Switchboard: an answer that didn't come, said in the strip with the one thing that
@@ -1172,8 +1177,11 @@ function FlowEditorCanvas({
   // it asked with), `askRef` the box and the way to cancel each, by serial.
   const answerStatus = useAnswerStatus()
   const [askings, setAskings] = useState<Asking[]>([])
-  const askRef = useRef(new Map<number, { id: string; controller: AbortController }>())
-  const answeringIds = useMemo(() => new Set(askings.map((entry) => entry.id)), [askings])
+  const askRef = useRef(new Map<number, { id: string; controller: AbortController; selectedIds?: string[] }>())
+  const answeringIds = useMemo(
+    () => new Set(askings.flatMap((entry) => entry.selectedIds ?? [entry.id])),
+    [askings],
+  )
   // Counts the answers asked for, to tell one wait from the next.
   const askCountRef = useRef(0)
   // How many boxes the last answer added, while "· Undo" is offered for it.
@@ -1423,7 +1431,17 @@ function FlowEditorCanvas({
   }, [settleSelection])
 
   function restore(snapshot: string) {
+    // Switchboard: an undo/redo invalidates any pending destructive replacement.
+    for (const [serial, run] of [...askRef.current]) {
+      if (!run.selectedIds) continue
+      askRef.current.delete(serial)
+      run.controller.abort()
+      doneAsking(serial)
+    }
     const next = toCanvas(JSON.parse(snapshot) as FlowSpec)
+    nodesRef.current = next.nodes
+    edgesRef.current = next.edges
+    latestRef.current = snapshot
     setAnswered(null)
     setNodes(next.nodes)
     setEdges(next.edges)
@@ -2472,8 +2490,184 @@ function FlowEditorCanvas({
 
   /** Switchboard: whether `id`'s answer is on its way. */
   function isAnswering(id: string): boolean {
-    for (const run of askRef.current.values()) if (run.id === id) return true
+    for (const run of askRef.current.values()) {
+      if (run.id === id || run.selectedIds?.includes(id)) return true
+    }
     return false
+  }
+
+  // Switchboard: condense the complete selected discussion in place. Keep the
+  // original until a valid summary arrives; edits to its words or connections
+  // invalidate the request, while moves and work elsewhere can continue.
+  async function condense(selectedIds: string[]) {
+    if (selectedIds.some(isAnswering)) return
+    const currentSpec = () => JSON.parse(canvasJson(meta, nodesRef.current, edgesRef.current)) as FlowSpec
+    const picked = new Set(selectedIds)
+    // Include editor-only edges to empty text, which saving intentionally
+    // omits. Adding even an unfinished branch invalidates this replacement.
+    const wiring = () => JSON.stringify(edgesRef.current
+      .filter((edge) => picked.has(edge.source) || picked.has(edge.target))
+      .map((edge) => {
+        const data = edge.data as FlowEdgeData | undefined
+        return JSON.stringify([edge.source, edge.target, edge.sourceHandle, edge.targetHandle, data?.label, data?.dashed, data?.collapsed])
+      }).sort())
+    const initialWiring = wiring()
+    let selection: ReturnType<typeof inspectFlowCondenseSelection>
+    try {
+      selection = inspectFlowCondenseSelection(currentSpec(), selectedIds)
+    } catch (err) {
+      toast({ title: err instanceof Error ? err.message : "Select a connected discussion to condense", variant: "error" })
+      return
+    }
+    const known = answerStatus
+    const provider = known?.providers.find((option) => option.id === known.settings.provider)
+    if (!known || !provider) {
+      toast({ title: "Switchboard is still looking for who can answer — try again in a moment" })
+      return
+    }
+    const blocked = notReady(provider)
+    if (blocked) {
+      setAnswered(null)
+      setFailure(blocked)
+      return
+    }
+    const requested = currentSpec()
+    const parentNodes = new Map(requested.nodes.map((node) => [node.id, node]))
+    const controller = new AbortController()
+    const serial = ++askCountRef.current
+    askRef.current.set(serial, { id: selection.anchor.id, controller, selectedIds })
+    const live = () => askRef.current.get(serial)?.controller === controller
+    const startedAt = Date.now()
+    setAnswered(null)
+    setFailure(null)
+    setSteps((all) => ({ ...all, [serial]: [] }))
+    setAskings((list) => [...list, {
+      id: selection.anchor.id,
+      question: `Condense ${selection.nodes.length} nodes`,
+      startedAt,
+      provider: provider.id,
+      name: provider.name,
+      cli: provider.kind === "cli",
+      web: false,
+      serial,
+      mode: "condense",
+      selectedIds,
+    }])
+    try {
+      const { parts } = await requestFlowCondense({
+        provider,
+        wsId: productId,
+        selection: {
+          nodes: selection.nodes.map(({ id, label, detail }) => ({ id, label, detail })),
+          edges: selection.edges,
+          parents: selection.incoming.flatMap((edge) => {
+            const parent = parentNodes.get(edge.from)
+            return parent ? [{ id: parent.id, label: parent.label, detail: parent.detail, arrow: edge.label }] : []
+          }),
+          title: diagramName ?? meta.title,
+          subtext: known.settings.subtext,
+        },
+      }, controller.signal, (step) => {
+        if (live()) setSteps((all) => ({ ...all, [serial]: [...(all[serial] ?? []).slice(-49), step] }))
+      })
+      if (!live()) return
+      const before = currentSpec()
+      let unchanged = false
+      try {
+        unchanged = wiring() === initialWiring && inspectFlowCondenseSelection(before, selectedIds).fingerprint === selection.fingerprint
+      } catch { /* A selected node was removed or the discussion was disconnected. */ }
+      if (!unchanged) {
+        setFailure({ message: "The selected discussion changed while condensing. Select it again and retry." })
+        return
+      }
+      const { spec: condensed, addedIds } = replaceFlowSelection(
+        before,
+        selectedIds,
+        parts,
+        nodesRef.current.map((node) => node.id),
+      )
+      const next = toCanvas(condensed)
+      const removed = new Set(selectedIds)
+      const originals = new Map(nodesRef.current.map((node) => [node.id, node]))
+      const quiet =
+        (editingRef.current !== null && !removed.has(editingRef.current)) ||
+        isTextField(document.activeElement) ||
+        toolRef.current === "hand" ||
+        !nodesRef.current.some((node) => node.selected && removed.has(node.id)) ||
+        nodesRef.current.some((node) => node.selected && !removed.has(node.id)) ||
+        edgesRef.current.some((edge) => edge.selected && !removed.has(edge.source) && !removed.has(edge.target))
+      // Take the snapshot of the canvas at completion, so Undo also preserves
+      // work done elsewhere while the AI was thinking.
+      latestRef.current = JSON.stringify(before)
+      record()
+      lastRecordAt.current = 0
+      if (editingRef.current !== null && removed.has(editingRef.current)) changeEditing(null)
+      const added = new Set(addedIds)
+      const appliedNodes: Node[] = next.nodes.map((node) => {
+        const original = originals.get(node.id)
+        return original
+          ? { ...original, position: node.position, selected: quiet && original.selected }
+          : { ...node, selected: !quiet && added.has(node.id) }
+      })
+      // Empty free text is intentionally omitted from a saved spec. It is
+      // still an in-progress editor node and must survive work elsewhere.
+      const savedIds = new Set(before.nodes.map((node) => node.id))
+      const unsavedNodes = nodesRef.current.filter((node) => !removed.has(node.id) && !savedIds.has(node.id))
+      appliedNodes.push(...unsavedNodes)
+      // Keep surviving arrows' UI state and IDs, giving each replacement a
+      // fresh ID so React Flow cannot reuse an old arrow's selection.
+      const surviving = edgesRef.current.filter((edge) => !removed.has(edge.source) && !removed.has(edge.target))
+      const edgeKey = (edge: Edge) => {
+        const data = edge.data as FlowEdgeData | undefined
+        return JSON.stringify([edge.source, edge.target, edge.sourceHandle, edge.targetHandle, data?.label ?? "", data?.dashed === true, data?.collapsed === true])
+      }
+      const byConnection = new Map<string, Edge[]>()
+      for (const edge of surviving) {
+        const key = edgeKey(edge)
+        byConnection.set(key, [...(byConnection.get(key) ?? []), edge])
+      }
+      const appliedEdges = next.edges.map((edge) => {
+        const original = byConnection.get(edgeKey(edge))?.shift()
+        return original ? { ...original, selected: quiet && original.selected } : { ...edge, id: newEdgeId() }
+      })
+      const unsavedIds = new Set(unsavedNodes.map((node) => node.id))
+      for (const edge of edgesRef.current) {
+        if (!unsavedIds.has(edge.source) && !unsavedIds.has(edge.target)) continue
+        if (removed.has(edge.target)) {
+          appliedEdges.push(...addedIds.map((id) => ({ ...edge, id: newEdgeId(), target: id, selected: false })))
+        } else if (removed.has(edge.source)) {
+          appliedEdges.push({ ...edge, id: newEdgeId(), source: addedIds[addedIds.length - 1], selected: false })
+        } else appliedEdges.push(edge)
+      }
+      for (const id of removed) tabMovesRef.current.delete(id)
+      for (const pending of tabMovesRef.current.values()) {
+        for (const node of appliedNodes) {
+          const previous = originals.get(node.id)
+          if (!previous || previous.position.x !== node.position.x || previous.position.y !== node.position.y) pending.delete(node.id)
+        }
+      }
+      nodesRef.current = appliedNodes
+      edgesRef.current = appliedEdges
+      latestRef.current = canvasJson(meta, appliedNodes, appliedEdges)
+      setNodes(appliedNodes)
+      setEdges(appliedEdges)
+      setAnswerNote({ by: provider.name, files: null, seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)), condensed: selectedIds.length })
+      setAnswered(addedIds.length)
+      if (!quiet) {
+        settleSelection()
+        const summaries = appliedNodes.filter((node) => added.has(node.id))
+        const left = Math.min(...summaries.map((node) => node.position.x))
+        const top = Math.min(...summaries.map((node) => node.position.y))
+        reveal({ x: left, y: top, width: Math.max(...summaries.map((node) => node.position.x + (node.width ?? FLOW_NODE_WIDTH))) - left, height: Math.max(...summaries.map((node) => node.position.y + (node.height ?? 0))) - top })
+      }
+    } catch (err) {
+      if (live()) setFailure({ message: err instanceof Error ? err.message : "Couldn't condense that discussion", code: err instanceof AnswerError ? err.code : undefined })
+    } finally {
+      if (live()) {
+        askRef.current.delete(serial)
+        doneAsking(serial)
+      }
+    }
   }
 
   // An answer off the list, with what its CLI did.
@@ -2491,7 +2685,7 @@ function FlowEditorCanvas({
   function stopAsking(id?: string): boolean {
     let stopped = false
     for (const [serial, run] of [...askRef.current]) {
-      if (id !== undefined && run.id !== id) continue
+      if (id !== undefined && run.id !== id && !run.selectedIds?.includes(id)) continue
       askRef.current.delete(serial)
       run.controller.abort()
       doneAsking(serial)
@@ -2513,6 +2707,7 @@ function FlowEditorCanvas({
       toast({ title: "The answer arrived after its box was deleted, so it wasn't added" })
       return
     }
+    latestRef.current = canvasJson(meta, nodesRef.current, edgesRef.current)
     record()
     // Its own step, apart from whatever was typed just before it landed.
     lastRecordAt.current = 0
@@ -2568,9 +2763,15 @@ function FlowEditorCanvas({
     for (const pending of tabMovesRef.current.values()) {
       for (const id of moved.keys()) pending.delete(id)
     }
-    nodesRef.current = [...current.map(shift), ...added]
-    setNodes((now) => [...(quiet ? now : deselected(now)).map(shift), ...added])
-    setEdges((now) => [...(quiet ? now : deselected(now)), ...arrows])
+    // Switchboard: answers and condensations can land together. Publish both
+    // halves to the refs immediately so the next completion sees every arrow.
+    const nextNodes = [...(quiet ? current : deselected(current)).map(shift), ...added]
+    const nextEdges = [...(quiet ? edgesRef.current : deselected(edgesRef.current)), ...arrows]
+    nodesRef.current = nextNodes
+    edgesRef.current = nextEdges
+    latestRef.current = canvasJson(meta, nextNodes, nextEdges)
+    setNodes(nextNodes)
+    setEdges(nextEdges)
     setAnswered(added.length)
     // Nor the view, which would carry the box being typed in off screen.
     if (quiet) return
@@ -2749,6 +2950,7 @@ function FlowEditorCanvas({
   // now, so it follows the question if moved. (Where the branch is re-centred
   // to once the answer is in isn't shown: it would sit on the answers there.)
   const ghosts = useMemo(() => askings.flatMap((asking) => {
+    if (asking.mode === "condense") return []
     const parent = nodes.find((node) => node.id === asking.id)
     if (!parent) return []
     // The boxes hanging off it the way Tab hangs them: right side to left
@@ -2876,6 +3078,17 @@ function FlowEditorCanvas({
 
   const selectedNodes = nodes.filter((node) => node.selected)
   const selectedEdges = edges.filter((edge) => edge.selected)
+  const selectedIds = selectedNodes.map((node) => node.id)
+  const condensingSelection = askings.find((entry) => entry.selectedIds?.some((id) => selectedIds.includes(id)))
+  const condenseProblem = useMemo(() => {
+    if (selectedNodes.length < 2) return null
+    try {
+      inspectFlowCondenseSelection(JSON.parse(json) as FlowSpec, selectedNodes.map((node) => node.id))
+      return null
+    } catch (err) {
+      return err instanceof Error ? err.message : "Select a connected discussion to condense"
+    }
+  }, [json, nodes])
   const soleNode = selectedNodes.length === 1 && selectedEdges.length === 0 ? selectedNodes[0] : null
   // Each in its own memo, so the context below can depend on a plain string.
   const soleNodeId = useMemo(() => {
@@ -2894,7 +3107,7 @@ function FlowEditorCanvas({
   // the selected box's, or else the one asked for last.
   const followed = useMemo(() => {
     // A CLI from the start; an API once it has gone on the web, the one step it reports.
-    const shown = askings.filter((entry) => entry.cli || (steps[entry.serial]?.length ?? 0) > 0)
+    const shown = askings.filter((entry) => entry.mode === "condense" || entry.cli || (steps[entry.serial]?.length ?? 0) > 0)
     return shown.find((entry) => entry.id === soleNodeId) ?? shown[shown.length - 1] ?? null
   }, [askings, soleNodeId, steps])
 
@@ -3041,6 +3254,11 @@ function FlowEditorCanvas({
       // ⌘↵ or ⌘I: ✦ Answer for the box selected — or the one being typed in, which
       // it finishes first.
       answer: () => {
+        if (!editingNode && selectedNodes.length > 1) {
+          if (condensingSelection || selectedIds.some(isAnswering)) return true
+          void condense(selectedIds)
+          return true
+        }
         const current = editingNode ?? soleNode
         if (!current || !hasText(current.data as FlowBoxNodeData)) return false
         // Switchboard: one answer per box, any number of boxes at once — on
@@ -3052,6 +3270,7 @@ function FlowEditorCanvas({
       },
       escapeAsking: () => {
         if (askRef.current.size === 0) return false
+        if (condensingSelection) return stopAsking(condensingSelection.id)
         // Switchboard: the selected box's answer — or, with nothing selected,
         // the one answer on its way. With several, Escape needs to know which.
         if (soleNode) return isAnswering(soleNode.id) && stopAsking(soleNode.id)
@@ -3428,8 +3647,22 @@ function FlowEditorCanvas({
                       : undefined
                   }
                   ai={
-                    soleNode && hasText(soleNode.data as FlowBoxNodeData)
+                    selectedNodes.length > 1
                       ? {
+                          mode: "condense",
+                          state: condensingSelection ? "answering" : "idle",
+                          hasQuestion: !condenseProblem && !selectedIds.some(isAnswering),
+                          disabledReason: condenseProblem ?? (selectedIds.some(isAnswering) ? "Wait for the selected nodes' answers or stop them first" : undefined),
+                          status: answerStatus,
+                          workspaceName,
+                          onSettings: (patch) => void updateAnswerSettings(patch),
+                          onOpenSettings,
+                          onAnswer: () => void condense(selectedIds),
+                          onStop: () => stopAsking(condensingSelection?.id),
+                        }
+                      : soleNode && hasText(soleNode.data as FlowBoxNodeData)
+                      ? {
+                          mode: condensingSelection ? "condense" : "answer",
                           state: answeringIds.has(soleNode.id) ? "answering" : "idle",
                           hasQuestion: (soleNode.data as FlowBoxNodeData).label.trim().length > 0,
                           status: answerStatus,
@@ -3499,14 +3732,14 @@ function FlowEditorCanvas({
                 {/* Always on the page, so a screen reader hears it change — one
                     added already holding its words often isn't announced. */}
                 <span className="sr-only" role="status">
-                  {askings.length === 1
-                    ? `Answering with ${askings[0].name}`
-                    : askings.length > 1
-                      ? `Answering ${askings.length} boxes`
+                  {askings.length > 0
+                    ? askingLabel(askings)
                     : failure !== null
                       ? failure.message
                       : answered !== null
-                        ? answered === 1
+                        ? answerNote?.condensed
+                          ? `${answerNote.condensed} nodes condensed to ${answered}`
+                          : answered === 1
                           ? "Answer added"
                           : `${answered} answers added`
                         : ""}
@@ -3538,7 +3771,9 @@ function FlowEditorCanvas({
                   <>
                     <span className="flex items-center gap-1.5 px-1 text-violet-700 dark:text-violet-300">
                       <RiSparkling2Fill className="size-3.5 text-violet-500" aria-hidden="true" />
-                      {answered === 1 ? "Answer added" : `${answered} answers added`}
+                      {answerNote?.condensed
+                        ? `${answerNote.condensed} nodes condensed to ${answered}`
+                        : answered === 1 ? "Answer added" : `${answered} answers added`}
                       {answerNote ? (
                         <span className="text-violet-600/80 dark:text-violet-300/80">
                           {" · "}
@@ -4081,6 +4316,8 @@ function BoxBar({
 }
 
 type AiBar = {
+  mode?: "answer" | "condense"
+  disabledReason?: string
   /** Idle, or waiting on this box's answer. Switchboard: other boxes' answers don't hold this one up. */
   state: "idle" | "answering"
   /** Whether the box has any words to ask about. */
@@ -4103,12 +4340,13 @@ const AI_TINT = "bg-violet-500/20 text-white hover:bg-violet-500/30 hover:text-w
 // who answers and how. While this box's answer is on its way: Answering… and
 // Stop.
 function AiControls({ ai }: { ai: AiBar }) {
+  const condensing = ai.mode === "condense"
   if (ai.state === "answering") {
     return (
       <div className="flex items-center">
         <span className="flex h-8 items-center gap-1.5 rounded-l-lg bg-violet-500/30 pl-2 pr-2.5 text-xs font-medium text-white">
           <RiLoader4Line className="size-4 animate-spin text-violet-200" aria-hidden="true" />
-          Answering…
+          {condensing ? "Condensing…" : "Answering…"}
         </span>
         <BarButton
           label="Stop · Esc"
@@ -4122,8 +4360,10 @@ function AiControls({ ai }: { ai: AiBar }) {
   }
   const provider = ai.status?.providers.find((option) => option.id === ai.status?.settings.provider)
   const label = ai.hasQuestion
-    ? `Answer with ${provider?.name ?? "AI"} · ⌘I`
-    : "Write a question in the box first"
+    ? condensing
+      ? `Condense selection with ${provider?.name ?? "AI"} · ⌘I · replaces selected nodes, undoable`
+      : `Answer with ${provider?.name ?? "AI"} · ⌘I`
+    : ai.disabledReason ?? "Write a question in the box first"
   return (
     <div className="flex items-center">
       <BarButton
@@ -4138,7 +4378,7 @@ function AiControls({ ai }: { ai: AiBar }) {
         )}
       >
         <RiSparkling2Fill className="size-4 text-violet-300" aria-hidden="true" />
-        Answer
+        {condensing ? "Condense" : "Answer"}
       </BarButton>
       <BarMenu
         label="Who answers"
@@ -4149,6 +4389,7 @@ function AiControls({ ai }: { ai: AiBar }) {
       >
         {(close) => (
           <AiSettingsMenu
+            condensing={condensing}
             status={ai.status}
             workspaceName={ai.workspaceName}
             onChange={ai.onSettings}
@@ -4277,11 +4518,13 @@ function MenuSwitch({
 // things.
 function AiSettingsMenu({
   status,
+  condensing = false,
   workspaceName,
   onChange,
   onOpenSettings,
 }: {
   status: AnswerStatus | null
+  condensing?: boolean
   workspaceName?: string
   onChange: (patch: Partial<AnswerSettings>) => void
   onOpenSettings?: () => void
@@ -4336,7 +4579,7 @@ function AiSettingsMenu({
                         option.ready ? "text-gray-400" : "text-gray-500",
                       )}
                     >
-                      {providerLine(option, workspaceName)}
+                      {condensing && option.ready ? "Condenses the selected discussion" : providerLine(option, workspaceName)}
                     </span>
                   </span>
                 </button>
@@ -4345,29 +4588,41 @@ function AiSettingsMenu({
           </div>
           {/* Whichever of the four answers — what it may do, beside who it is (and outside
               the radio group, which holds only the four). */}
-          <div className="mt-auto border-t border-white/10 pt-1">
-            <MenuSwitch
-              label="Web access"
-              hint="Opens links and searches when needed"
-              on={settings.web}
-              onToggle={() => onChange({ web: !settings.web })}
-            />
-          </div>
+          {!condensing ? (
+            <div className="mt-auto border-t border-white/10 pt-1">
+              <MenuSwitch
+                label="Web access"
+                hint="Opens links and searches when needed"
+                on={settings.web}
+                onToggle={() => onChange({ web: !settings.web })}
+              />
+            </div>
+          ) : null}
         </div>
         <div className="flex flex-col gap-1 border-l border-white/10 pl-2.5">
           {current ? <HowItAnswers provider={current} settings={settings} onChange={onChange} /> : null}
-          <MenuHeading>Answer as</MenuHeading>
-          <div role="radiogroup" aria-label="Answer as" className="grid grid-cols-2 gap-0.5 rounded-lg bg-white/5 p-0.5">
-            <Segment label="Let it decide" checked={settings.split === "auto"} onClick={() => onChange({ split: "auto" })} />
-            <Segment label="One box" checked={settings.split === "one"} onClick={() => onChange({ split: "one" })} />
-          </div>
+          {!condensing ? (
+            <>
+              <MenuHeading>Answer as</MenuHeading>
+              <div role="radiogroup" aria-label="Answer as" className="grid grid-cols-2 gap-0.5 rounded-lg bg-white/5 p-0.5">
+                <Segment label="Let it decide" checked={settings.split === "auto"} onClick={() => onChange({ split: "auto" })} />
+                <Segment label="One box" checked={settings.split === "one"} onClick={() => onChange({ split: "one" })} />
+              </div>
+            </>
+          ) : (
+            <p className="px-2 py-2 text-xs text-gray-400">
+              A few readable concepts replace the selected discussion. Its parent stays connected.
+            </p>
+          )}
           <div className="mt-1 flex flex-col">
-            <MenuSwitch
-              label="Read the boxes before it"
-              hint="The arrows leading to the question"
-              on={settings.context}
-              onToggle={() => onChange({ context: !settings.context })}
-            />
+            {!condensing ? (
+              <MenuSwitch
+                label="Read the boxes before it"
+                hint="The arrows leading to the question"
+                on={settings.context}
+                onToggle={() => onChange({ context: !settings.context })}
+              />
+            ) : null}
             <MenuSwitch
               label="Subtext"
               hint="A line of detail under each box"
@@ -4378,7 +4633,7 @@ function AiSettingsMenu({
         </div>
       </div>
       <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-white/10 px-2 pb-0.5 pt-2 text-[11px] text-gray-400">
-        <span>A box for each part an answer has. Remembered on this Mac.</span>
+        <span>{condensing ? "Uses the selected nodes and their parent. Undo restores the discussion." : "A box for each part an answer has. Remembered on this Mac."}</span>
         {onOpenSettings ? (
           <button
             type="button"
@@ -4508,12 +4763,24 @@ function useSeconds(since: number): number {
 // the canvas. Switchboard: with several on their way, "Answering 3 boxes · 40s"
 // (the oldest's count) and a Stop that stops them all — each box's own toolbar
 // stops just its own.
+function askingLabel(askings: Asking[]): string {
+  if (askings.length === 1) {
+    const asking = askings[0]
+    return asking.mode === "condense"
+      ? `Condensing ${asking.selectedIds?.length ?? 0} nodes with ${asking.name}`
+      : `Answering with ${asking.name}`
+  }
+  return askings.some((asking) => asking.mode === "condense")
+    ? `${askings.length} AI requests in progress`
+    : `Answering ${askings.length} boxes`
+}
+
 function AskingStatus({ askings, onStop }: { askings: Asking[]; onStop: () => void }) {
   const seconds = useSeconds(askings[0].startedAt)
   return (
     <span className="flex items-center gap-1.5 px-1 text-violet-700 dark:text-violet-300">
       <RiLoader4Line className="size-3.5 animate-spin" aria-hidden="true" />
-      {askings.length === 1 ? `Answering with ${askings[0].name}` : `Answering ${askings.length} boxes`}
+      {askingLabel(askings)}
       {/* Not announced: a screen reader would read the whole line out every second. */}
       <span aria-hidden="true" className="tabular-nums">
         · {seconds}s
@@ -4569,7 +4836,9 @@ function AnswerActivity({
       <p className="mb-1.5 flex items-center gap-2 font-semibold text-gray-900 dark:text-gray-50">
         <RiSparkling2Fill className="size-3.5 shrink-0 text-violet-500" aria-hidden="true" />
         <span className="truncate">
-          {asking.cli ? `${asking.name} is reading ${workspaceName ?? "the workspace"}` : `${asking.name} is looking it up`}
+          {asking.mode === "condense"
+            ? `${asking.name} is condensing ${asking.selectedIds?.length ?? 0} nodes`
+            : asking.cli ? `${asking.name} is reading ${workspaceName ?? "the workspace"}` : `${asking.name} is looking it up`}
         </span>
         <span className="ml-auto font-medium tabular-nums text-gray-500" aria-hidden="true">
           {seconds}s
@@ -4620,7 +4889,9 @@ function AnswerActivity({
           : done > 0
             ? `${done === 1 ? "1 step" : `${done} steps`} so far · `
             : ""}
-        {!asking.cli
+        {asking.mode === "condense"
+          ? "The original discussion stays until its summary is ready. You can undo the replacement."
+          : !asking.cli
           ? "It sees only the diagram, and the web when the question needs it."
           : asking.web
             ? "Read-only: it can open and search files, never change them, and look things up on the web."
@@ -5256,7 +5527,7 @@ const SHORTCUTS: [string, string][] = [
   ["Enter", "Edit the text"],
   ["↑ ↓ ← →", "Jump between boxes"],
   ["⇧ ↑ ↓ ← →", "Nudge the selection"],
-  ["⌘ I", "Answer with AI"],
+  ["⌘ I", "Answer or condense with AI"],
   ["⌘ D", "Duplicate"],
   ["⌘ C  ⌘ V", "Copy, paste at the pointer"],
   ["⌘ Z", "Undo"],

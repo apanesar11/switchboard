@@ -407,7 +407,12 @@ function webFor(provider, s) {
 }
 
 /** What whoever answers is told about the web, matching the tools it was handed. */
-function webPrompt(on, provider) {
+function webPrompt(on, provider, operation) {
+  if (operation === 'condense') {
+    return 'Condense only the discussion supplied in this request. External web access is disabled. ' +
+      'Do not read workspace files, run commands, call tools, or research new facts. ' +
+      'The selected discussion is the entire evidence; preserve its uncertainty instead of investigating it.';
+  }
   if (!on) {
     return "You can't open web pages or search the web here. If the question depends on a page you can't see, " +
       "say so in the answer rather than guess what the page says.";
@@ -422,7 +427,7 @@ function webPrompt(on, provider) {
  * start(id, req, onStep) → { ok, text } — the answer's JSON, for the renderer to read
  * into boxes — or { ok:false, error, code }.
  *
- * req: { provider, dir, system, user, schema }. `dir` is the workspace folder, resolved
+ * req: { provider, dir, system, user, schema, operation? }. `dir` is the workspace folder, resolved
  * by index.js from the workspace id; a CLI runs there and nowhere else.
  */
 function start(id, req, onStep) {
@@ -430,6 +435,9 @@ function start(id, req, onStep) {
   if (!key) return Promise.resolve({ ok: false, error: 'the request came without an id' });
   if (runs.has(key)) return Promise.resolve({ ok: false, error: 'that answer is already being asked for' });
   const r = req && typeof req === 'object' ? req : {};
+  if (r.operation !== undefined && r.operation !== 'condense') {
+    return Promise.resolve({ ok: false, error: 'Unknown diagram AI operation' });
+  }
   if (typeof r.system !== 'string' || typeof r.user !== 'string' || !r.user.trim()) {
     return Promise.resolve({ ok: false, error: 'Write a question in the box first' });
   }
@@ -440,8 +448,8 @@ function start(id, req, onStep) {
   const s = settings();
   // Web access: the tools go to whoever answers here, so what it is told about the web
   // is added here too — the prompt and the tools never disagree.
-  const web = webFor(provider, s);
-  const ask = Object.assign({}, r, { system: r.system + '\n\n' + webPrompt(web, provider) });
+  const web = r.operation !== 'condense' && webFor(provider, s);
+  const ask = Object.assign({}, r, { system: r.system + '\n\n' + webPrompt(web, provider, r.operation) });
 
   let job;
   if (provider === 'claude-code') job = askClaudeCode(ask, s, web, step);
@@ -588,7 +596,7 @@ const SIGNED_OUT_RE = /(not logged in|please run \/login|log in|invalid api key|
  * since dontAsk still lets WebFetch open the documentation sites Claude Code trusts.
  */
 function claudeCodeArgs(r, s, web) {
-  const tools = web ? 'Read,Grep,Glob,WebFetch,WebSearch' : 'Read,Grep,Glob';
+  const tools = r.operation === 'condense' ? '' : (web ? 'Read,Grep,Glob,WebFetch,WebSearch' : 'Read,Grep,Glob');
   const args = [
     '-p',
     '--output-format', 'stream-json',
@@ -666,7 +674,7 @@ function codexArgs(r, web, dir, schemaFile, outFile) {
     '--json',
     '--sandbox', 'read-only',
     '--skip-git-repo-check',
-    '-c', web ? 'web_search="live"' : 'web_search="disabled"',
+    '-c', web && r.operation !== 'condense' ? 'web_search="live"' : 'web_search="disabled"',
     '--cd', dir,
     '--output-schema', schemaFile,
     '--output-last-message', outFile,
@@ -795,7 +803,7 @@ function claudeApiBody(r, s, web) {
     messages: [{ role: 'user', content: r.user }],
     output_config: { format: { type: 'json_schema', schema: r.schema } },
   };
-  if (web) body.tools = CLAUDE_WEB_TOOLS;
+  if (web && r.operation !== 'condense') body.tools = CLAUDE_WEB_TOOLS;
   return body;
 }
 
@@ -879,7 +887,7 @@ function openAiBody(r, s, web) {
     ],
     text: { format: { type: 'json_schema', name: 'flow_answer', strict: true, schema: r.schema } },
   };
-  if (web) {
+  if (web && r.operation !== 'condense') {
     body.tools = [{ type: 'web_search', search_context_size: 'low' }];
     body.max_tool_calls = 4;
   }

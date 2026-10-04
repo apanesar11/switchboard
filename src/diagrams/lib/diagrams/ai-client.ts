@@ -7,11 +7,19 @@
 //   useAnswerStatus()            who can answer on this Mac, and the settings
 //   updateAnswerSettings(patch)  change them (the menu; Settings uses the bridge too)
 //   requestFlowAnswer(…)         ask, with every step a CLI takes reported as it goes
+//   requestFlowCondense(…)       summarize a selection before the editor replaces it
 
 import { useSyncExternalStore } from "react"
 import { call, listen, type AnswerStatus, type AnswerStep, type ProviderId, type ProviderStatus } from "../bridge"
 import { parseFlowAiAnswer, type FlowAiPart } from "./ai"
-import { answerPrompt, FLOW_ANSWER_SCHEMA, type FlowQuestion } from "./answer"
+import {
+  answerPrompt,
+  condensePrompt,
+  parseFlowCondenseAnswer,
+  FLOW_ANSWER_SCHEMA,
+  type FlowCondenseRequest,
+  type FlowQuestion,
+} from "./answer"
 
 // ─── who can answer ───
 
@@ -97,6 +105,31 @@ export async function requestFlowAnswer(
   signal: AbortSignal,
   onStep: (step: AnswerStep) => void,
 ): Promise<{ parts: FlowAiPart[]; files: number | null }> {
+  const result = await requestAnswer(ask, answerPrompt(ask.question, ask.provider.kind), signal, onStep)
+  return {
+    parts: parseFlowAiAnswer(result.text, ask.question.split, ask.question.subtext !== false),
+    files: result.files,
+  }
+}
+
+/** Reject malformed output before the editor receives replacement boxes. */
+export async function requestFlowCondense(
+  ask: { provider: ProviderStatus; wsId: string; selection: FlowCondenseRequest },
+  signal: AbortSignal,
+  onStep: (step: AnswerStep) => void,
+): Promise<{ parts: FlowAiPart[]; files: number | null }> {
+  const result = await requestAnswer({ ...ask, operation: "condense" }, condensePrompt(ask.selection, ask.provider.kind), signal, onStep)
+  return { parts: parseFlowCondenseAnswer(result.text, ask.selection), files: result.files }
+}
+
+/** Both operations share request ids, provider errors, progress, and Stop cleanup. */
+async function requestAnswer(
+  ask: { provider: ProviderStatus; wsId: string; operation?: "condense" },
+  prompt: { system: string; user: string },
+  signal: AbortSignal,
+  onStep: (step: AnswerStep) => void,
+): Promise<{ text: string; files: number | null }> {
+  if (signal.aborted) throw new DOMException("Stopped", "AbortError")
   const id = newId()
   const off = listen("onAnswerStep", (from, step) => {
     if (from === id && !signal.aborted) onStep(step)
@@ -104,18 +137,17 @@ export async function requestFlowAnswer(
   const stop = () => void call("answerStop", id)
   signal.addEventListener("abort", stop, { once: true })
   try {
-    const { system, user } = answerPrompt(ask.question, ask.provider.kind)
     const result = await call("answerStart", id, {
       provider: ask.provider.id,
       wsId: ask.wsId,
-      system,
-      user,
+      ...(ask.operation ? { operation: ask.operation } : {}),
+      ...prompt,
       schema: FLOW_ANSWER_SCHEMA,
     })
     if (signal.aborted) throw new DOMException("Stopped", "AbortError")
     if (!result.ok) throw new AnswerError(result.error, "code" in result ? result.code : undefined)
     return {
-      parts: parseFlowAiAnswer(result.text, ask.question.split, ask.question.subtext !== false),
+      text: result.text,
       files: "files" in result && typeof result.files === "number" ? result.files : null,
     }
   } finally {
