@@ -416,7 +416,6 @@ SB.views = SB.views || {};
     pane.firstRow = -1;
     pane.lastRow = -1;
     D.clear(pane.content);
-    pane.content.appendChild(h('div.db-body-head', null, h('div', null, h('h2', null, 'Databases'), h('p', null, 'Browse the data behind this workspace.')), h('span.db-read-only', null, icon('lock'), 'Read only')));
     if (pane.error) pane.content.appendChild(h('div.db-notice.err', { role: 'alert' }, h('span', null, pane.error), btn('Try again', 'retry', 'small')));
     var connection = current(pane);
     if (!pane.listLoaded && pane.listLoading) {
