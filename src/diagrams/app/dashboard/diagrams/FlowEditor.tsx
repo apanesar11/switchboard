@@ -33,6 +33,10 @@
 // An arrow's toolbar collapses it: what it points at, and everything beyond,
 // folds away behind a "+N" on the box it leaves, and the tree closes up as if
 // that branch weren't there. Clicking the "+N" brings the branch back.
+// Switchboard: the image tool also offers Google Images (G), in a panel docked
+// on the canvas's right (ImageSearchPanel.tsx). A picture dragged out of it, or
+// right-clicked ▸ Add Image to Diagram, is fetched by main and goes on exactly
+// as a dropped file does.
 //
 // It edits the SAME spec every other part of the Diagrams feature reads.
 // layoutDiagram() turns the spec into the canvas, and flowSpecFromCanvas()
@@ -115,11 +119,13 @@ import {
   RiDeleteBinLine,
   RiErrorWarningLine,
   RiFileCopyLine,
+  RiFolderImageLine,
   RiHand,
   RiImageAddLine,
   RiItalic,
   RiKeyboardLine,
   RiLoader4Line,
+  RiSearchLine,
   RiShapesLine,
   RiSparkling2Fill,
   RiStickyNoteLine,
@@ -201,9 +207,12 @@ import {
   useAnswerStatus,
 } from "@/lib/diagrams/ai-client"
 import type { AnswerSettings, AnswerStatus, AnswerStep, ProviderId, ProviderStatus } from "@/lib/bridge"
-import { writeClipboard } from "@/lib/bridge"
+import { call, writeClipboard } from "@/lib/bridge"
+// Switchboard: Google Images beside the canvas, and pictures dragged out of it.
+import { imageUrlsFromDrop, isUrlDrag } from "@/lib/diagrams/image-search"
 import type { ProductId } from "@/lib/products"
 import { FIT_VIEW_OPTIONS } from "./DiagramCanvas"
+import { ImageSearchPanel, type ImageSearchAsk } from "./ImageSearchPanel"
 import {
   FlowBox,
   FLOW_TEXT_WRAP,
@@ -292,14 +301,18 @@ function notReady(provider: ProviderStatus): AnswerFailure | null {
   return { message: `There's no ${provider.name} key on this Mac yet`, code: "no-key" }
 }
 
-/** The single-letter keys for the tools, and "i" for an image. */
-const TOOL_KEYS: Record<string, Tool | "image"> = {
+/**
+ * The single-letter keys for the tools, and "i" for an image. Switchboard: "g"
+ * for Google Images.
+ */
+const TOOL_KEYS: Record<string, Tool | "image" | "images"> = {
   v: "select",
   h: "hand",
   r: "shape",
   s: "note",
   t: "text",
   i: "image",
+  g: "images",
 }
 
 // What a free text and a note show while they are empty and being typed in.
@@ -1052,6 +1065,11 @@ type Props = {
   onSave: (spec: FlowSpec) => Promise<string | null>
   /** False while a menu or dialog owns the keyboard. */
   keyboardEnabled: boolean
+  /**
+   * Switchboard: whether the Diagrams tab is on screen. The Google Images panel
+   * makes its page again as the tab comes back (ImageSearchPanel.tsx says why).
+   */
+  shown?: boolean
   /** Changes when the pane is resized from outside (full screen), to re-fit. */
   fitKey: string
   /** Whose blob folder a dropped or pasted image is uploaded into. Switchboard: the workspace. */
@@ -1086,6 +1104,7 @@ function FlowEditorCanvas({
   spec,
   onSave,
   keyboardEnabled,
+  shown = true,
   fitKey,
   productId,
   diagramName,
@@ -1161,6 +1180,17 @@ function FlowEditorCanvas({
     uploadsRef.current = controller
     return () => controller.abort()
   }, [])
+  // Switchboard: Google Images, in the panel beside the canvas — whether it is
+  // open, and what it was last asked to show. The image tool's menu (a file, or
+  // Google Images) is open while `imageMenu` is.
+  const [imagesOpen, setImagesOpen] = useState(false)
+  const [imagesAsk, setImagesAsk] = useState<ImageSearchAsk>({ query: null, serial: 0 })
+  const [imageMenu, setImageMenu] = useState(false)
+  // Switchboard: the soft ring round the canvas while a picture is dragged over
+  // it. Counted, because dragenter and dragleave fire for every element crossed
+  // inside the canvas, not only at its edge.
+  const [dropping, setDropping] = useState(false)
+  const dragDepthRef = useRef(0)
 
   const json = useMemo(() => canvasJson(meta, nodes, edges), [meta, nodes, edges])
   const dragging = nodes.some((node) => node.dragging)
@@ -1765,6 +1795,38 @@ function FlowEditorCanvas({
     }
   }
 
+  // Switchboard: a picture by its address — dragged out of the Google Images panel
+  // (or a browser), or picked there with Add Image to Diagram. A drag out of a web
+  // page never carries the file itself, so main fetches it (and converts what the
+  // canvas can't keep to PNG); then it goes on exactly as a dropped file does,
+  // through addImages: placed at `at` or the middle of the view, uploaded, its own
+  // undo step. The fetch counts as uploading too, so the spinner shows from the drop.
+  // `urls` best first: one of Google's results is its full picture, then the
+  // thumbnail for when that picture's host won't give it up.
+  async function addImageFromUrl(urls: readonly string[], at?: { x: number; y: number }, referrer?: string) {
+    const tries = urls.filter((url) => url !== "")
+    if (tries.length === 0) return
+    setUploading((count) => count + 1)
+    let fetched = await call("diagramsFetchImage", tries[0], referrer)
+    for (const url of tries.slice(1)) {
+      if (fetched.ok) break
+      const next = await call("diagramsFetchImage", url, referrer)
+      // The first refusal is the one to tell: it was the picture asked for.
+      if (next.ok) fetched = next
+    }
+    setUploading((count) => count - 1)
+    if (!fetched.ok) {
+      toast({ title: "Couldn't add that image", description: fetched.error, variant: "error" })
+      return
+    }
+    // Named for its type, whatever the address ended in, so the label addImages
+    // takes from the name (it drops the extension) is main's name, whole.
+    const ext = fetched.type === "image/jpeg" ? "jpg" : fetched.type === "image/webp" ? "webp" : "png"
+    const base = fetched.name.replace(/\.(?:png|jpe?g|webp|gif|avif|heic|heif|bmp|tiff?)$/i, "") || "Image"
+    const file = new File([fetched.bytes as BlobPart], `${base}.${ext}`, { type: fetched.type })
+    await addImages([file], at)
+  }
+
   function placeAtCentre() {
     const centre = viewCentre()
     if (!centre || !placing) return
@@ -1782,8 +1844,34 @@ function FlowEditorCanvas({
   }
 
   function pickImages() {
+    setImageMenu(false)
     fileInputRef.current?.click()
   }
+
+  // Switchboard: G, or the image tool's Search Google Images. With one box
+  // selected, its label is searched for (its words, not its second line); with
+  // anything else, the panel shows the page it showed last, or Google Images'
+  // own first page. Again while open, it searches again, or takes you to its field.
+  function openImages() {
+    setImageMenu(false)
+    const chosen = nodesRef.current.filter((node) => node.selected)
+    const box = chosen.length === 1 ? (chosen[0].data as FlowBoxNodeData) : null
+    const words = box && hasText(box) ? box.label.replace(/\s+/g, " ").trim() : ""
+    setImagesAsk((last) => ({ query: words || null, serial: last.serial + 1 }))
+    setImagesOpen(true)
+  }
+
+  // Switchboard: the canvas narrows as the panel opens, and the box being searched
+  // for stays in view rather than ending up past the canvas's new right edge.
+  useEffect(() => {
+    if (!imagesOpen) return
+    const frame = requestAnimationFrame(() => {
+      const chosen = nodesRef.current.filter((node) => node.selected)
+      if (chosen.length === 1) reveal(rectOf(chosen[0]))
+    })
+    return () => cancelAnimationFrame(frame)
+    // Only as it opens — not each time the box moves while it is open.
+  }, [imagesOpen])
 
   // ─── tools ───
 
@@ -1796,7 +1884,16 @@ function FlowEditorCanvas({
       setNodes(deselected)
       setEdges(deselected)
     }
+    // Switchboard: a tool picked, by key or on the rail, puts the image menu away.
+    setImageMenu(false)
     setTool(next)
+  }
+
+  // Switchboard: the image tool's menu. Opening it puts the shape tool away too,
+  // so the shape menu and this one never stand side by side.
+  function showImageMenu(open: boolean) {
+    if (open && tool === "shape") setTool("select")
+    setImageMenu(open)
   }
 
   // A click on empty canvas with a placing tool out puts the thing there, and
@@ -2512,12 +2609,45 @@ function FlowEditorCanvas({
   }), [askings, nodes, edges, fold])
 
   // What the canvas accepts dropped on it: a box, note or text dragged off
-  // the toolbar, or picture files from the desktop.
+  // the toolbar, or picture files from the desktop. Switchboard: or a picture's
+  // address, dragged out of the Google Images panel or a browser — which a box's
+  // own text field keeps for itself, as words.
   function onDragOver(event: React.DragEvent) {
     const types = event.dataTransfer.types
-    if (!types.includes(DRAG_MIME) && !types.includes("Files")) return
+    if (!types.includes(DRAG_MIME) && !types.includes("Files") && !isAddressDrag(event)) return
     event.preventDefault()
     event.dataTransfer.dropEffect = "copy"
+  }
+
+  /**
+   * Switchboard: a drag that may be a picture's address, over the canvas proper.
+   * "Files" beside it doesn't rule it out — a page's drag may list one it never
+   * hands over — so a drop takes the files when there are any, and else this.
+   */
+  function isAddressDrag(event: React.DragEvent): boolean {
+    const types = event.dataTransfer.types
+    return !types.includes(DRAG_MIME) && isUrlDrag(types) && !isTextField(event.target)
+  }
+
+  // Switchboard: the ring shows for a picture — files, or an address — and not
+  // for a box dragged off the toolbar, which is already part of the canvas.
+  function onDragEnter(event: React.DragEvent) {
+    const types = event.dataTransfer.types
+    if (types.includes(DRAG_MIME) || !(types.includes("Files") || isUrlDrag(types))) return
+    dragDepthRef.current += 1
+    setDropping(true)
+  }
+
+  function onDragLeave() {
+    if (dragDepthRef.current === 0) return
+    dragDepthRef.current -= 1
+    if (dragDepthRef.current === 0) setDropping(false)
+  }
+
+  // On the wrapper, for a drop anywhere in the canvas, and for a drag given up.
+  function endDrag() {
+    dragDepthRef.current = 0
+    setDropping(false)
   }
 
   function onDrop(event: React.DragEvent) {
@@ -2526,6 +2656,25 @@ function FlowEditorCanvas({
     if (files.length > 0) {
       event.preventDefault()
       void addImages(files, at)
+      return
+    }
+    if (isAddressDrag(event)) {
+      // Switchboard: ALWAYS taken, picture or not. Let through, the window would
+      // navigate to the address — which main would open in the browser instead.
+      event.preventDefault()
+      const urls = imageUrlsFromDrop({
+        uriList: event.dataTransfer.getData("text/uri-list"),
+        html: event.dataTransfer.getData("text/html"),
+        plain: event.dataTransfer.getData("text/plain"),
+      })
+      if (urls.length > 0) void addImageFromUrl(urls, at)
+      else {
+        toast({
+          title: "Couldn't add that image",
+          description: "There's no picture in what was dropped",
+          variant: "error",
+        })
+      }
       return
     }
     const dropped = event.dataTransfer.getData(DRAG_MIME)
@@ -2701,6 +2850,8 @@ function FlowEditorCanvas({
         const next = TOOL_KEYS[key]
         if (next === undefined) return false
         if (next === "image") pickImages()
+        // Switchboard: G opens Google Images.
+        else if (next === "images") openImages()
         else chooseTool(next)
         return true
       },
@@ -2922,327 +3073,360 @@ function FlowEditorCanvas({
 
   return (
     <EditorContext.Provider value={context}>
-      <div
-        ref={wrapperRef}
-        className={cx(
-          "relative size-full bg-gray-50 dark:bg-gray-900",
-          FLOW_EDGE_THEME,
-          // A placing tool aims rather than points.
-          placing && "[&_.react-flow__pane]:!cursor-crosshair",
-        )}
-        onDoubleClick={onCanvasDoubleClick}
-        onPointerMove={(event) => {
-          pointerRef.current = { x: event.clientX, y: event.clientY }
-        }}
-      >
-        {nodes.length === 0 && uploading === 0 ? (
-          // Under the canvas (which is transparent) rather than over it, so the
-          // toolbar's menus open on top of it — and transparent to the pointer
-          // either way.
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
-            <p className="max-w-xs rounded-lg border border-dashed border-gray-300 bg-white/80 px-5 py-4 text-center text-sm text-gray-500 dark:border-gray-700 dark:bg-gray-950/80 dark:text-gray-400">
-              Pick a shape, a sticky note or text from the toolbar and click
-              the canvas to place it, or drop an image here — then press Tab
-              to add the next box.
-            </p>
-          </div>
-        ) : null}
-        <ReactFlow
-          nodes={shownNodes}
-          edges={shownEdges}
-          nodeTypes={EDITOR_NODE_TYPES}
-          edgeTypes={EDITOR_EDGE_TYPES}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onConnect={onConnect}
-          onReconnect={onReconnect}
-          onNodeDragStart={() => record()}
-          onBeforeDelete={async ({ nodes: going, edges: goingEdges }) => {
-            record()
-            closeUp(going, goingEdges)
-            // Switchboard: a box takes the branch folded away behind it with it,
-            // rather than leaving it to reappear somewhere with nothing pointing
-            // at it.
-            const behind = foldedBehind(going)
-            if (behind.length === 0) return true
-            const ids = new Set(behind.map((node) => node.id))
-            const cutting = new Set(goingEdges.map((edge) => edge.id))
-            return {
-              nodes: [...going, ...behind],
-              edges: [
-                ...goingEdges,
-                ...edgesRef.current.filter(
-                  (edge) => !cutting.has(edge.id) && (ids.has(edge.source) || ids.has(edge.target)),
-                ),
-              ],
-            }
+      {/* Switchboard: a row — the canvas, and Google Images docked on its right
+          while open, so the canvas narrows beside the panel rather than hiding
+          under it. Everything measured from wrapperRef is the canvas alone. In a
+          narrow window the panel gives way first: the canvas keeps 360px, room
+          for the rail and the menus beside it, which it clips. */}
+      <div className="flex size-full">
+        <div
+          ref={wrapperRef}
+          className={cx(
+            "relative h-full flex-1 bg-gray-50 dark:bg-gray-900",
+            imagesOpen ? "min-w-[360px]" : "min-w-0",
+            FLOW_EDGE_THEME,
+            // A placing tool aims rather than points.
+            placing && "[&_.react-flow__pane]:!cursor-crosshair",
+          )}
+          onDoubleClick={onCanvasDoubleClick}
+          onPointerMove={(event) => {
+            pointerRef.current = { x: event.clientX, y: event.clientY }
           }}
-          onNodeDoubleClick={(_, node) => {
-            if (tool !== "hand" && hasText(node.data as FlowBoxNodeData)) changeEditing(node.id)
-          }}
-          onPaneClick={onPaneClick}
-          onEdgeDoubleClick={() => {
-            if (tool !== "hand") focusEdgeLabel()
-          }}
-          isValidConnection={(connection) => connection.source !== connection.target}
-          connectionMode={ConnectionMode.Loose}
-          connectionLineType={ConnectionLineType.SmoothStep}
-          // Dropping an arrow anywhere near a dot counts — hitting an 11px
-          // target at the end of a long drag is fiddly.
-          connectionRadius={36}
-          snapToGrid
-          snapGrid={SNAP_GRID}
-          // Only a diagram that opens with something on it is framed. React
-          // Flow holds the first fit until there are boxes to fit, so on an
-          // empty one it would land on the first thing placed — and move the
-          // view out from under the click that placed it.
-          fitView={initial.nodes.length > 0}
-          fitViewOptions={FIT_VIEW_OPTIONS}
-          minZoom={FIT_VIEW_OPTIONS.minZoom}
-          maxZoom={2.5}
-          // Off while a menu or dialog has the keyboard: React Flow listens on
-          // the whole document, and Backspace on a menu item would otherwise
-          // delete the boxes selected behind it.
-          deleteKeyCode={keyboardEnabled ? DELETE_KEYS : null}
-          // React Flow's own keys on a focused box — arrows nudging it,
-          // Enter and Escape selecting it — are the editor's to handle.
-          disableKeyboardA11y
-          // Select drags out a selection box; the hand drags the view, and
-          // leaves the boxes alone.
-          selectionOnDrag={tool === "select"}
-          // Switchboard: every box the selection box touches, not only the
-          // ones wholly inside it.
-          selectionMode={SelectionMode.Partial}
-          panOnDrag={tool === "hand" ? true : PAN_BUTTONS}
-          nodesDraggable={tool !== "hand"}
-          nodesConnectable={tool !== "hand"}
-          edgesReconnectable={tool !== "hand"}
-          elementsSelectable={tool !== "hand"}
-          panOnScroll
-          zoomOnDoubleClick={false}
-          onDragOver={onDragOver}
-          onDrop={onDrop}
-          attributionPosition="bottom-left"
-          aria-label="Flow diagram editor"
+          onDragEnter={onDragEnter}
+          onDragLeave={onDragLeave}
+          onDragEnd={endDrag}
+          onDropCapture={endDrag}
         >
-          <Background
-            variant={BackgroundVariant.Dots}
-            gap={20}
-            size={1}
-            className="text-gray-300 dark:text-gray-700"
-            color="currentColor"
-          />
-          {/* Bottom right, clear of the toolbar down the left on a short canvas. */}
-          <Controls showInteractive={false} position="bottom-right" />
-
-          <Panel position="center-left" className="!my-0 !ml-4">
-            <ToolRail
-              tool={tool}
-              shape={shapeChoice}
-              uploading={uploading > 0}
-              onTool={chooseTool}
-              onShape={(shape) => {
-                setShapeChoice(shape)
-                setTool("shape")
-              }}
-              onImage={pickImages}
-            />
-          </Panel>
-
-          <FloatingBar nodes={barNodes} hidden={dragging || tool === "hand"}>
-            {editingNode ? (
-              <TextBar
-                box={editingNode.data as FlowBoxNodeData}
-                onChange={(patch) => updateNode(editingNode.id, patch)}
-                onToggleDetail={() =>
-                  toggleDetail(editingNode.id, editingNode.data as FlowBoxNodeData)
-                }
-                onDone={() => changeEditing(null)}
-              />
-            ) : (
-              <BoxBar
-                boxes={selectedNodes.map((node) => node.data as FlowBoxNodeData)}
-                count={selectedNodes.length + selectedEdges.length}
-                onChange={(patch) =>
-                  updateNodes(
-                    selectedNodes.map((node) => node.id),
-                    patch,
-                  )
-                }
-                onEditText={
-                  soleNode && hasText(soleNode.data as FlowBoxNodeData)
-                    ? () => changeEditing(soleNode.id)
-                    : undefined
-                }
-                onDuplicate={soleNode ? () => duplicate(soleNode) : undefined}
-                onDelete={deleteSelection}
-                ai={
-                  soleNode && hasText(soleNode.data as FlowBoxNodeData)
-                    ? {
-                        state: answeringIds.has(soleNode.id) ? "answering" : "idle",
-                        hasQuestion: (soleNode.data as FlowBoxNodeData).label.trim().length > 0,
-                        status: answerStatus,
-                        workspaceName,
-                        onSettings: (patch) => void updateAnswerSettings(patch),
-                        onOpenSettings,
-                        onAnswer: () => void ask(soleNode),
-                        onStop: () => stopAsking(soleNode.id),
-                      }
-                    : undefined
-                }
-              />
-            )}
-          </FloatingBar>
-
-          {ghosts.map((ghost) => (
-            <ViewportPortal key={ghost.serial}>
-              <svg
-                aria-hidden="true"
-                className="pointer-events-none absolute left-0 top-0 overflow-visible"
-                width={1}
-                height={1}
-              >
-                <path
-                  d={ghost.path}
-                  fill="none"
-                  strokeWidth={1.5}
-                  strokeDasharray="5 4"
-                  className="stroke-violet-400"
-                />
-              </svg>
-              <div
-                aria-hidden="true"
-                className="pointer-events-none absolute left-0 top-0 flex flex-col justify-center gap-2 rounded-lg border-[1.5px] border-dashed border-violet-400 bg-white/75 px-4 dark:bg-gray-950/70"
-                style={{
-                  transform: `translate(${ghost.rect.x}px, ${ghost.rect.y}px)`,
-                  width: ghost.rect.width,
-                  height: ghost.rect.height,
-                }}
-              >
-                <span className="h-2 w-4/5 animate-pulse rounded bg-violet-200 dark:bg-violet-900/70" />
-                <span className="h-2 w-3/5 animate-pulse rounded bg-violet-100 dark:bg-violet-900/50" />
-              </div>
-            </ViewportPortal>
-          ))}
-
-          <Panel position="bottom-center">
-            {/* Switchboard: while a CLI reads the workspace, what it is doing — over the
-                strip, so a minute-long wait never looks stuck. */}
-            {followed !== null ? (
-              <AnswerActivity
-                key={followed.serial}
-                asking={followed}
-                steps={steps[followed.serial] ?? []}
-                others={askings.length - 1}
-                workspaceName={workspaceName}
-              />
-            ) : null}
-            <div className="mx-auto flex w-fit items-center gap-1 rounded-md border border-gray-200 bg-white/95 p-1 text-xs shadow-sm backdrop-blur-sm dark:border-gray-800 dark:bg-gray-950/95">
-              <ToolButton label="Undo · ⌘Z" disabled={past.length === 0} onClick={undo}>
-                <RiArrowGoBackLine className="size-4" aria-hidden="true" />
-              </ToolButton>
-              <ToolButton label="Redo · ⇧⌘Z" disabled={future.length === 0} onClick={redo}>
-                <RiArrowGoForwardLine className="size-4" aria-hidden="true" />
-              </ToolButton>
-              <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-800" aria-hidden="true" />
-              {/* Always on the page, so a screen reader hears it change — one
-                  added already holding its words often isn't announced. */}
-              <span className="sr-only" role="status">
-                {askings.length === 1
-                  ? `Answering with ${askings[0].name}`
-                  : askings.length > 1
-                    ? `Answering ${askings.length} boxes`
-                  : failure !== null
-                    ? failure.message
-                    : answered !== null
-                      ? answered === 1
-                        ? "Answer added"
-                        : `${answered} answers added`
-                      : ""}
-              </span>
-              {/* Switchboard: what is on its way and how the last one went, side by
-                  side — with several answers at once, one can land or fail while
-                  the others are still coming. */}
-              {askings.length > 0 ? (
-                <>
-                  <AskingStatus
-                    key={askings.length === 1 ? askings[0].serial : "several"}
-                    askings={askings}
-                    onStop={() => stopAsking()}
-                  />
-                  <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-800" aria-hidden="true" />
-                </>
-              ) : null}
-              {failure !== null ? (
-                <>
-                  <AnswerFailureLine
-                    failure={failure}
-                    onOpenSettings={onOpenSettings}
-                    onOpenTerminal={onOpenTerminal}
-                    onDismiss={() => setFailure(null)}
-                  />
-                  <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-800" aria-hidden="true" />
-                </>
-              ) : answered !== null ? (
-                <>
-                  <span className="flex items-center gap-1.5 px-1 text-violet-700 dark:text-violet-300">
-                    <RiSparkling2Fill className="size-3.5 text-violet-500" aria-hidden="true" />
-                    {answered === 1 ? "Answer added" : `${answered} answers added`}
-                    {answerNote ? (
-                      <span className="text-violet-600/80 dark:text-violet-300/80">
-                        {" · "}
-                        {answerNote.files !== null
-                          ? `${answerNote.by} read ${answerNote.files === 1 ? "1 file" : `${answerNote.files} files`} in ${answerNote.seconds}s`
-                          : `${answerNote.by}, ${answerNote.seconds}s`}
-                      </span>
-                    ) : null}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAnswered(null)
-                        undo()
-                      }}
-                      className={cx(
-                        "rounded px-1 font-medium text-gray-900 underline underline-offset-2 dark:text-gray-50",
-                        focusRing,
-                      )}
-                    >
-                      Undo
-                    </button>
-                  </span>
-                  <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-800" aria-hidden="true" />
-                </>
-              ) : null}
-              {uploading > 0 ? (
-                <span className="flex items-center gap-1.5 pr-1.5 text-gray-500 dark:text-gray-400" role="status">
-                  <RiLoader4Line className="size-3.5 animate-spin" aria-hidden="true" />
-                  Uploading {uploading === 1 ? "image" : `${uploading} images`}…
-                </span>
-              ) : null}
-              <SaveStatus
-                saving={saving}
-                dirty={json !== savedJson}
-                error={saveError}
-                onRetry={() => void flush()}
-              />
+          {nodes.length === 0 && uploading === 0 ? (
+            // Under the canvas (which is transparent) rather than over it, so the
+            // toolbar's menus open on top of it — and transparent to the pointer
+            // either way.
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
+              <p className="max-w-xs rounded-lg border border-dashed border-gray-300 bg-white/80 px-5 py-4 text-center text-sm text-gray-500 dark:border-gray-700 dark:bg-gray-950/80 dark:text-gray-400">
+                Pick a shape, a sticky note or text from the toolbar and click
+                the canvas to place it, or drop an image here — then press Tab
+                to add the next box.
+              </p>
             </div>
-          </Panel>
-        </ReactFlow>
+          ) : null}
+          <ReactFlow
+            nodes={shownNodes}
+            edges={shownEdges}
+            nodeTypes={EDITOR_NODE_TYPES}
+            edgeTypes={EDITOR_EDGE_TYPES}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            onReconnect={onReconnect}
+            onNodeDragStart={() => record()}
+            onBeforeDelete={async ({ nodes: going, edges: goingEdges }) => {
+              record()
+              closeUp(going, goingEdges)
+              // Switchboard: a box takes the branch folded away behind it with it,
+              // rather than leaving it to reappear somewhere with nothing pointing
+              // at it.
+              const behind = foldedBehind(going)
+              if (behind.length === 0) return true
+              const ids = new Set(behind.map((node) => node.id))
+              const cutting = new Set(goingEdges.map((edge) => edge.id))
+              return {
+                nodes: [...going, ...behind],
+                edges: [
+                  ...goingEdges,
+                  ...edgesRef.current.filter(
+                    (edge) => !cutting.has(edge.id) && (ids.has(edge.source) || ids.has(edge.target)),
+                  ),
+                ],
+              }
+            }}
+            onNodeDoubleClick={(_, node) => {
+              if (tool !== "hand" && hasText(node.data as FlowBoxNodeData)) changeEditing(node.id)
+            }}
+            onPaneClick={onPaneClick}
+            onEdgeDoubleClick={() => {
+              if (tool !== "hand") focusEdgeLabel()
+            }}
+            isValidConnection={(connection) => connection.source !== connection.target}
+            connectionMode={ConnectionMode.Loose}
+            connectionLineType={ConnectionLineType.SmoothStep}
+            // Dropping an arrow anywhere near a dot counts — hitting an 11px
+            // target at the end of a long drag is fiddly.
+            connectionRadius={36}
+            snapToGrid
+            snapGrid={SNAP_GRID}
+            // Only a diagram that opens with something on it is framed. React
+            // Flow holds the first fit until there are boxes to fit, so on an
+            // empty one it would land on the first thing placed — and move the
+            // view out from under the click that placed it.
+            fitView={initial.nodes.length > 0}
+            fitViewOptions={FIT_VIEW_OPTIONS}
+            minZoom={FIT_VIEW_OPTIONS.minZoom}
+            maxZoom={2.5}
+            // Off while a menu or dialog has the keyboard: React Flow listens on
+            // the whole document, and Backspace on a menu item would otherwise
+            // delete the boxes selected behind it.
+            deleteKeyCode={keyboardEnabled ? DELETE_KEYS : null}
+            // React Flow's own keys on a focused box — arrows nudging it,
+            // Enter and Escape selecting it — are the editor's to handle.
+            disableKeyboardA11y
+            // Select drags out a selection box; the hand drags the view, and
+            // leaves the boxes alone.
+            selectionOnDrag={tool === "select"}
+            // Switchboard: every box the selection box touches, not only the
+            // ones wholly inside it.
+            selectionMode={SelectionMode.Partial}
+            panOnDrag={tool === "hand" ? true : PAN_BUTTONS}
+            nodesDraggable={tool !== "hand"}
+            nodesConnectable={tool !== "hand"}
+            edgesReconnectable={tool !== "hand"}
+            elementsSelectable={tool !== "hand"}
+            panOnScroll
+            zoomOnDoubleClick={false}
+            onDragOver={onDragOver}
+            onDrop={onDrop}
+            attributionPosition="bottom-left"
+            aria-label="Flow diagram editor"
+          >
+            <Background
+              variant={BackgroundVariant.Dots}
+              gap={20}
+              size={1}
+              className="text-gray-300 dark:text-gray-700"
+              color="currentColor"
+            />
+            {/* Bottom right, clear of the toolbar down the left on a short canvas. */}
+            <Controls showInteractive={false} position="bottom-right" />
+
+            <Panel position="center-left" className="!my-0 !ml-4">
+              <ToolRail
+                tool={tool}
+                shape={shapeChoice}
+                uploading={uploading > 0}
+                onTool={chooseTool}
+                onShape={(shape) => {
+                  setShapeChoice(shape)
+                  setTool("shape")
+                }}
+                imageMenu={imageMenu}
+                onImageMenu={showImageMenu}
+                onImageFile={pickImages}
+                onImageSearch={openImages}
+              />
+            </Panel>
+
+            <FloatingBar nodes={barNodes} hidden={dragging || tool === "hand"}>
+              {editingNode ? (
+                <TextBar
+                  box={editingNode.data as FlowBoxNodeData}
+                  onChange={(patch) => updateNode(editingNode.id, patch)}
+                  onToggleDetail={() =>
+                    toggleDetail(editingNode.id, editingNode.data as FlowBoxNodeData)
+                  }
+                  onDone={() => changeEditing(null)}
+                />
+              ) : (
+                <BoxBar
+                  boxes={selectedNodes.map((node) => node.data as FlowBoxNodeData)}
+                  count={selectedNodes.length + selectedEdges.length}
+                  onChange={(patch) =>
+                    updateNodes(
+                      selectedNodes.map((node) => node.id),
+                      patch,
+                    )
+                  }
+                  onEditText={
+                    soleNode && hasText(soleNode.data as FlowBoxNodeData)
+                      ? () => changeEditing(soleNode.id)
+                      : undefined
+                  }
+                  onDuplicate={soleNode ? () => duplicate(soleNode) : undefined}
+                  onDelete={deleteSelection}
+                  ai={
+                    soleNode && hasText(soleNode.data as FlowBoxNodeData)
+                      ? {
+                          state: answeringIds.has(soleNode.id) ? "answering" : "idle",
+                          hasQuestion: (soleNode.data as FlowBoxNodeData).label.trim().length > 0,
+                          status: answerStatus,
+                          workspaceName,
+                          onSettings: (patch) => void updateAnswerSettings(patch),
+                          onOpenSettings,
+                          onAnswer: () => void ask(soleNode),
+                          onStop: () => stopAsking(soleNode.id),
+                        }
+                      : undefined
+                  }
+                />
+              )}
+            </FloatingBar>
+
+            {ghosts.map((ghost) => (
+              <ViewportPortal key={ghost.serial}>
+                <svg
+                  aria-hidden="true"
+                  className="pointer-events-none absolute left-0 top-0 overflow-visible"
+                  width={1}
+                  height={1}
+                >
+                  <path
+                    d={ghost.path}
+                    fill="none"
+                    strokeWidth={1.5}
+                    strokeDasharray="5 4"
+                    className="stroke-violet-400"
+                  />
+                </svg>
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute left-0 top-0 flex flex-col justify-center gap-2 rounded-lg border-[1.5px] border-dashed border-violet-400 bg-white/75 px-4 dark:bg-gray-950/70"
+                  style={{
+                    transform: `translate(${ghost.rect.x}px, ${ghost.rect.y}px)`,
+                    width: ghost.rect.width,
+                    height: ghost.rect.height,
+                  }}
+                >
+                  <span className="h-2 w-4/5 animate-pulse rounded bg-violet-200 dark:bg-violet-900/70" />
+                  <span className="h-2 w-3/5 animate-pulse rounded bg-violet-100 dark:bg-violet-900/50" />
+                </div>
+              </ViewportPortal>
+            ))}
+
+            <Panel position="bottom-center">
+              {/* Switchboard: while a CLI reads the workspace, what it is doing — over the
+                  strip, so a minute-long wait never looks stuck. */}
+              {followed !== null ? (
+                <AnswerActivity
+                  key={followed.serial}
+                  asking={followed}
+                  steps={steps[followed.serial] ?? []}
+                  others={askings.length - 1}
+                  workspaceName={workspaceName}
+                />
+              ) : null}
+              <div className="mx-auto flex w-fit items-center gap-1 rounded-md border border-gray-200 bg-white/95 p-1 text-xs shadow-sm backdrop-blur-sm dark:border-gray-800 dark:bg-gray-950/95">
+                <ToolButton label="Undo · ⌘Z" disabled={past.length === 0} onClick={undo}>
+                  <RiArrowGoBackLine className="size-4" aria-hidden="true" />
+                </ToolButton>
+                <ToolButton label="Redo · ⇧⌘Z" disabled={future.length === 0} onClick={redo}>
+                  <RiArrowGoForwardLine className="size-4" aria-hidden="true" />
+                </ToolButton>
+                <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-800" aria-hidden="true" />
+                {/* Always on the page, so a screen reader hears it change — one
+                    added already holding its words often isn't announced. */}
+                <span className="sr-only" role="status">
+                  {askings.length === 1
+                    ? `Answering with ${askings[0].name}`
+                    : askings.length > 1
+                      ? `Answering ${askings.length} boxes`
+                    : failure !== null
+                      ? failure.message
+                      : answered !== null
+                        ? answered === 1
+                          ? "Answer added"
+                          : `${answered} answers added`
+                        : ""}
+                </span>
+                {/* Switchboard: what is on its way and how the last one went, side by
+                    side — with several answers at once, one can land or fail while
+                    the others are still coming. */}
+                {askings.length > 0 ? (
+                  <>
+                    <AskingStatus
+                      key={askings.length === 1 ? askings[0].serial : "several"}
+                      askings={askings}
+                      onStop={() => stopAsking()}
+                    />
+                    <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-800" aria-hidden="true" />
+                  </>
+                ) : null}
+                {failure !== null ? (
+                  <>
+                    <AnswerFailureLine
+                      failure={failure}
+                      onOpenSettings={onOpenSettings}
+                      onOpenTerminal={onOpenTerminal}
+                      onDismiss={() => setFailure(null)}
+                    />
+                    <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-800" aria-hidden="true" />
+                  </>
+                ) : answered !== null ? (
+                  <>
+                    <span className="flex items-center gap-1.5 px-1 text-violet-700 dark:text-violet-300">
+                      <RiSparkling2Fill className="size-3.5 text-violet-500" aria-hidden="true" />
+                      {answered === 1 ? "Answer added" : `${answered} answers added`}
+                      {answerNote ? (
+                        <span className="text-violet-600/80 dark:text-violet-300/80">
+                          {" · "}
+                          {answerNote.files !== null
+                            ? `${answerNote.by} read ${answerNote.files === 1 ? "1 file" : `${answerNote.files} files`} in ${answerNote.seconds}s`
+                            : `${answerNote.by}, ${answerNote.seconds}s`}
+                        </span>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAnswered(null)
+                          undo()
+                        }}
+                        className={cx(
+                          "rounded px-1 font-medium text-gray-900 underline underline-offset-2 dark:text-gray-50",
+                          focusRing,
+                        )}
+                      >
+                        Undo
+                      </button>
+                    </span>
+                    <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-800" aria-hidden="true" />
+                  </>
+                ) : null}
+                {uploading > 0 ? (
+                  <span className="flex items-center gap-1.5 pr-1.5 text-gray-500 dark:text-gray-400" role="status">
+                    <RiLoader4Line className="size-3.5 animate-spin" aria-hidden="true" />
+                    Uploading {uploading === 1 ? "image" : `${uploading} images`}…
+                  </span>
+                ) : null}
+                <SaveStatus
+                  saving={saving}
+                  dirty={json !== savedJson}
+                  error={saveError}
+                  onRetry={() => void flush()}
+                />
+              </div>
+            </Panel>
+          </ReactFlow>
 
 
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/png,image/jpeg,image/webp"
-          multiple
-          hidden
-          onChange={(event) => {
-            const files = [...(event.target.files ?? [])]
-            // Cleared, so picking the same file again still fires a change.
-            event.target.value = ""
-            if (files.length > 0) void addImages(files)
-          }}
-        />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            multiple
+            hidden
+            onChange={(event) => {
+              const files = [...(event.target.files ?? [])]
+              // Cleared, so picking the same file again still fires a change.
+              event.target.value = ""
+              if (files.length > 0) void addImages(files)
+            }}
+          />
+
+          {dropping ? (
+            // Switchboard: over everything, and transparent to the pointer — a ring,
+            // not a drop target of its own.
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 z-10"
+              style={{ boxShadow: "inset 0 0 0 2px rgba(59,130,246,.35)" }}
+            />
+          ) : null}
+        </div>
+        {imagesOpen ? (
+          <ImageSearchPanel
+            ask={imagesAsk}
+            shown={shown}
+            onClose={() => setImagesOpen(false)}
+            onAddImage={(urls, referrer) => void addImageFromUrl(urls, undefined, referrer)}
+          />
+        ) : null}
       </div>
     </EditorContext.Provider>
   )
@@ -4509,14 +4693,23 @@ function ToolRail({
   uploading,
   onTool,
   onShape,
-  onImage,
+  imageMenu,
+  onImageMenu,
+  onImageFile,
+  onImageSearch,
 }: {
   tool: Tool
   shape: FlowBoxShape
   uploading: boolean
   onTool: (tool: Tool) => void
   onShape: (shape: FlowBoxShape) => void
-  onImage: () => void
+  // Switchboard: the image tool is a menu — a file, or Google Images — where the
+  // admin's opens the file picker straight away. Its open state is the editor's,
+  // so the I and G keys, and every other tool, close it too.
+  imageMenu: boolean
+  onImageMenu: (open: boolean) => void
+  onImageFile: () => void
+  onImageSearch: () => void
 }) {
   // The shape menu is open while the shape tool is out, so the box it will
   // place can be swapped before clicking the canvas.
@@ -4590,13 +4783,30 @@ function ToolRail({
       <RailButton label="Text" shortcut="T" active={tool === "text"} onClick={() => onTool(tool === "text" ? "select" : "text")} drag="text">
         <RiText className="size-4" aria-hidden="true" />
       </RailButton>
-      <RailButton label={uploading ? "Uploading…" : "Image"} shortcut="I" onClick={onImage}>
-        {uploading ? (
-          <RiLoader4Line className="size-4 animate-spin" aria-hidden="true" />
-        ) : (
-          <RiImageAddLine className="size-4" aria-hidden="true" />
-        )}
-      </RailButton>
+      <div className="relative">
+        <RailButton
+          label={uploading ? "Uploading…" : "Image"}
+          shortcut="I"
+          active={imageMenu}
+          expanded={imageMenu}
+          onClick={() => onImageMenu(!imageMenu)}
+          // Its menu sits where the tip would.
+          tip={!imageMenu}
+        >
+          {uploading ? (
+            <RiLoader4Line className="size-4 animate-spin" aria-hidden="true" />
+          ) : (
+            <RiImageAddLine className="size-4" aria-hidden="true" />
+          )}
+        </RailButton>
+        {imageMenu ? (
+          <ImageMenu
+            onFile={onImageFile}
+            onSearch={onImageSearch}
+            onClose={() => onImageMenu(false)}
+          />
+        ) : null}
+      </div>
 
       <RailDivider />
 
@@ -4619,12 +4829,107 @@ function RailDivider() {
   return <span className="my-0.5 h-px w-5 bg-white/15" aria-hidden="true" />
 }
 
+// Switchboard: the image tool's menu, laid out as the shape menu is, to the
+// tool's right. Closes on a pick, a click anywhere else, or Escape (which then
+// goes no further — not out of full screen, not out of the selection). Two
+// buttons the tool shows and hides, as the shape menu's are — not an ARIA menu,
+// whose arrow keys would be the canvas's. Tab reaches them from the tool.
+function ImageMenu({
+  onFile,
+  onSearch,
+  onClose,
+}: {
+  onFile: () => void
+  onSearch: () => void
+  onClose: () => void
+}) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  // A pick or Escape made from these buttons hands the keyboard back to the
+  // tool, rather than dropping it as they go.
+  function done(then: () => void) {
+    if (ref.current?.contains(document.activeElement)) {
+      ref.current.parentElement?.querySelector("button")?.focus()
+    }
+    then()
+  }
+  useEffect(() => {
+    function onPointerDown(event: PointerEvent) {
+      if (!(event.target instanceof globalThis.Node)) return
+      // The button that opened it toggles it shut itself.
+      if (ref.current?.parentElement?.contains(event.target)) return
+      onClose()
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return
+      event.stopPropagation()
+      done(onClose)
+    }
+    document.addEventListener("pointerdown", onPointerDown, true)
+    window.addEventListener("keydown", onKeyDown, true)
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true)
+      window.removeEventListener("keydown", onKeyDown, true)
+    }
+  }, [onClose])
+
+  return (
+    <div
+      ref={ref}
+      role="group"
+      aria-label="Add an image"
+      data-flow-popover
+      className="absolute left-full top-1/2 ml-3 flex -translate-y-1/2 flex-col gap-0.5 rounded-xl bg-gray-900 p-1.5 shadow-xl ring-1 ring-black/10 dark:bg-gray-800 dark:ring-white/10"
+    >
+      <ImageMenuItem label="Choose a file…" shortcut="I" onClick={() => done(onFile)}>
+        <RiFolderImageLine className="size-4" aria-hidden="true" />
+      </ImageMenuItem>
+      <ImageMenuItem label="Search Google Images" shortcut="G" onClick={() => done(onSearch)}>
+        <RiSearchLine className="size-4" aria-hidden="true" />
+      </ImageMenuItem>
+    </div>
+  )
+}
+
+function ImageMenuItem({
+  label,
+  shortcut,
+  onClick,
+  children,
+}: {
+  label: string
+  shortcut: string
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      aria-keyshortcuts={shortcut}
+      onClick={onClick}
+      className={cx(
+        "flex items-center gap-2.5 whitespace-nowrap rounded-lg py-1.5 pl-2 pr-2 text-left text-sm text-gray-300 transition-colors hover:bg-white/10 hover:text-white",
+        focusRing,
+      )}
+    >
+      <span className="flex w-5 shrink-0 justify-center">{children}</span>
+      <span className="flex-1">{label}</span>
+      <kbd
+        className="ml-4 rounded bg-white/15 px-1 font-sans text-[10px] text-gray-200"
+        aria-hidden="true"
+      >
+        {shortcut}
+      </kbd>
+    </button>
+  )
+}
+
 // A tool: an icon with its name and key in a tip beside it. `drag` makes it
 // one you can also drag onto the canvas.
 function RailButton({
   label,
   shortcut,
   active,
+  expanded,
   onClick,
   drag,
   tip = true,
@@ -4633,6 +4938,11 @@ function RailButton({
   label: string
   shortcut?: string
   active?: boolean
+  /**
+   * Switchboard: set for a tool that shows choices beside it — whether they are
+   * showing — in place of pressed.
+   */
+  expanded?: boolean
   onClick: () => void
   drag?: FlowBoxShape | "note" | "text"
   /** False while something it opened is showing where the tip would go. */
@@ -4643,7 +4953,8 @@ function RailButton({
     <button
       type="button"
       aria-label={shortcut ? `${label} (${shortcut})` : label}
-      aria-pressed={active}
+      aria-pressed={expanded === undefined ? active : undefined}
+      aria-expanded={expanded}
       onClick={onClick}
       draggable={drag !== undefined}
       onDragStart={

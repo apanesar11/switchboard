@@ -112,6 +112,18 @@ contextBridge.exposeInMainWorld('sb', {
   // How many diagrams hold edits not yet written (0 or 1), whenever that changes:
   // main has the page write them before a close or a quit, as it does for notes.
   diagramsDirty: count => ipcRenderer.invoke('sb:diagrams:dirty', count),
+  // Google Images beside the canvas. A picture dragged out of the panel's <webview>, or
+  // added from its right-click menu, arrives as an address, never a File; main fetches
+  // it through the panel's own session and answers { ok, bytes, type, name } — PNG, JPEG
+  // or WebP, ready for diagramsSaveImage — or { ok:false, error }. `referrer` is the
+  // page the picture was on. http(s) and base64 image data: URLs, Google's /imgres and
+  // /url wrappers unwrapped.
+  diagramsFetchImage: (url, referrer) => ipcRenderer.invoke('sb:diagrams:fetchImage', url, referrer || ''),
+  // The panel's right-click "Add Image to Diagram": { guestId, url, fallback, referrer },
+  // where guestId is the guest's webContents id — what webview.getWebContentsId()
+  // answers — and `fallback` the thumbnail to try when the full picture at `url` won't
+  // come ('' when there is none).
+  onDiagramsImageOffer: cb => subscribe('sb:evt:diagramsImageOffer', cb),
 
   // ✦ Answer (§4.18) — who answers a box's question on this Mac, and the asking.
   // answerStatus: { ok, settings, providers, keysSafe }; `opts.fresh` looks for the

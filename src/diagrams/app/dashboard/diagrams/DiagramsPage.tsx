@@ -13,7 +13,8 @@
 //   * `active`: false while another tab or workspace is on screen. The tree stays
 //     mounted behind it (views/diagrams.js keeps it), and nothing here may answer a
 //     key meant for that screen — Backspace on the Terminal deleting the boxes
-//     selected here, say.
+//     selected here, say. The editor hears it too (`shown`), for the Google Images
+//     panel's sake: the tab being left takes that panel's page with it.
 //
 // The canvas IS the editor (FlowEditor.tsx), and changes save as you go.
 //
@@ -700,6 +701,7 @@ export function DiagramsPage({
                     spec={loaded.spec}
                     onSave={(spec) => saveFlow(selected.id, selected.name, spec)}
                     keyboardEnabled={keyboardEnabled}
+                    shown={active}
                     fitKey={String(fullscreen)}
                     productId={productId}
                     diagramName={selected.name}

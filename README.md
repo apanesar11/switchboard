@@ -142,17 +142,22 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   left and click the canvas to place it; with a box selected, Tab adds the next one joined
   to its right and starts you typing, ⇧Tab steps back, the arrow keys move between boxes
   and ⌘D duplicates. Drag from a box's dot to draw an arrow. Drop, paste or pick a picture
-  to put it on the canvas. Tab keeps a branch symmetrical around the box it hangs off,
-  and so do ✦ Answer's boxes and a delete; anything in the branch's way moves aside. A
-  drag-select takes every box it touches, and ⌘C / ⌘V copy boxes and paste them at the
-  pointer. An arrow's toolbar can **collapse** it: what it points at, and everything
-  beyond, folds away behind a "+N" on the box, and the branch closes up; click the "+N" to
-  bring it back. A diagram has no limit on boxes. A toolbar floats over whatever is
-  selected: shape, colour and outline for a box, size and style for its text, label and
-  line for an arrow. It saves as you go; ⌘Z and ⇧⌘Z undo and redo. The picker over the
-  canvas switches between diagrams (← and → step through them), **New diagram** makes one,
-  and **Actions** renames, archives or deletes the one on screen. Each diagram is a file in
-  `~/.switchboard/diagrams/`, one folder per workspace — never in your repo.
+  to put it on the canvas, or find one with **Search Google Images** on the picture tool
+  (or G): Google's own image results open in a panel beside the canvas, searching the
+  selected box's words, and a picture dragged out of it — or right-clicked ▸ Add Image to
+  Diagram — goes onto the diagram like a dropped file, at its full size rather than the
+  thumbnail's. Tab keeps a branch symmetrical
+  around the box it hangs off, and so do ✦ Answer's boxes and a delete; anything in the
+  branch's way moves aside. A drag-select takes every box it touches, and ⌘C / ⌘V copy
+  boxes and paste them at the pointer. An arrow's toolbar can **collapse** it: what it
+  points at, and everything beyond, folds away behind a "+N" on the box, and the branch
+  closes up; click the "+N" to bring it back. A diagram has no limit on boxes. A toolbar
+  floats over whatever is selected: shape, colour and outline for a box, size and style
+  for its text, label and line for an arrow. It saves as you go; ⌘Z and ⇧⌘Z undo and redo.
+  The picker over the canvas switches between diagrams (← and → step through them),
+  **New diagram** makes one, and **Actions** renames, archives or deletes the one on
+  screen. Each diagram is a file in `~/.switchboard/diagrams/`, one folder per workspace —
+  never in your repo.
 
   **✦ Answer** leads a box's toolbar (and ⌘I or ⌘↵): write a question in a box and the
   answer comes back as one to four boxes hanging off it, as one undo step. Several boxes
@@ -272,7 +277,9 @@ workspace, in `~/.switchboard/notes/`; nothing in a repo. Diagrams are JSON file
 own too, in `~/.switchboard/diagrams/`, with the pictures on them kept once each in
 `~/.switchboard/diagrams/images/`. ✦ Answer runs `claude` or `codex` in the workspace's
 folder with read-only tools, or calls the Anthropic or OpenAI API directly with a key you
-entered; nothing else leaves the Mac. Dev commands also run in
+entered. The Diagrams tab's Google Images panel is Google's own page, in a session of
+its own, and fetches a picture you add from it from wherever that picture lives; it
+loads nothing until you open it. Nothing else leaves the Mac. Dev commands also run in
 local shells. Claude usage
 uses the direct request described above; local port checks use sockets and system
 utilities, and ngrok discovery calls its local HTTP API.
@@ -282,9 +289,9 @@ and coding CLI sign-ins. Switchboard's configuration stays in
 `~/.switchboard/config.json`, your notes and diagrams beside it in `~/.switchboard/notes/`
 and `~/.switchboard/diagrams/`, and any API keys for ✦ Answer, encrypted with the
 Keychain, in `~/.switchboard/keys.json`;
-window state, browser storage and publish logs live in
-Electron's Application Support folder. Terminal programs can save their own history
-and credentials outside this checkout. Pasted images are saved in a temporary
+window state, browser storage (the Google Images panel's cookies included) and publish
+logs live in Electron's Application Support folder. Terminal programs can save their own
+history and credentials outside this checkout. Pasted images are saved in a temporary
 Switchboard folder.
 
 Commit the source and `package-lock.json`. The `.gitignore` excludes dependencies,

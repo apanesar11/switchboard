@@ -35,6 +35,9 @@ const notes = require('./notes.js');
 // The Diagrams tab's files (§4.17) — one per diagram, per workspace, outside every repo —
 // and ✦ Answer (§4.18): who answers a box's question, a CLI in the workspace or an API.
 const diagrams = require('./diagrams.js');
+// Google Images beside a diagram (§4.17): the panel's <webview>, its session, and the
+// fetch that turns a picture dragged out of it into bytes saveImage() keeps.
+const images = require('./images.js');
 const answer = require('./answer.js');
 const { Publisher } = require('./publisher.js');
 const publisher = new Publisher({
@@ -281,6 +284,9 @@ function createWindow() {
       preload: path.join(__dirname, '..', 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // For the Diagrams tab's Google Images panel, and nothing else: 'will-attach-webview'
+      // below refuses every <webview> but that one, and strips what it may not have.
+      webviewTag: true,
     },
   });
 
@@ -349,6 +355,26 @@ function createWindow() {
     if (url === mainWindow.webContents.getURL()) return;
     event.preventDefault();
     openExternal(url);
+  });
+
+  // The Google Images panel (§4.17) is the one <webview> this page may have: the panel's
+  // partition, starting on Google, with no preload, no Node and a sandbox whatever its
+  // attributes say — images.js decides. Each guest that does attach gets a browser's
+  // right-click menu and keeps its popups in the user's browser.
+  mainWindow.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    if (!images.hardenWebview(webPreferences, params)) {
+      event.preventDefault();
+      console.error('[switchboard] refused a <webview> for', String((params && params.src) || '').slice(0, 120));
+    }
+  });
+  mainWindow.webContents.on('did-attach-webview', (_event, guest) => {
+    images.attachGuest(guest, {
+      openExternal,
+      // "Add Image to Diagram": the bundle fetches it (sb:diagrams:fetchImage) and puts it
+      // in the middle of the view; guestId says which panel it came from.
+      offerImage: offer => send('sb:evt:diagramsImageOffer', offer),
+      window: () => mainWindow,
+    });
   });
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
@@ -704,6 +730,21 @@ async function clipboardImagePaste() {
 // ---------------------------------------------------------------------------
 
 /**
+ * The Google Images panel's page, when it has the keyboard: run the native editing command
+ * (copy, cut, paste, selectAll, undo, redo) there and answer true; false leaves the item
+ * to the renderer. images.focusedGuest() says why focus has to be asked the way it is.
+ * Never while the DevTools have it: the page keeps its focused frame behind them, and a
+ * ⌘V meant for the Console would land in Google's search box.
+ */
+function guestEdit(action) {
+  const host = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null;
+  const guest = host && !host.isDevToolsFocused() ? images.focusedGuest(host) : null;
+  if (!guest) return false;
+  guest[action]();
+  return true;
+}
+
+/**
  * Undo / Redo / Cut / Close: send sb:evt:edit and let the renderer decide — the Editor
  * takes them when it has focus (§4.14), anything else falls back to what the role did.
  *
@@ -718,6 +759,12 @@ async function clipboardImagePaste() {
  * window then. A smoke run's window is never shown, so never key, and File ▸ Close clicked
  * by SB_SMOKE_MENU goes to it as before. And a crashed renderer cannot answer ⌘W with
  * sb.closeWindow(), so a dead page's window is closed from here; ⌘W is the way out of it.
+ *
+ * The Diagrams tab's Google Images panel (§4.17) is a third webContents of the same
+ * kind: a <webview> guest the renderer cannot reach into. While its page has the keyboard
+ * Undo, Redo and Cut — and Copy, Paste and Select All, through guestEdit() — run the
+ * native command on it, so ⌘V pastes into Google's search box instead of putting copied
+ * boxes on the canvas behind it. ⌘W is not the page's: it keeps the path below.
  */
 function editItem(action) {
   const wc = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null;
@@ -726,6 +773,7 @@ function editItem(action) {
     else wc.devToolsWebContents[action]();
     return;
   }
+  if (action !== 'close' && guestEdit(action)) return;
   if (action === 'close' && !BrowserWindow.getFocusedWindow() && !process.env.SB_SMOKE) {
     if (process.platform === 'darwin') Menu.sendActionToFirstResponder('performClose:');
     return;
@@ -798,10 +846,12 @@ function buildMenu() {
         // Both directions of the clipboard are main's: Chromium refuses
         // document.execCommand('copy') outside a user gesture, and the renderer would
         // otherwise need clipboard-read permission to paste.
+        // The Google Images panel's page takes all three natively while it has the
+        // keyboard (guestEdit), as it does Undo, Redo and Cut through editItem().
         {
           label: 'Copy',
           accelerator: 'CmdOrCtrl+C',
-          click: () => send('sb:evt:edit', { action: 'copy' }),
+          click: () => { if (!guestEdit('copy')) send('sb:evt:edit', { action: 'copy' }); },
         },
         {
           label: 'Paste',
@@ -813,6 +863,7 @@ function buildMenu() {
           // the menu callback and Paste silently did nothing at all: Copy and Select All
           // arrived, Paste never did.  Await it, and never send a non-string.
           click: async () => {
+            if (guestEdit('paste')) return;
             let text = '';
             try { text = await clipboard.readText(); } catch (_) { text = ''; }
             if (typeof text !== 'string') text = '';
@@ -832,7 +883,7 @@ function buildMenu() {
         {
           label: 'Select All',
           accelerator: 'CmdOrCtrl+A',
-          click: () => send('sb:evt:edit', { action: 'selectAll' }),
+          click: () => { if (!guestEdit('selectAll')) send('sb:evt:edit', { action: 'selectAll' }); },
         },
       ],
     },
@@ -1321,6 +1372,12 @@ handle('sb:diagrams:clipboardImage', async () => {
   }
 });
 
+// A picture from the Google Images panel, by its address — a drag out of a <webview>
+// carries no File, and "Add Image to Diagram" only the image's URL. Fetched through the
+// panel's session and answered as { ok, bytes, type, name } in a type saveImage() keeps,
+// which the bundle then saves like a dropped file. images.js says what it accepts.
+handle('sb:diagrams:fetchImage', (url, referrer) => images.fetchImage(url, referrer));
+
 // 0 or 1 — see `diagramDirty`. Like sb:notes:dirty, a count that rises during a quit
 // takes back a Discard given for the smaller one.
 handle('sb:diagrams:dirty', count => {
@@ -1633,6 +1690,9 @@ if (!app.requestSingleInstanceLock()) {
     });
     buildMenu();
     protocol.handle('sbimg', serveDiagramImage);
+    // Before the window, so the panel's first page already goes out as Chrome would ask
+    // for it, with no permission to grant and nowhere to download to.
+    images.setupImagesSession();
     // Before the window: the first answer is usually in hand by the time the renderer
     // asks, so the Grid's gauge is there on the first paint rather than a beat later.
     usage.start();

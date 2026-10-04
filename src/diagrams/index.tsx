@@ -106,6 +106,9 @@ const api = {
   editAction(action: string, image: boolean, text = ""): boolean | Promise<boolean> {
     if (!editor || !props?.active) return false
     if (isTextField(document.activeElement)) return false
+    // The Google Images panel's page has the keyboard. Main gives it the Edit menu
+    // itself; one that reaches here anyway must not copy or paste boxes instead.
+    if (document.activeElement?.tagName === "WEBVIEW") return false
     // Copy, Cut and Paste of boxes: what is selected, put down again at the pointer.
     if (action === "copy") return editor.copy()
     if (action === "cut") return editor.cut()

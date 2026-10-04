@@ -1813,6 +1813,10 @@ window.SB = window.SB || {};
       } catch (err) { console.error('[switchboard] editor edit:', err); }
     }
     if (editableFocused() && e.action !== 'close') return;
+    // The Diagrams tab's Google Images panel is a <webview>, and main runs the Edit menu
+    // on its page itself (§4.17). One that arrives here anyway must not fall back onto
+    // this document: Select All would select the whole window behind Google's page.
+    if (webviewFocused() && e.action !== 'close') return;
     try {
       // NOT document.execCommand('copy'): Chromium refuses it without a user gesture,
       // and arriving here from an IPC event is not one. It failed SILENTLY — a 337-
@@ -1868,6 +1872,11 @@ window.SB = window.SB || {};
   function editableFocused() {
     var el = document.activeElement;
     return !!el && el.isContentEditable === true;
+  }
+
+  function webviewFocused() {
+    var el = document.activeElement;
+    return !!el && el.tagName === 'WEBVIEW';
   }
 
   function handleLinks(wsId, links) {

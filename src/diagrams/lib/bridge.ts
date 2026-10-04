@@ -64,6 +64,25 @@ export type AnswerResult =
   | { ok: true; text: string; files?: number }
   | { ok: false; error: string; code?: "missing" | "signed-out" | "no-key" | "bad-key" | "timeout" | "stopped" }
 
+/**
+ * A picture main fetched for the canvas, from an address dragged or offered out of
+ * the Google Images panel. Always one of the three types a diagram keeps — main
+ * converts anything else it can read to PNG — and `name` is a short label taken
+ * from the address, or "Image".
+ */
+export type FetchedImage =
+  | { ok: true; bytes: Uint8Array; type: "image/png" | "image/jpeg" | "image/webp"; name: string }
+  | { ok: false; error: string }
+
+/**
+ * "Add Image to Diagram", picked in the right-click menu of a picture in the Google
+ * Images panel. `guestId` is the panel page's webContents id, which the panel
+ * compares with its own <webview>'s, and `referrer` the page the picture was on. On
+ * one of Google's results `url` is the full picture and `fallback` its thumbnail, to
+ * add instead should the full one not come; "" otherwise.
+ */
+export type ImageOffer = { guestId: number; url: string; fallback?: string; referrer: string }
+
 type Bridge = {
   diagramsList(wsId: string): Promise<Result<DiagramSummary[]>>
   diagramsGet(wsId: string, id: string): Promise<Result<DiagramSummary & { spec: unknown }>>
@@ -84,6 +103,9 @@ type Bridge = {
   answerStop(id: string): Promise<unknown>
   onAnswerStep(cb: (id: string, step: AnswerStep) => void): () => void
   onAnswerStatus(cb: (status: AnswerStatus) => void): () => void
+  diagramsFetchImage(url: string, referrer?: string): Promise<FetchedImage>
+  onDiagramsImageOffer(cb: (offer: ImageOffer) => void): () => void
+  openExternal(url: string): Promise<{ ok: true } | { ok: false; error: string }>
 }
 
 declare global {
@@ -133,7 +155,7 @@ export function writeClipboard(text: string): void {
 }
 
 /** A push event's subscription, or a no-op when the preload has none. */
-export function listen<K extends "onAnswerStep" | "onAnswerStatus">(
+export function listen<K extends "onAnswerStep" | "onAnswerStatus" | "onDiagramsImageOffer">(
   name: K,
   cb: Parameters<Bridge[K]>[0],
 ): () => void {

@@ -93,6 +93,7 @@ switchboard/
   src/renderer/views/editor.js  — Editor tab (Monaco over the workspace's repos)  [R13]
   src/main/notes.js             — the Notes tab's one markdown file per workspace    [M9]
   src/main/diagrams.js          — the Diagrams tab's files, per workspace; pictures  [M10]
+  src/main/images.js            — Google Images beside a diagram: webview, session, fetch [M12]
   src/main/answer.js            — ✦ Answer: Claude Code / Codex / Claude API / OpenAI [M11]
   src/renderer/views/diagrams.js — Diagrams tab: the seam to the editor bundle       [R15]
   src/renderer/views/settings.js — Settings screen: who answers, API keys            [R16]
@@ -827,7 +828,9 @@ they are folded behind, carries them along when that box is dragged, and deletes
 it. Unfolding re-tidies the tree around them. A diagram has **no limit** on boxes, arrows
 or size (the admin's 60 / 120 / 512 KB, `types.ts` says why not here): the layout and save
 paths stay in single milliseconds into the thousands of boxes. **Actions ▸ Rename**
-(`RenameDiagramDialog.tsx`) writes a new name with the drawing as it stands. `npm run
+(`RenameDiagramDialog.tsx`) writes a new name with the drawing as it stands. And the image
+tool is a menu — a file, or **Google Images** (G): Google's own results in a panel docked
+on the canvas's right, whose pictures drag straight onto it (below). `npm run
 test:diagrams` covers the layout and folding (`scripts/test-flow-layout.js`).
 
 **A diagram belongs to a workspace and lives on this Mac.** One JSON file per diagram —
@@ -848,6 +851,7 @@ can be carried either way by hand.
 | `sb.diagramsDelete(id, diagramId)` | `sb:diagrams:delete` | `{ ok, data: { id } }` — for good; the confirmation dialog is the gate |
 | `sb.diagramsSaveImage(bytes, type)` | `sb:diagrams:saveImage` | `{ ok, src }` — `sbimg://image/<file>`; see below |
 | `sb.diagramsClipboardImage()` | `sb:diagrams:clipboardImage` | `{ ok, bytes, type }` — the clipboard's PNG, for Edit ▸ Paste over the canvas |
+| `sb.diagramsFetchImage(url, referrer?)` | `sb:diagrams:fetchImage` | `{ ok, bytes, type, name }` — a picture from the Google Images panel, by its address, as PNG, JPEG or WebP; or `{ ok:false, error }`. See Google Images, below |
 | `sb.diagramsDirty(count)` | `sb:diagrams:dirty` | `{ ok }` — 0 or 1, whenever it changes; see below |
 
 **Pictures are kept once, by content.** A picture dropped, pasted or picked onto a
@@ -873,6 +877,135 @@ editor never sees them as keystrokes: `handleEdit` asks R15 right after the term
 while the canvas has the keyboard — not a box's own text field, which gets the document's
 fallback like any field — Undo and Redo are the editor's, and an image Paste fetches the
 clipboard's picture and adds it.
+
+#### Google Images
+
+Added 2026-10-04, the user's ask, from an approved mock-up. The image tool on the rail
+opens a menu — **Choose a file…** (I, the picker as before) and **Search Google Images**
+(G) — and the second docks a 400px panel on the canvas's right (`ImageSearchPanel.tsx`):
+the canvas narrows beside it rather than hiding under it. In a window too narrow for both
+the panel gives way, not the canvas, which keeps 360px: room for the rail and the menus
+beside it, which the canvas clips. Opening the image menu puts the shape tool (and its
+menu) away, and picking a tool closes it. Its two choices are buttons the tool shows and
+hides, not an ARIA menu, whose arrow keys would be the canvas's; a pick or Escape made
+from them hands the keyboard back to the tool. With one box with words selected it
+searches that box's label, not its second line; otherwise it reopens the page it showed
+last this session, or Google Images' first page. The panel is a `div` with
+`role="complementary"`, never an `<aside>`: styles.css styles every aside as the sidebar
+(R15, Styles). A guest paints no background, so once the page is ready the `<webview>`
+has a browser's white behind it, and not before, so dark mode doesn't flash white.
+
+**It is Google's own page, in a `<webview>`.** No sign-in and no API key: Google's Custom
+Search JSON API, the sanctioned way to ask for its results, is closed to new customers and
+ends on 2027-01-01, and the page the user would open in a browser needs neither. The
+bundle loads two kinds of address — `https://www.google.com/search?udm=2&q=<words>`
+(udm=2 is the Images tab) and `https://www.google.com/imghp` — and once there the panel is
+a browser: links, Back, another search in Google's own box.
+
+**Main keeps it on a short lead** (`main/images.js`, M12). The main window has
+`webviewTag: true` for this alone, and `will-attach-webview` refuses every `<webview>`
+whose partition is not exactly `persist:sb-images` or whose `src` is not https on
+www.google.com or images.google.com — parsed, so `www.google.com.evil.test` is just
+another host. One that passes gets no preload, no Node, context isolation, the sandbox,
+web security and no JavaScript dialogs whatever its attributes asked for; the partition
+is forced too, since a `webpreferences` attribute can name another. Dialogs are off
+(`disableDialogs`) because a guest's `alert()` and `confirm()` are sheets on the main
+window, in the page's words, one after another with no way to stop them; measured, with
+them off `confirm()` answers false at once. That partition's session sends Chrome's
+user agent (Electron's own minus the app's and the `Electron/x` tokens, so Google serves
+its real page), refuses every permission request and check, and cancels every download.
+A guest's window-open handler denies every popup, and a navigation to anything but
+http(s) is prevented. Popups are let THROUGH to that handler (`disablePopups: false`): measured,
+without it `window.open` answers null in the guest before the handler is ever asked, and
+a result opening "in a new tab" did nothing at all. But Electron then has no popup
+blocker — its `CanCreateWindow` ignores the user gesture once popups are allowed, and a
+page's `window.open` in a loop reached the handler every time — so the handler sends a
+popup to the user's browser (`openExternal()`) only within a second of a click or key in
+that page (its `input-event`s), and one per click (`userActivation`), as Chrome would.
+
+**A picture leaves the panel as an address, never a file.** Chromium hands a drag out of
+a `<webview>` over as `text/uri-list`, `text/html` and `text/plain`, and never as a File.
+So the canvas accepts those kinds on dragover (with a soft blue ring while one is over
+it), and on the drop takes the markup's `<img src>`, then the list's first address, then
+the plain text (`lib/diagrams/image-search.ts`). Such a drop is ALWAYS
+`preventDefault`-ed, picture or not: let through, the window navigates to the address,
+and main's `will-navigate` opens it in the browser. The panel's own header and footer
+take one let go short of the canvas for the same reason. One `<img>` is not taken at
+its word: a `data:` src beside a `srcset` is a lazy loader's placeholder (a 1px GIF, an
+empty SVG), and the picture is the srcset's choice — the listed address when it is one
+of the srcset's absolute ones (Chromium lists it when the picture is in no link, and
+writes the srcset unresolved), else the largest absolute one, else the list as usual.
+Google's own thumbnails are `data:` srcs with no srcset and are kept. The markup is
+the drag source's to write, so at most 1 MB of it is read, by a pattern that takes time
+in proportion to it. **A Google result lands at its own size.** Dragged, one of Google's
+results carries its thumbnail (a gstatic picture a couple of hundred pixels across) as
+the markup and the result's link, `/imgres?imgurl=<the full picture>&imgrefurl=<its
+page>`, as the address — measured on Google's page in this Electron. So the drop tries
+that link first and the thumbnail after it (`imageUrlsFromDrop`), and the thumbnail goes
+in only when the full picture's host refuses it, is too big or too slow; a right-click
+does the same (below). `sb:diagrams:fetchImage` then fetches each address through the
+panel's session — its cookies, and the Referer a browser would send when the caller says
+which page the picture was on: Add Image to Diagram does; a drop cannot, and sends none —
+after unwrapping Google's `/imgres?imgurl=` and `/url?url=` / `?q=` wrappers — an
+`/imgres` picture goes out with its own page (`imgrefurl`) as the Referer, the one a host
+that guards its pictures expects, rather than Google's — and
+decodes a base64 `data:image/` URL itself (most thumbnails are those). It allows 20 s
+for the download and 25 MB counted as it streams, aborts the request on every way out
+before the body is in (an error page included: measured, one that never ends otherwise
+keeps streaming, and six hold every connection to that host), and sniffs the type from
+the bytes, never the header. PNG, JPEG and WebP come back as they are; GIF, AVIF, HEIC,
+BMP and TIFF come back as PNG through macOS's `sips`, because measured, this Electron's
+`nativeImage` decodes PNG and JPEG and nothing else, WebP included; anything else is
+"That picture's format can't be used here". sips decodes a stranger's bytes in its own
+process, unlike a browser, so it runs under `sandbox-exec` (`SIPS_PROFILE`): deny by
+default, read anything, write only the picture's temp folder and the user's
+(`DARWIN_USER_TEMP_DIR`, which sips writes through whatever `TMPDIR` says), no network,
+no other program, and no service but the video decoder and the IOSurface a HEIC or AVIF
+needs. A picture's name is the last part of its address's path, or "Image" — for a
+`data:` URL, and for Google's `encrypted-tbnN.gstatic.com/images?q=tbn:…` thumbnails.
+The bundle makes the bytes a File and hands it to the same `addImages` a dropped file
+goes through, so it is saved by `sb:diagrams:saveImage` exactly as one is.
+
+**Right-click is main's menu.** Each guest gets a browser's context menu, built in main
+(`attachGuest`): for a picture **Add Image to Diagram**, Copy Image, Copy Image Address
+and Open Image in Browser; for a link Open Link in Browser and Copy Link Address; Cut,
+Copy, Paste and Select All in a field, or Copy for a selection; then Back, Forward and
+Reload. Add Image to Diagram sends `sb:evt:diagramsImageOffer` `{ guestId, url,
+fallback, referrer }` (§4.7) — on a Google result `url` is the result's `/imgres` link
+(the full picture) and `fallback` the thumbnail clicked, since the right-click carries
+both (`imageOffer`); on any other picture `url` is the picture and `fallback` is `''`.
+The panel acts on it only when `guestId` is its own `<webview>`'s `getWebContentsId()`,
+and the picture goes in at the middle of the view by the same fetch, the fallback only
+if the first fails. Copy Image then ⌘V needs nothing new: the canvas's paste already reads a picture
+off the clipboard.
+
+**The Edit menu goes to the panel's page while it has the keyboard.** ⌘C, ⌘V, ⌘X, ⌘A, ⌘Z
+and ⇧⌘Z are menu items (§4.7) that would otherwise send `sb:evt:edit` to the main page —
+and copy boxes when the user meant Google's search box. `guestEdit()` runs the native
+command on the guest instead whenever `images.focusedGuest()` names one: the host's
+`focusedFrame` mapped through `webContents.fromFrame()`, a `webview` whose host is the
+main window. Not `webContents.getFocusedWebContents()` and not `guest.isFocused()`:
+measured, both name the guest whenever one is attached, the page's own input focused or
+not, so every ⌘C on the canvas would have gone to the panel. Never while the DevTools
+have focus, and never ⌘W. Should an event arrive anyway, the renderer stands aside too:
+the bundle's `editAction` and app.js's document fallback both decline while a `WEBVIEW`
+is the active element.
+
+**Leaving the tab kills the page, so coming back makes a new one.** app.js takes the
+Diagrams tab's root out of `#main` while another screen shows (R15), and Electron destroys
+a `<webview>`'s guest as it leaves the document and never makes another when it is put
+back: measured in 44.4.2, the element stays blank and every method answers "Invalid
+guestInstanceId". So the editor hears `active` (as `shown`), and the panel keys a fresh
+`<webview>` as the tab returns, at the last page it showed. That page is kept at module
+scope, and only when main would let the panel start on it (`opensInPanel`), since a site
+followed out of the results would be refused at the attach. The page's history is lost;
+the page is not.
+
+Google may answer a new session with its "unusual traffic" page; solved once, its cookie
+stays in the partition (`Partitions/sb-images` in Electron's Application Support folder).
+`npm run test:diagrams` covers both halves' pure parts (`scripts/test-images.js`,
+`scripts/test-image-search.js`), checks the bundle's partition and start rule against
+main's own, and runs `fetchImage` itself, with Node's fetch standing in for the session.
 
 ### 4.18 ✦ Answer and Settings
 
@@ -947,6 +1080,8 @@ sb.onNotesFlush((id) => {})          // 'sb:evt:notesFlush' — write every unsa
 sb.onAnswerStep((id, step) => {})    // 'sb:evt:answerStep' — what a CLI answering a box is doing; §4.18
 sb.onAnswerStatus((status) => {})    // 'sb:evt:answerStatus' — who can answer, after any change; §4.18
 sb.onOpenSettings(() => {})          // 'sb:evt:openSettings' — App ▸ Settings… (⌘,)
+sb.onDiagramsImageOffer((offer) => {}) // 'sb:evt:diagramsImageOffer' — {guestId, url, fallback, referrer}:
+                                     // Add Image to Diagram, in the Google Images panel; §4.17
 ```
 
 `sb:evt:edit` exists because a menu accelerator wins over the renderer's keydown, and
@@ -983,7 +1118,9 @@ and ⌘W. And while the key window is no BrowserWindow at all — the About pane
 is sent: it closes the panel, not a tab or the window behind it (§4.14). That test comes
 after the DevTools' and before the crashed page's, and a smoke run skips it — its
 window is never shown, so never key, and `SB_SMOKE_MENU='File>Close'` must still reach
-the page.
+the page. And while the Diagrams tab's Google Images panel has the keyboard, every Edit
+item but Close runs natively on the panel's page instead, after the DevTools' test
+(`guestEdit()`, §4.17).
 
 **Both directions of the clipboard belong to main**, and this is not a preference:
 * Chromium refuses `document.execCommand('copy')` outside a user gesture, and an IPC
@@ -1520,6 +1657,17 @@ time, stopped by process group), an API through `net.fetch` with the request's o
 AbortController wired to Stop until the body is in. Failures carry a `code` the page can
 act on. It needs Electron (`net`, `safeStorage`), so it has no plain-node test; its
 paths were checked against the real CLI and APIs when it was written.
+
+### M12 `images.js`
+Google Images beside a diagram, main's half (§4.17): `hardenWebview(webPreferences,
+params)` (the whole `will-attach-webview` decision), `setupImagesSession()`,
+`attachGuest(wc, deps)` (popups, navigation, the right-click menu), `focusedGuest(host)`
+(for the Edit menu) and `fetchImage(url, referrer)`, whose conversions run sips under
+`SIPS_PROFILE`. The pure helpers — the src rule, the user agent, Google's wrappers, data:
+URLs, the byte sniff, the name, the Referer, a page's user activation, the menu as data —
+load no Electron, so `scripts/test-images.js` (`npm run test:diagrams`) runs them under
+plain node; what needs Electron requires it inside the function, and that test hands
+`fetchImage` and `attachGuest` a stand-in. Nothing throws across IPC.
 
 ---
 
@@ -2238,14 +2386,23 @@ on the Terminal would otherwise delete the boxes selected on a canvas nobody can
 **Keys.** app.js asks `onKey` after the Editor and Notes: Esc leaves a full-screen
 diagram before it means back, and ⌘↵ (or ⌘I) over the canvas is ✦ Answer (the editor's own
 listener) and never Start. The editor's own Esc, in the capture phase, stops propagation
-when it uses one, so app.js never sees it.
+when it uses one, so app.js never sees it. G opens Google Images; Esc in its search field
+closes the panel and goes no further.
+
+**Google Images** is `ImageSearchPanel.tsx`, the app's one `<webview>` (§4.17). Staying
+mounted is not enough for it: its root leaving `#main` destroys the guest. So
+DiagramsPage hands the editor `active` as `shown`, and the panel makes a new `<webview>`
+when it turns true again.
 
 **Styles.** The bundle's stylesheet is the admin's Tailwind plus React Flow's, every rule
 scoped to `.sbdg` behind `:where()` and with the cascade layers flattened
 (`build-diagrams.js` says why), and Radix's portals render into an element inside the
 root rather than `<body>`. One collision that went the other way was fixed at its source:
 styles.css's `.grid` (the Grid screen's 2x2) is `.gridbd > .grid` now, since `grid` is a
-Tailwind utility the editor uses. The canvas follows Terminal appearance, as the Notes
+Tailwind utility the editor uses. styles.css's element rules reach in too, and beat the
+bundle's `:where()`-scoped classes: every `aside` is the sidebar (its padding, and
+`.win.norail aside` hides it), so the bundle uses no `<aside>` — the Google Images panel
+is a `div` with `role="complementary"`. The canvas follows Terminal appearance, as the Notes
 and Editor slabs do: dark is `[data-term-theme="dark"]`.
 
 `npm run check:diagrams` type-checks `src/diagrams/` (esbuild builds without checking).
