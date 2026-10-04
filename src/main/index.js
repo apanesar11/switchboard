@@ -6,7 +6,7 @@
 // the work to git.js / github.js / runner.js, then shape the result into the
 // exact payload §4 promises.  Nothing here throws across IPC.
 
-const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeTheme, net, protocol, shell } = require('electron');
+const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeTheme, net, protocol, safeStorage, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -15,6 +15,11 @@ const { pathToFileURL } = require('url');
 
 const config = require('./config.js');
 const workspaces = require('./workspaces.js');
+const databases = require('./databases.js').createDatabases({
+  directory: path.join(path.dirname(config.CONFIG_FILE), 'databases'),
+  resolveWorkspace: id => workspaces.lookup(id),
+  safeStorage,
+});
 const git = require('./git.js');
 const github = require('./github.js');
 const runner = require('./runner.js');
@@ -1034,6 +1039,13 @@ function resolvedIds(threads) {
 
 handle('sb:ws:list', () => workspaces.discover());
 
+// Database browsing (§4.19): secrets and drivers stay in the main process.
+handle('sb:db:list', id => databases.list(id));
+handle('sb:db:add', (id, connection) => databases.add(id, connection));
+handle('sb:db:remove', (id, connectionId) => databases.remove(id, connectionId));
+handle('sb:db:entities', (id, connectionId) => databases.entities(id, connectionId));
+handle('sb:db:records', (id, connectionId, entityId) => databases.records(id, connectionId, entityId));
+
 handle('sb:publish:state', () => publisher.state());
 handle('sb:publish:start', async id => {
   if (quitting) return { ok: false, error: 'Switchboard is closing. Reopen it before publishing.' };
@@ -1617,6 +1629,7 @@ handle('sb:editor', dir => new Promise(resolve => {
 // that takes its full SIGTERM→SIGKILL grace must not hold the shells' SIGHUP back,
 // and neither must be skipped because the other threw.
 async function stopEverything() {
+  const closeDatabases = databases.close();
   // A CLI still answering a diagram's box is a process of ours, with children of its
   // own: it goes with the app, on every way out (§4.18).
   answer.stopAll();
@@ -1644,7 +1657,7 @@ async function stopEverything() {
     }
   })();
 
-  await Promise.all([stopSessions, closeShells]);
+  await Promise.all([stopSessions, closeShells, closeDatabases]);
 }
 
 // sbimg://image/<file> — a picture on a diagram, kept on this Mac (diagrams.js). A

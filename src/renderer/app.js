@@ -59,7 +59,7 @@ window.SB = window.SB || {};
   // on the Diagrams tab and the API keys for it.
   var VIEWS = { workspace: 1, files: 1, diff: 1, pr: 1, grid: 1, usage: 1, prs: 1, settings: 1 };
   var TABS = {
-    workspace: ['changes', 'logs', 'terminal', 'editor', 'notes', 'diagrams'],
+    workspace: ['changes', 'logs', 'terminal', 'editor', 'notes', 'diagrams', 'databases'],
     files: ['files', 'all'], pr: ['overview', 'files', 'all'], diff: [], grid: [], usage: [], prs: [], settings: []
   };
   var FREE = { grid: 1, usage: 1, prs: 1, settings: 1 };
@@ -69,7 +69,7 @@ window.SB = window.SB || {};
   // and own everything below it; see buildView(). Anything not listed is
   // views/workspace.js. A new tab needs both lines: one missing from TABS.workspace
   // is rewritten by normalize() to the remembered tab before it is ever looked up.
-  var TAB_VIEWS = { logs: 'logs', terminal: 'terminal', editor: 'editor', notes: 'notes', diagrams: 'diagrams' };
+  var TAB_VIEWS = { logs: 'logs', terminal: 'terminal', editor: 'editor', notes: 'notes', diagrams: 'diagrams', databases: 'databases' };
 
   var PARENT = { diff: 'files', files: 'workspace', pr: 'workspace', workspace: null, grid: null, usage: null, prs: null, settings: null };
 
@@ -1573,6 +1573,8 @@ window.SB = window.SB || {};
     if (dg && typeof dg.shown === 'function') {
       try { dg.shown(state.route); } catch (err) { console.error('[switchboard] diagrams shown:', err); }
     }
+    var dbv = SB.views.databases;
+    if (dbv && typeof dbv.shown === 'function') dbv.shown(state.route);
 
     if (!reuse) {
       restoreScroll(key);
@@ -1933,6 +1935,8 @@ window.SB = window.SB || {};
     if (dgv && typeof dgv.refresh === 'function') {
       try { dgv.refresh(); } catch (err) { console.error('[switchboard] diagrams refresh:', err); }
     }
+    var dbv = SB.views.databases;
+    if (dbv && typeof dbv.refresh === 'function') dbv.refresh(wantFetch);
     var a = api();
     if (a) Promise.resolve(a.runStates()).then(adoptRunStates, noop);
   }
@@ -1997,6 +2001,11 @@ window.SB = window.SB || {};
         var kept = false;
         try { kept = dv.onKey(e); } catch (err) { console.error('[switchboard] diagrams key:', err); }
         if (kept) { e.preventDefault(); return; }
+      }
+      var dbv = SB.views.databases;
+      if (dbv && typeof dbv.onKey === 'function' && dbv.onKey(e)) {
+        e.preventDefault();
+        return;
       }
       if (e.key === 'Escape') {
         // The composer, the terminal and Monaco (a textarea too) keep Esc.

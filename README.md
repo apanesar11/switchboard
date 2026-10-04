@@ -182,6 +182,14 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   stay until the summary is ready; **Stop** cancels it and **Undo** restores the entire
   discussion in one step. If the selected discussion changes while it thinks, retry
   with the updated selection.
+- **Databases** — save multiple named Neon/PostgreSQL or MongoDB connections for each
+  workspace. Choose a connection, then a table, view or collection to fetch its records;
+  Refresh (or ⌘R) reads them again. Click a row to see every field, including nested
+  objects and arrays. Connections require a URI containing the database name and are
+  verified before being saved. The browser issues reads only; PostgreSQL queries run
+  in read-only transactions. Large tables scroll without creating a DOM node for every
+  record. A fetch past 100,000 records, 32 MB or its timeout reports an error instead of
+  quietly showing incomplete data. Removing a saved connection leaves its database intact.
 - **Settings** — the row under Usage, or ⌘,: who answers ✦ Answer on this Mac, one row
   each — whether a CLI is installed and signed in, and the keys for the two APIs with the
   model each one uses — and the Web access and Subtext switches. A key is checked with its provider before it is kept, encrypted with
@@ -293,8 +301,9 @@ own too, in `~/.switchboard/diagrams/`, with the pictures on them kept once each
 folder with read-only tools, or calls the Anthropic or OpenAI API directly with a key you
 entered. The Diagrams tab's Google Images panel is Google's own page, in a session of
 its own, and fetches a picture you add from it from wherever that picture lives; it
-loads nothing until you open it. Nothing else leaves the Mac. Dev commands also run in
-local shells. Claude usage
+loads nothing until you open it. Database browsing connects directly to the database
+URI you supply, from the main process; credentials never return to the renderer.
+Dev commands also run in local shells. Claude usage
 uses the direct request described above; local port checks use sockets and system
 utilities, and ngrok discovery calls its local HTTP API.
 
@@ -302,7 +311,10 @@ The source does not need account credentials. Each computer uses its own Git/Git
 and coding CLI sign-ins. Switchboard's configuration stays in
 `~/.switchboard/config.json`, your notes and diagrams beside it in `~/.switchboard/notes/`
 and `~/.switchboard/diagrams/`, and any API keys for ✦ Answer, encrypted with the
-Keychain, in `~/.switchboard/keys.json`;
+Keychain, in `~/.switchboard/keys.json`. Database connection URIs are also encrypted
+through Electron's OS credential storage, in `~/.switchboard/databases/`; saving a
+connection requires secure encryption support. An alternate `SWITCHBOARD_CONFIG`
+keeps this data beside that config file;
 window state, browser storage (the Google Images panel's cookies included) and publish
 logs live in Electron's Application Support folder. Terminal programs can save their own
 history and credentials outside this checkout. Pasted images are saved in a temporary

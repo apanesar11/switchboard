@@ -19,6 +19,7 @@ config.local.json
 # Notes live beside the config file, so SWITCHBOARD_CONFIG pointed at a checkout
 # would otherwise leave them here, untracked and one `git add -A` from a commit.
 /notes/
+/databases/
 *.local.json
 *.pem
 *.key

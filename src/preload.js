@@ -19,6 +19,12 @@ function subscribe(channel, callback) {
 contextBridge.exposeInMainWorld('sb', {
   // Workspaces
   listWorkspaces: () => ipcRenderer.invoke('sb:ws:list'),
+  // Database URIs are sent only when adding a connection; saved secrets never return.
+  databaseList: id => ipcRenderer.invoke('sb:db:list', id),
+  databaseAdd: (id, connection) => ipcRenderer.invoke('sb:db:add', id, connection),
+  databaseRemove: (id, connectionId) => ipcRenderer.invoke('sb:db:remove', id, connectionId),
+  databaseEntities: (id, connectionId) => ipcRenderer.invoke('sb:db:entities', id, connectionId),
+  databaseRecords: (id, connectionId, entityId) => ipcRenderer.invoke('sb:db:records', id, connectionId, entityId),
   publish: id => ipcRenderer.invoke('sb:publish:start', id),
   publishState: () => ipcRenderer.invoke('sb:publish:state'),
   onPublish: cb => subscribe('sb:evt:publish', cb),

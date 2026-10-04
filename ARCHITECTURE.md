@@ -95,6 +95,8 @@ switchboard/
   src/main/diagrams.js          — the Diagrams tab's files, per workspace; pictures  [M10]
   src/main/images.js            — Google Images beside a diagram: webview, session, fetch [M12]
   src/main/answer.js            — ✦ Answer: Claude Code / Codex / Claude API / OpenAI [M11]
+  src/main/databases.js         — local encrypted connections and read-only browsing [M13]
+  src/renderer/views/databases.js — Databases tab: connections, entities, records     [R17]
   src/renderer/views/diagrams.js — Diagrams tab: the seam to the editor bundle       [R15]
   src/renderer/views/settings.js — Settings screen: who answers, API keys            [R16]
   src/diagrams/                 — the editor bundle's sources (mirrored by hand)     [R15]
@@ -1475,6 +1477,55 @@ was there before, and the gauge that had focus still has it.
 poll reads the next file, the last one repeats; a file may add `_credential` for the
 plan name, `_status` (with `_expired`) to play a bad answer, or `_nologin` — and
 `SB_USAGE_INTERVAL=<ms>` sets the poll. Neither is read outside those variables.
+
+---
+
+### 4.19 Databases (`sb:db:*`)
+
+The Databases workspace tab browses named Neon/PostgreSQL and MongoDB connections.
+The approved screen is a connection picker, an entity picker, Refresh, Add connection,
+and one records table. Selecting an entity fetches its records automatically. A row
+opens a drawer with all fields, including nested objects and arrays. There is no query
+editor or database write action.
+
+The service is `createDatabases({ directory, resolveWorkspace, safeStorage, drivers? })`
+in `src/main/databases.js`. Main supplies a `databases/` directory beside
+`config.CONFIG_FILE`, a workspace lookup, and Electron's safeStorage. The injectable
+`drivers` are for fictional test fixtures. Renderer calls are:
+
+| Bridge | IPC | Result |
+| --- | --- | --- |
+| `databaseList(wsId)` | `sb:db:list` | `{ ok, connections, keysSafe }` |
+| `databaseAdd(wsId, { name, provider, uri })` | `sb:db:add` | `{ ok, connection, connections }` |
+| `databaseRemove(wsId, connectionId)` | `sb:db:remove` | `{ ok, connections }` |
+| `databaseEntities(wsId, connectionId)` | `sb:db:entities` | `{ ok, entities }` |
+| `databaseRecords(wsId, connectionId, entityId)` | `sb:db:records` | `{ ok, columns, rows, fetchedAt }` |
+
+Failures are `{ ok: false, error }` with credential-free sentences. A connection's
+public shape is `{ id, name, provider: 'postgres' | 'mongodb', host, database, createdAt }`;
+the encrypted URI stays on disk and its plaintext never returns to the renderer.
+Every workspace has its own private file, with serialized atomic mutations. Connect
+validates the URI and lists entities with the supplied credentials before saving.
+Secure OS encryption is required; Linux's basic_text fallback is refused. Removing
+connection metadata never drops a database, table or collection.
+
+Entities are `{ id, name, schema?, kind: 'table' | 'view' | 'collection' }`. PostgreSQL
+entity IDs encode their schema/name; the service revalidates them against accessible
+catalog entries before quoting identifiers and selecting. Every PostgreSQL operation
+uses a read-only transaction. MongoDB uses collection listing and `find({})` only.
+Drivers and database cursors are closed in finally paths and at app teardown. Results
+normalize dates, large integers and BSON values into IPC-safe objects while preserving
+nested fields. Columns are `{ name, type }`.
+
+Reads consume cursors in batches and return all records together. Beyond 100,000 records,
+32 MB or the operation timeout, the entire fetch fails with an explicit error rather
+than returning a misleading partial table. The renderer keeps a virtual window of
+44px rows so a large successful result stays scrollable. It preserves per-workspace
+connection/entity selection, rejects stale async replies, clears URI input when a
+modal is closed or its workspace is left, and retains the same root across routine
+app repainting. `shown(route)` tells the view when it is hidden; `onKey` handles its
+menus, modal, drawer and refresh shortcut. All data and credentials remain outside
+repositories; `src/main/default-config.json` stays `{}`.
 
 ---
 
