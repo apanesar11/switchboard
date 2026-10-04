@@ -109,6 +109,18 @@ SB.views = SB.views || {};
 
   // ── header ────────────────────────────────────────────────────────────────
 
+  // "4s", "12m", "1h 5m". No longer shown in the header, but exported below for the
+  // Logs and Terminal footers ("exited 1 · 4s"), which read SB.views.workspace.dur.
+  function dur(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return s + 's';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + 'm';
+    var hours = Math.floor(m / 60);
+    var rest = m % 60;
+    return rest ? hours + 'h ' + rest + 'm' : hours + 'h';
+  }
+
   // No sub line under the name: the user cut "main · clean" (2026-10-04) because it
   // only cost height above the segment. Nothing in it was the header's alone —
   // running and failed are the rail's dot and the Stop button, changes and behind
