@@ -306,6 +306,7 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       // Kept when false, like `dashed`: that is how a republish clears a mark
       // carryOverFlowLayout would otherwise carry over.
       ai: optionalFlag(entry.ai),
+      detached: optionalFlag(entry.detached),
       position: optionalPosition(entry.position, where),
       // Each kept only on the shapes it means something for, so a box turned
       // from an image doesn't carry a dead URL around.

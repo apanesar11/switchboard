@@ -811,7 +811,18 @@ that"). A branch Tab builds is always laid out symmetrically: Tab, ✦ Answer's 
 a delete all go through `lib/diagrams/flow-editor.ts`, which re-centres the whole tree
 on its top box and then pushes whatever it would now crowd (another tree, a note) up or
 down out of its way, whole, `FLOW_ROOM_GAP` clear — where the admin gives up on the
-layout when anything is in the way. A drag-select takes every box it touches
+layout when anything is in the way. A box drags what hangs off it along, step for
+step ("when I move this parent node … I want it to also move all of the children with
+it"; `flowBranches`, worked out when the drag begins), and so does a Shift+arrow nudge.
+Let go, it takes the place its height says among its siblings — "if I drop that node
+somewhere in between two other nodes … it'll squeeze it in" — back in their column, and
+the tree is laid out again the same way (`tidyAfterMove`), one undo step with the drag.
+A box dragged left of what it hangs off leaves the branch, which closes up; a box in no
+branch stays where it was dropped. The box toolbar's **Attached / Detached** (a link)
+takes a box out of every branch (`detached: true` on the node): it moves on its own,
+nothing it is joined to moves with it, and laying out a branch leaves it where it is;
+attached again, it is laid out in its branch and its branch around it. Tab or ✦ Answer
+on a detached box attaches it first. A drag-select takes every box it touches
 (`SelectionMode.Partial`). Any number of boxes can wait on ✦ Answer at once, one answer
 per box: the strip says "Answering 3 boxes · Stop all", each box's toolbar stops its
 own, and an answer that lands while you have moved on to another box leaves your

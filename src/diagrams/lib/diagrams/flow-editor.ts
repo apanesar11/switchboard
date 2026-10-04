@@ -97,7 +97,7 @@ export function flowSpecFromCanvas(
   )
 
   const specNodes: FlowNodeSpec[] = nodes.filter((node) => !blank.has(node.id)).map((node) => {
-    const { label, detail, shape, tone, dashed, textSize, align, bold, italic, src, size, ai } =
+    const { label, detail, shape, tone, dashed, textSize, align, bold, italic, src, size, ai, detached } =
       node.data
     return {
       id: node.id,
@@ -115,6 +115,7 @@ export function flowSpecFromCanvas(
       bold: bold === true ? true : undefined,
       italic: italic === true ? true : undefined,
       ai: ai === true ? true : undefined,
+      detached: detached === true ? true : undefined,
       position: { x: pixel(node.position.x), y: pixel(node.position.y) },
       src: shape === "image" ? src : undefined,
       size:
@@ -230,8 +231,11 @@ export function nextChildPosition(
   return clearOfBoxes({ ...start, ...size }, boxes)
 }
 
-/** A box on the canvas, by id. */
-export type FlowTreeBox = FlowRect & { id: string }
+/**
+ * A box on the canvas, by id. Switchboard: `detached` is a box someone detached
+ * from its branch (FlowNodeSpec.detached) — none of its arrows make a tree.
+ */
+export type FlowTreeBox = FlowRect & { id: string; detached?: boolean }
 
 export type FlowTreeEdge = Pick<
   FlowCanvasEdge,
@@ -249,7 +253,9 @@ export const FLOW_ROOM_GAP = FLOW_TAB_GAP_Y * 2
 // The trees Tab builds. A box hangs off another when the one arrow into it of
 // the kind Tab draws — right side to left side, from a box further left — comes
 // from that box. A box two branches merge into, or a loop back to an earlier
-// box, hangs off nothing and is the top of a tree of its own.
+// box, hangs off nothing and is the top of a tree of its own. Switchboard: a
+// detached box is in no tree — its arrows, in and out, count for nothing here —
+// so it moves on its own, and what hung off it tops a tree of its own.
 type FlowTrees = {
   parentOf: Map<string, string>
   childrenOf: Map<string, string[]>
@@ -266,7 +272,7 @@ function flowTrees(
   for (const edge of edges) {
     const from = byId.get(edge.source)
     const to = byId.get(edge.target)
-    if (!from || !to || to.x <= from.x) continue
+    if (!from || !to || to.x <= from.x || from.detached || to.detached) continue
     if (edge.sourceHandle !== "right" || edge.targetHandle !== "left") continue
     sources.set(to.id, (sources.get(to.id) ?? new Set()).add(from.id))
   }
@@ -278,7 +284,10 @@ function flowTrees(
     parentOf.set(id, source)
     childrenOf.set(source, [...(childrenOf.get(source) ?? []), id])
   }
-  // Top to bottom as they stand, so tidying never reorders a branch.
+  // Top to bottom as they stand, so tidying never reorders a branch — and a box
+  // dragged in among its siblings takes the place it was dropped in. By their
+  // middles (Switchboard), so a box dropped half over another goes before it or
+  // after it as it looks; boxes stacked apart sort the same either way.
   const late = new Map(fresh.map((id, index) => [id, index]))
   for (const list of childrenOf.values()) {
     list.sort((a, b) => {
@@ -289,7 +298,9 @@ function flowTrees(
       }
       const boxA = byId.get(a)!
       const boxB = byId.get(b)!
-      return boxA.y - boxB.y || boxA.x - boxB.x || a.localeCompare(b)
+      return (
+        boxA.y + boxA.height / 2 - (boxB.y + boxB.height / 2) || boxA.x - boxB.x || a.localeCompare(b)
+      )
     })
   }
   return { parentOf, childrenOf }
@@ -635,6 +646,139 @@ export function tidyFlowTree(
   return movesFrom(boxes, after)
 }
 
+/** Everything below `id` in `trees`, all the way down. */
+function branchBelow(trees: FlowTrees, id: string): string[] {
+  const out: string[] = []
+  const walk = (at: string) => {
+    for (const child of trees.childrenOf.get(at) ?? []) {
+      out.push(child)
+      walk(child)
+    }
+  }
+  walk(id)
+  return out
+}
+
+/**
+ * Switchboard: what moves with each of `ids` when it is dragged — everything that
+ * hangs off it in the trees Tab builds, all the way down, unless it is one of `ids`
+ * itself or under another of them (that one carries it). A detached box carries
+ * nothing.
+ */
+export function flowBranches(
+  boxes: FlowTreeBox[],
+  edges: FlowTreeEdge[],
+  ids: Iterable<string>,
+): Map<string, string[]> {
+  const trees = flowTrees(new Map(boxes.map((box) => [box.id, box])), edges)
+  const picked = new Set(ids)
+  const taken = new Set(picked)
+  const out = new Map<string, string[]>()
+  for (const id of picked) {
+    // Only from the highest of the picked boxes in each tree: a picked box under
+    // another one moves with that one.
+    let under = false
+    for (let up = trees.parentOf.get(id); up !== undefined; up = trees.parentOf.get(up)) {
+      if (picked.has(up)) under = true
+    }
+    if (under) continue
+    const carried = branchBelow(trees, id).filter((below) => !taken.has(below))
+    for (const below of carried) taken.add(below)
+    if (carried.length > 0) out.set(id, carried)
+  }
+  return out
+}
+
+/**
+ * Switchboard: boxes dragged and let go, put where they belong in the branch Tab
+ * built — what reordering a branch by hand takes. A box dropped between two of its
+ * siblings goes between them, one dropped past the last goes last; it goes back
+ * into its siblings' column (or, the only one there, where Tab would put it), the
+ * branch hanging off it comes along, and the tree is laid out again the way Tab
+ * lays it out, with room made for it as placeTabChild makes it. A box dragged to
+ * the left of the box it hangs off has left that branch, which closes up behind it.
+ *
+ * A box in no tree — nothing hangs off it and it hangs off nothing — is left
+ * wherever it was dropped, and so is everything else: a drag moves nothing then.
+ *
+ * `boxes` and `edges` are the canvas as it is, the dragged boxes where they were
+ * dropped; `from` is where every box the drag moved was when it began — the ones
+ * grabbed, and any the editor carried along with them (flowBranches). What hangs
+ * off a grabbed box and was not carried comes along now. Returns where every box
+ * that moves goes, the dragged ones included.
+ */
+export function tidyAfterMove(
+  boxes: FlowTreeBox[],
+  edges: FlowTreeEdge[],
+  from: ReadonlyMap<string, FlowPoint>,
+): Map<string, FlowPoint> {
+  const now = new Map(boxes.map((box) => [box.id, box]))
+  const moved = new Set(
+    [...from]
+      .filter(([id, at]) => {
+        const box = now.get(id)
+        return box !== undefined && (box.x !== at.x || box.y !== at.y)
+      })
+      .map(([id]) => id),
+  )
+  if (moved.size === 0) return new Map()
+
+  // The canvas as it was before the drag, and the trees in it then.
+  const was = new Map<string, FlowTreeBox>()
+  for (const box of boxes) {
+    const at = moved.has(box.id) ? from.get(box.id)! : box
+    was.set(box.id, { ...box, x: at.x, y: at.y })
+  }
+  const before = flowTrees(was, edges)
+  const inTree = (id: string) =>
+    before.parentOf.has(id) || (before.childrenOf.get(id)?.length ?? 0) > 0
+  // The boxes the drag took somewhere new: those that moved and whose parent
+  // didn't — a box carried along with its parent keeps its place under it.
+  const leaders = [...moved].filter((id) => {
+    const up = before.parentOf.get(id)
+    return inTree(id) && (up === undefined || !moved.has(up))
+  })
+  if (leaders.length === 0) return new Map()
+
+  const work = new Map(boxes.map((box) => [box.id, { ...box }]))
+  const depth = (id: string) => {
+    let n = 0
+    for (let up = before.parentOf.get(id); up !== undefined; up = before.parentOf.get(up)) n += 1
+    return n
+  }
+  // Higher up a tree first, so a box goes back into a column its parent has
+  // already settled in.
+  leaders.sort((a, b) => depth(a) - depth(b))
+
+  // What hangs off a grabbed box and was left behind comes along sideways; the
+  // layout settles it up and down.
+  for (const id of leaders) {
+    const dx = now.get(id)!.x - from.get(id)!.x
+    if (dx === 0) continue
+    for (const below of branchBelow(before, id)) {
+      if (!moved.has(below)) work.get(below)!.x += dx
+    }
+  }
+  // Back into its column — its siblings' that stayed, or where Tab would put it —
+  // with its whole branch.
+  for (const id of leaders) {
+    const parentId = before.parentOf.get(id)
+    if (parentId === undefined) continue
+    const parent = work.get(parentId)!
+    const box = work.get(id)!
+    if (box.x <= parent.x) continue
+    const stayed = (before.childrenOf.get(parentId) ?? []).find((sibling) => !moved.has(sibling))
+    const x = stayed !== undefined ? work.get(stayed)!.x : parent.x + parent.width + FLOW_TAB_GAP_X
+    const dx = x - box.x
+    box.x = x
+    if (dx !== 0) for (const below of branchBelow(before, id)) work.get(below)!.x += dx
+  }
+
+  const anchors = [...leaders, ...leaders.flatMap((id) => before.parentOf.get(id) ?? [])]
+  const after = tidyTrees([...work.values()], edges, anchors, [], was)
+  return movesFrom(boxes, after)
+}
+
 // Switchboard: folding a branch away behind its arrow lives with the layout
 // (layout.ts foldFlow), which the read-only canvas draws through too.
 export { foldFlow, type FlowFoldEdge } from "./layout"
@@ -686,6 +830,7 @@ export function carryOverFlowLayout(
       italic: node.italic ?? old.italic,
       // The AI's mark survives only while the words are still the AI's.
       ai: node.ai ?? (old.ai && old.label === node.label && old.detail === node.detail ? true : undefined),
+      detached: node.detached ?? old.detached,
     }
   })
   const edges = next.edges.map((edge) => {

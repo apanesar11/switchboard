@@ -124,6 +124,8 @@ import {
   RiImageAddLine,
   RiItalic,
   RiKeyboardLine,
+  RiLinkM,
+  RiLinkUnlinkM,
   RiLoader4Line,
   RiSearchLine,
   RiShapesLine,
@@ -158,7 +160,9 @@ import {
   placeTabChild,
   placeTabChildren,
   tidyAfterDelete,
+  tidyAfterMove,
   tidyFlowTree,
+  flowBranches,
   foldFlow,
   UNTITLED_FLOW_LABEL,
   type FlowCanvasEdge,
@@ -627,11 +631,38 @@ function foldOf(nodes: Node[], edges: Edge[]) {
 function showing(nodes: Node[], edges: Edge[], hidden: Set<string> = foldOf(nodes, edges).hidden) {
   return {
     nodes: nodes.filter((node) => !hidden.has(node.id)),
-    boxes: nodes.filter((node) => !hidden.has(node.id)).map((node) => ({ id: node.id, ...rectOf(node) })),
+    boxes: nodes
+      .filter((node) => !hidden.has(node.id))
+      .map((node) => ({
+        id: node.id,
+        ...rectOf(node),
+        detached: (node.data as FlowBoxNodeData).detached === true,
+      })),
     edges: edges.filter(
       (edge) => !isCollapsed(edge) && !hidden.has(edge.source) && !hidden.has(edge.target),
     ),
   }
+}
+
+/**
+ * Switchboard: whether `node` is joined into a branch the way Tab joins boxes — an
+ * arrow from its right side to another's left, or one into its left — or was
+ * detached from one: what the toolbar's Attached / Detached is for.
+ */
+function inBranch(node: Node, edges: Edge[]): boolean {
+  if ((node.data as FlowBoxNodeData).detached) return true
+  return edges.some(
+    (edge) =>
+      edge.sourceHandle === "right" &&
+      edge.targetHandle === "left" &&
+      (edge.source === node.id || edge.target === node.id),
+  )
+}
+
+/** Switchboard: `node` back in its branch if it was detached — what adding to it does. */
+function attached(node: Node): Node {
+  const box = node.data as FlowBoxNodeData
+  return box.detached ? { ...node, data: { ...box, detached: undefined } } : node
 }
 
 /**
@@ -1441,20 +1472,50 @@ function FlowEditorCanvas({
       setNodes((current) =>
         carryFolded(
           current,
-          applyNodeChanges(
-            // The last change of a resize carries the size from its last
-            // step, which for a text is from before it re-wrapped. resize()
-            // has already set the real one.
-            changes.filter(
-              (change) => !(change.type === "dimensions" && change.resizing === false),
-            ),
+          carryBranches(
             current,
+            applyNodeChanges(
+              // The last change of a resize carries the size from its last
+              // step, which for a text is from before it re-wrapped. resize()
+              // has already set the real one.
+              changes.filter(
+                (change) => !(change.type === "dimensions" && change.resizing === false),
+              ),
+              current,
+            ),
+            changes,
           ),
           edgesRef.current,
         ),
       ),
     [],
   )
+
+  // Switchboard: while a box is dragged, what hangs off it comes too, step for step
+  // (flowBranches, worked out when the drag began) — unless it is detached.
+  const carryRef = useRef<Map<string, string[]> | null>(null)
+  function carryBranches(before: Node[], after: Node[], changes: NodeChange[]): Node[] {
+    const carry = carryRef.current
+    if (!carry) return after
+    const dragged = new Set(changes.flatMap((change) => (change.type === "position" ? [change.id] : [])))
+    if (dragged.size === 0) return after
+    const was = new Map(before.map((node) => [node.id, node.position]))
+    const now = new Map(after.map((node) => [node.id, node.position]))
+    const shift = new Map<string, { dx: number; dy: number }>()
+    for (const [id, below] of carry) {
+      const from = was.get(id)
+      const to = now.get(id)
+      if (!from || !to || (from.x === to.x && from.y === to.y)) continue
+      for (const box of below) {
+        if (!dragged.has(box)) shift.set(box, { dx: to.x - from.x, dy: to.y - from.y })
+      }
+    }
+    if (shift.size === 0) return after
+    return after.map((node) => {
+      const by = shift.get(node.id)
+      return by ? { ...node, position: { x: node.position.x + by.dx, y: node.position.y + by.dy } } : node
+    })
+  }
   const onEdgesChange = useCallback(
     (changes: EdgeChange[]) => setEdges((current) => applyEdgeChanges(changes, current)),
     [],
@@ -1479,6 +1540,66 @@ function FlowEditorCanvas({
     },
     [record],
   )
+
+  // Switchboard: where the boxes being dragged were when the drag began, for the
+  // drop to put them where they belong in their branch.
+  const dragFromRef = useRef<Map<string, { x: number; y: number }> | null>(null)
+
+  const startDrag = useCallback(
+    (dragging: Node[]) => {
+      record()
+      const current = nodesRef.current
+      const shown = showing(current, edgesRef.current)
+      const carry = flowBranches(
+        shown.boxes,
+        shown.edges,
+        dragging.map((node) => node.id),
+      )
+      carryRef.current = carry.size > 0 ? carry : null
+      // Where everything the drag will move starts: the boxes grabbed, and what
+      // they carry.
+      const from = new Map(dragging.map((node) => [node.id, { ...node.position }]))
+      const at = new Map(current.map((node) => [node.id, node.position]))
+      for (const below of carry.values()) {
+        for (const id of below) {
+          const position = at.get(id)
+          if (position && !from.has(id)) from.set(id, { ...position })
+        }
+      }
+      dragFromRef.current = from
+    },
+    [record],
+  )
+
+  // Switchboard: a box let go in a branch Tab built takes its place there — between
+  // the siblings it was dropped between, back in their column, what hangs off it
+  // coming along — and the tree is laid out again as Tab and a delete leave it
+  // (tidyAfterMove). A box in no branch stays where it was dropped. The same undo
+  // step as the drag.
+  const dropBoxes = useCallback(() => {
+    const from = dragFromRef.current
+    dragFromRef.current = null
+    carryRef.current = null
+    if (!from || from.size === 0) return
+    setNodes((current) => {
+      const shown = showing(current, edgesRef.current)
+      const moved = tidyAfterMove(shown.boxes, shown.edges, from)
+      if (moved.size === 0) return current
+      // A free text Tab added and still empty puts the boxes it moved back when
+      // it goes; not the ones that have just been settled since.
+      for (const pending of tabMovesRef.current.values()) {
+        for (const id of moved.keys()) pending.delete(id)
+      }
+      return carryFolded(
+        current,
+        current.map((node) => {
+          const to = moved.get(node.id)
+          return to ? { ...node, position: to } : node
+        }),
+        edgesRef.current,
+      )
+    })
+  }, [])
 
   const updateNodes = useCallback(
     (ids: string[], patch: Partial<FlowBoxNodeData>, typing = false) => {
@@ -1937,21 +2058,26 @@ function FlowEditorCanvas({
             detail: undefined,
             // No words yet, so none of them are the AI's.
             ai: undefined,
+            // Switchboard: in the branch it is added to.
+            detached: undefined,
             size: from.shape === "note" ? from.size : undefined,
           }
     const id = nextFlowNodeId(
       nodes.map((node) => node.id),
       box.label,
     )
-    const shown = showing(nodes, edges)
+    // Switchboard: adding to a detached box makes it a branch again.
+    const reattach = from.detached === true
+    const settle = (node: Node) => (reattach && node.id === parent.id ? attached(node) : node)
+    const shown = showing(nodes.map(settle), edges)
     const { position, moved } = placeTabChild(
       shown.boxes,
       shown.edges,
       parent.id,
       { id, ...boxSize(box) },
     )
-    if (moved.size > 0) {
-      if (isText(box)) {
+    if (moved.size > 0 || reattach) {
+      if (isText(box) && moved.size > 0) {
         tabMovesRef.current.set(
           id,
           new Map(
@@ -1962,7 +2088,8 @@ function FlowEditorCanvas({
       setNodes((current) =>
         current.map((node) => {
           const to = moved.get(node.id)
-          return to ? { ...node, position: to } : node
+          const box = settle(node)
+          return to ? { ...box, position: to } : box
         }),
       )
     }
@@ -2022,11 +2149,15 @@ function FlowEditorCanvas({
     const [stepX, stepY] = SNAP_GRID
     const dx = direction === "left" ? -stepX : direction === "right" ? stepX : 0
     const dy = direction === "up" ? -stepY : direction === "down" ? stepY : 0
+    // Switchboard: what hangs off a nudged box comes too, as it does on a drag.
+    const shown = showing(nodes, edges)
+    const picked = nodes.filter((node) => node.selected).map((node) => node.id)
+    const moving = new Set([...picked, ...[...flowBranches(shown.boxes, shown.edges, picked).values()].flat()])
     setNodes((current) =>
       carryFolded(
         current,
         current.map((node) =>
-          node.selected
+          moving.has(node.id)
             ? { ...node, position: { x: node.position.x + dx, y: node.position.y + dy } }
             : node,
         ),
@@ -2034,6 +2165,42 @@ function FlowEditorCanvas({
       ),
     )
     return true
+  }
+
+  // Switchboard: the toolbar's Attached / Detached. Detached, a box is in no branch:
+  // it moves on its own and nothing it is joined to moves with it. Attached again,
+  // it is laid out in its branch and its branch around it, as Tab would. One undo step.
+  function toggleDetached(id: string) {
+    const node = nodesRef.current.find((candidate) => candidate.id === id)
+    if (!node) return
+    record()
+    if (!(node.data as FlowBoxNodeData).detached) {
+      setNodes((current) =>
+        current.map((candidate) =>
+          candidate.id === id
+            ? { ...candidate, data: { ...(candidate.data as FlowBoxNodeData), detached: true } }
+            : candidate,
+        ),
+      )
+      return
+    }
+    const settle = (candidate: Node) => (candidate.id === id ? attached(candidate) : candidate)
+    const shown = showing(nodesRef.current.map(settle), edgesRef.current)
+    const moved = tidyFlowTree(shown.boxes, shown.edges, [id])
+    for (const pending of tabMovesRef.current.values()) {
+      for (const box of moved.keys()) pending.delete(box)
+    }
+    setNodes((current) =>
+      carryFolded(
+        current,
+        current.map((candidate) => {
+          const box = settle(candidate)
+          const to = moved.get(candidate.id)
+          return to ? { ...box, position: to } : box
+        }),
+        edgesRef.current,
+      ),
+    )
   }
 
   // Escape lets go of the selection.
@@ -2339,7 +2506,9 @@ function FlowEditorCanvas({
   // them or ⌫ throws them away; but if you are typing somewhere by then, they
   // go in without taking the keyboard, the selection or the view from you.
   function addAnswers(parentId: string, parts: FlowAiPart[]) {
-    const current = nodesRef.current
+    // Switchboard: answering a detached box makes it a branch again.
+    const settle = (node: Node) => (node.id === parentId ? attached(node) : node)
+    const current = nodesRef.current.map(settle)
     if (!current.some((node) => node.id === parentId)) {
       toast({ title: "The answer arrived after its box was deleted, so it wasn't added" })
       return
@@ -2391,7 +2560,8 @@ function FlowEditorCanvas({
     )
     const shift = (node: Node) => {
       const to = moved.get(node.id)
-      return to ? { ...node, position: to } : node
+      const box = settle(node)
+      return to ? { ...box, position: to } : box
     }
     // A free text Tab added and still empty puts the boxes it moved back when
     // it goes; not the ones the answer has just placed since.
@@ -3123,7 +3293,10 @@ function FlowEditorCanvas({
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onReconnect={onReconnect}
-            onNodeDragStart={() => record()}
+            onNodeDragStart={(_, __, dragging) => startDrag(dragging)}
+            onNodeDragStop={dropBoxes}
+            onSelectionDragStart={(_, dragging) => startDrag(dragging)}
+            onSelectionDragStop={dropBoxes}
             onBeforeDelete={async ({ nodes: going, edges: goingEdges }) => {
               record()
               closeUp(going, goingEdges)
@@ -3246,6 +3419,14 @@ function FlowEditorCanvas({
                   }
                   onDuplicate={soleNode ? () => duplicate(soleNode) : undefined}
                   onDelete={deleteSelection}
+                  branch={
+                    soleNode && inBranch(soleNode, edges)
+                      ? {
+                          detached: (soleNode.data as FlowBoxNodeData).detached === true,
+                          onToggle: () => toggleDetached(soleNode.id),
+                        }
+                      : undefined
+                  }
                   ai={
                     soleNode && hasText(soleNode.data as FlowBoxNodeData)
                       ? {
@@ -3744,6 +3925,7 @@ function BoxBar({
   onDuplicate,
   onDelete,
   ai,
+  branch,
 }: {
   boxes: FlowBoxNodeData[]
   /** Everything selected, arrows included — what Delete removes. */
@@ -3754,6 +3936,8 @@ function BoxBar({
   onDelete: () => void
   /** ✦ Answer, for one box with text selected on its own. */
   ai?: AiBar
+  /** Switchboard: Attached / Detached, for one box in a branch (or detached from one). */
+  branch?: { detached: boolean; onToggle: () => void }
 }) {
   const sharedShape = shared(boxes, "shape")
   const shape = sharedShape !== undefined && isFlowBoxShape(sharedShape) ? sharedShape : undefined
@@ -3866,6 +4050,23 @@ function BoxBar({
         </>
       ) : null}
       {allBoxes || colourable ? <BarDivider /> : null}
+      {branch ? (
+        <BarButton
+          label={
+            branch.detached
+              ? "Detached: moves on its own · click to attach it to its branch"
+              : "Attached: moves with its branch · click to detach"
+          }
+          active={branch.detached}
+          onClick={branch.onToggle}
+        >
+          {branch.detached ? (
+            <RiLinkUnlinkM className="size-4" aria-hidden="true" />
+          ) : (
+            <RiLinkM className="size-4" aria-hidden="true" />
+          )}
+        </BarButton>
+      ) : null}
       {onDuplicate ? (
         <BarButton label="Duplicate · ⌘D" onClick={onDuplicate}>
           <RiFileCopyLine className="size-4" aria-hidden="true" />

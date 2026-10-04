@@ -148,7 +148,10 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   Diagram — goes onto the diagram like a dropped file, at its full size rather than the
   thumbnail's. Tab keeps a branch symmetrical
   around the box it hangs off, and so do ✦ Answer's boxes and a delete; anything in the
-  branch's way moves aside. A drag-select takes every box it touches, and ⌘C / ⌘V copy
+  branch's way moves aside. A box drags everything hanging off it along; drag one up or
+  down among its siblings and let go, and it takes that place, back in line, the branch
+  re-centred around it. The link in its toolbar **detaches** it, to move it on its own
+  (click again to attach it). A drag-select takes every box it touches, and ⌘C / ⌘V copy
   boxes and paste them at the pointer. An arrow's toolbar can **collapse** it: what it
   points at, and everything beyond, folds away behind a "+N" on the box, and the branch
   closes up; click the "+N" to bring it back. A diagram has no limit on boxes. A toolbar

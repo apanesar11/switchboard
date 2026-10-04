@@ -27,7 +27,10 @@ const {
   placeTabChild,
   placeTabChildren,
   tidyAfterDelete,
+  tidyAfterMove,
   tidyFlowTree,
+  flowBranches,
+  flowSpecFromCanvas,
   foldFlow,
   FLOW_TAB_GAP_X,
   FLOW_TAB_GAP_Y,
@@ -222,4 +225,132 @@ test('folding a branch closes the tree up as if it had no children there; unfold
   const reopened = apply(back, tidyFlowTree(back, deeper.edges, ['q'], hidden));
   const fresh = tabTimes(tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']).boxes, start.edges, 'b', ['b1', 'b2', 'b3']);
   for (const b of fresh.boxes) assert.equal(reopened.get(b.id).y, b.y, b.id);
+});
+
+// ── dragging a box within its branch ──
+
+/** `boxes` with `id` dragged to `to`: the canvas at the drop, and where it began. */
+function drag(boxes, id, to) {
+  const was = boxes.find(b => b.id === id);
+  return {
+    dropped: boxes.map(b => (b.id === id ? { ...b, ...to } : b)),
+    from: new Map([[id, { x: was.x, y: was.y }]]),
+  };
+}
+
+/** The ids hanging off `parent` in `at`, top to bottom. */
+function order(at, ids) {
+  return [...ids].sort((a, b) => at.get(a).y - at.get(b).y);
+}
+
+test('a box dropped between two of its siblings goes between them, and the branch closes up around it', () => {
+  const { boxes, edges } = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c', 'd']);
+  const at0 = new Map(boxes.map(b => [b.id, b]));
+  // d, dragged up between a and b, a little off the column.
+  const { dropped, from } = drag(boxes, 'd', { x: at0.get('d').x + 37, y: (at0.get('a').y + at0.get('b').y) / 2 + 10 });
+  const at = apply(dropped, tidyAfterMove(dropped, edges, from));
+  assert.deepEqual(order(at, ['a', 'b', 'c', 'd']), ['a', 'd', 'b', 'c']);
+  for (const id of ['b', 'c', 'd']) assert.equal(at.get(id).x, at.get('a').x, `${id} in the column`);
+  for (const [x, y] of [['a', 'd'], ['d', 'b'], ['b', 'c']]) {
+    assert.equal(at.get(y).y - (at.get(x).y + H), FLOW_TAB_GAP_Y, `${x} to ${y}`);
+  }
+  assert.equal((centre(at.get('a')) + centre(at.get('c'))) / 2, centre(at.get('q')));
+  assert.equal(at.get('q').y, 600, 'the box they hang off stays put');
+});
+
+test('a box dropped below the last goes last; one let go where it was goes back exactly', () => {
+  const { boxes, edges } = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']);
+  const at0 = new Map(boxes.map(b => [b.id, b]));
+  const below = drag(boxes, 'a', { x: at0.get('a').x, y: at0.get('c').y + 200 });
+  const at = apply(below.dropped, tidyAfterMove(below.dropped, edges, below.from));
+  assert.deepEqual(order(at, ['a', 'b', 'c']), ['b', 'c', 'a']);
+  // Nudged a few pixels and dropped, still between the same two: back to where Tab had it.
+  const nudge = drag(boxes, 'b', { x: at0.get('b').x - 12, y: at0.get('b').y + 9 });
+  const back = apply(nudge.dropped, tidyAfterMove(nudge.dropped, edges, nudge.from));
+  for (const b of boxes) assert.deepEqual({ x: back.get(b.id).x, y: back.get(b.id).y }, { x: b.x, y: b.y }, b.id);
+});
+
+test('a box dropped half over a sibling goes before or after it by their middles', () => {
+  const { boxes, edges } = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']);
+  const at0 = new Map(boxes.map(b => [b.id, b]));
+  // c's middle a little above b's: before b.
+  const { dropped, from } = drag(boxes, 'c', { x: at0.get('c').x, y: at0.get('b').y - 5 });
+  const at = apply(dropped, tidyAfterMove(dropped, edges, from));
+  assert.deepEqual(order(at, ['a', 'b', 'c']), ['a', 'c', 'b']);
+});
+
+test('what hangs off a dragged box comes along, laid out around it again', () => {
+  const start = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b']);
+  const deeper = tabTimes(start.boxes, start.edges, 'a', ['a1', 'a2']);
+  const at0 = new Map(deeper.boxes.map(b => [b.id, b]));
+  // a, with its two, dragged below b and off to the right.
+  const { dropped, from } = drag(deeper.boxes, 'a', { x: at0.get('a').x + 120, y: at0.get('b').y + 150 });
+  const at = apply(dropped, tidyAfterMove(dropped, deeper.edges, from));
+  assert.deepEqual(order(at, ['a', 'b']), ['b', 'a']);
+  assert.equal(at.get('a').x, at.get('b').x, 'back in its column');
+  for (const id of ['a1', 'a2']) assert.equal(at.get(id).x, at.get('a').x + W + FLOW_TAB_GAP_X, `${id} still a column right of a`);
+  assert.equal((centre(at.get('a1')) + centre(at.get('a2'))) / 2, centre(at.get('a')), 'a1 and a2 centred on a');
+  const all = [...at.values()];
+  for (const x of all) for (const y of all) if (x !== y) assert.ok(!overlapping(x, y), `${x.id} on ${y.id}`);
+});
+
+test('a box dragged left of what it hangs off leaves the branch, which closes up behind it', () => {
+  const { boxes, edges } = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']);
+  const { dropped, from } = drag(boxes, 'b', { x: -400, y: 100 });
+  const at = apply(dropped, tidyAfterMove(dropped, edges, from));
+  assert.deepEqual({ x: at.get('b').x, y: at.get('b').y }, { x: -400, y: 100 }, 'left where it was dropped');
+  assert.equal(at.get('c').y - (at.get('a').y + H), FLOW_TAB_GAP_Y, 'a and c close up');
+  assert.equal((centre(at.get('a')) + centre(at.get('c'))) / 2, centre(at.get('q')));
+});
+
+test('a box in no branch is left where it was dropped, and moves nothing', () => {
+  const { boxes, edges } = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b']);
+  const loose = [...boxes, box('loose', 900, 900)];
+  const { dropped, from } = drag(loose, 'loose', { x: 280, y: 620 });
+  assert.equal(tidyAfterMove(dropped, edges, from).size, 0);
+});
+
+// ── a box drags its branch along; a detached one moves on its own ──
+
+test('a box carries everything that hangs off it, all the way down — a detached box carries nothing', () => {
+  const start = tabTimes([box('root', 0, 600)], [], 'root', ['p', 's']);
+  const deeper = tabTimes(start.boxes, start.edges, 'p', ['p1', 'p2']);
+  assert.deepEqual(flowBranches(deeper.boxes, deeper.edges, ['root']).get('root').sort(), ['p', 'p1', 'p2', 's']);
+  // Grabbing root and p together: p moves with root, not on its own account.
+  const both = flowBranches(deeper.boxes, deeper.edges, ['root', 'p']);
+  assert.deepEqual([...both.keys()], ['root']);
+  assert.ok(!both.get('root').includes('p'));
+  // p detached: root no longer carries p, nor what hung off it; p carries nothing.
+  const cut = deeper.boxes.map(b => (b.id === 'p' ? { ...b, detached: true } : b));
+  assert.deepEqual(flowBranches(cut, deeper.edges, ['root']).get('root'), ['s']);
+  assert.equal(flowBranches(cut, deeper.edges, ['p']).size, 0);
+});
+
+test('a tree dragged whole by its top box lands as it was dropped', () => {
+  const start = tabTimes([box('root', 0, 600)], [], 'root', ['a', 'b']);
+  const deeper = tabTimes(start.boxes, start.edges, 'a', ['a1', 'a2']);
+  // The editor moves the whole branch with root, step for step; the drop has all of them.
+  const from = new Map(deeper.boxes.map(b => [b.id, { x: b.x, y: b.y }]));
+  const dropped = deeper.boxes.map(b => ({ ...b, x: b.x + 140, y: b.y + 260 }));
+  assert.equal(tidyAfterMove(dropped, deeper.edges, from).size, 0, 'nothing moves after the drop');
+});
+
+test('a detached box is left where it is dropped, and laying out its old branch leaves it alone', () => {
+  const { boxes, edges } = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']);
+  const cut = boxes.map(b => (b.id === 'b' ? { ...b, detached: true } : b));
+  const { dropped, from } = drag(cut, 'b', { x: 700, y: 100 });
+  assert.equal(tidyAfterMove(dropped, edges, from).size, 0);
+  // Tidying q's branch now lays out a and c around q, and leaves b where it was put.
+  const at = apply(dropped, tidyFlowTree(dropped, edges, ['q']));
+  assert.deepEqual({ x: at.get('b').x, y: at.get('b').y }, { x: 700, y: 100 });
+  assert.equal((centre(at.get('a')) + centre(at.get('c'))) / 2, centre(at.get('q')));
+});
+
+test('a detached box is saved as one', () => {
+  const node = (id, detached) => ({
+    id, type: 'box', position: { x: 0, y: 0 },
+    data: { label: id, shape: 'rounded', tone: 'default', dashed: false, textSize: 'md', align: 'center', bold: false, italic: false, detached },
+  });
+  const spec = flowSpecFromCanvas({}, [node('a', true), node('b', undefined)], []);
+  assert.deepEqual(spec.nodes.map(n => n.detached), [true, undefined]);
 });

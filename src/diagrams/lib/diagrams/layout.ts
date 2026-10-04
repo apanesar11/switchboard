@@ -223,6 +223,8 @@ export type FlowBoxNodeData = {
   size?: FlowSize
   /** Written by ✦ Answer and not edited since — see FlowNodeSpec.ai. */
   ai?: boolean
+  /** Switchboard: in no branch, moving on its own — see FlowNodeSpec.detached. */
+  detached?: boolean
 }
 
 /** What a flow edge carries, so the editor can read an edge back into a spec. */
@@ -629,6 +631,7 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
       src: node.src,
       size: node.size,
       ai: node.ai === true ? true : undefined,
+      detached: node.detached === true ? true : undefined,
     } satisfies FlowBoxNodeData,
     draggable: false,
     selectable: false,

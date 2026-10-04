@@ -141,6 +141,13 @@ export type FlowNodeSpec = {
    */
   ai?: boolean
   /**
+   * Switchboard: detached from its branch, by the editor's toolbar. A box normally
+   * drags what hangs off it along, and settles into the branch it hangs off when
+   * let go; a detached one is in no branch — it moves on its own, nothing it is
+   * joined to moves with it, and laying out a branch leaves it where it is.
+   */
+  detached?: boolean
+  /**
    * Where someone dragged the box, written by the Diagrams page's editor. Absent
    * means "lay it out for me", which is what every Claude-authored node is.
    */
