@@ -2040,11 +2040,11 @@ window.SB = window.SB || {};
     return state.workspaces.length ? state.workspaces[0].id : null;
   }
 
-  // There is deliberately no uptime ticker here: views/workspace.js's liveSpan
-  // already rewrites the "running 14s" text node in place once a second and clears
-  // its own interval when the node leaves the document. Calling render() for it
-  // would rebuild the whole main column every second, which throws away the logs
-  // terminal's keyboard focus, the hovered row and any selection. Everything that
+  // There is deliberately no uptime ticker here (the header's old "running 14s" went
+  // with its sub line). Calling render() once a second for one would rebuild the
+  // whole main column every second, which throws away the logs terminal's keyboard
+  // focus, the hovered row and any selection — a ticking label must rewrite its own
+  // text node in place. Everything that
   // must genuinely redraw (Start→Stop, links coming up, an exit code) already
   // arrives through handleRunState / handleLinks, which schedule for themselves.
 

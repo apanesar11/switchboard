@@ -155,7 +155,7 @@ Workspace = {
   fetchAgeMs: 540000 | null,
   fetchStale: false,                     // true past 10 min — behind-counts are a guess
   repos: [Repo],                          // present only on scan(), not on list()
-  branchSummary: 'TASK-352' | 'mixed' | 'main',  // the dominant non-main branch, for the sub line
+  branchSummary: 'TASK-352' | 'mixed' | 'main',  // the dominant non-main branch, for the Editor's full-screen band
   files: 6, add: 131, del: 24,           // workspace totals over all repos
   behindRepos: 1,                         // repos on main with behind > 0
 }
@@ -1812,13 +1812,17 @@ user lives in — no-drag so the click is not eaten by the drag region, and the 
 name in the Files, Diff and Pull request breadcrumbs jumps there too. The repo name and
 the back caret keep the conventional step up to Changes.
 
-The sub line tells the truth about a folder git has never seen: a workspace with no
-repos reads `not a git repo` in place of `main · clean`, and the body says the same
-at more length. The workspace that is this app (`self`) has a Publish button in
-place of Start and no `no dev script` bar. During a publish the button reads
-`Publishing…`; a verified update changes it to `Published`, with a one-line prompt
-to close and reopen Switchboard. Failures appear in the same status line and allow
-retry. Other workspaces retain their existing Start/Stop actions.
+The workspace header has no sub line: the name, Pull main and Start/Stop, then the
+segment straight under them. The user cut `main · clean` (2026-10-04) as height spent
+on nothing the header owned — branch, changes and behind are the Changes tab's,
+running and failed the rail's dot and the Stop button, a missing dev script the
+Changes tab's bar and the greyed Start. Don't put it back. A folder git has never
+seen says `not a git repo` in its body. The workspace that is this app (`self`) has a
+Publish button in place of Start and no `no dev script` bar. During a publish the
+button reads `Publishing…`; a verified update changes it to `Published`, its tooltip
+saying to close and reopen Switchboard. A failed publish is the one line the header
+still grows, under the name, and the button allows a retry. Other workspaces retain
+their existing Start/Stop actions.
 
 ### R5–R7 views
 Each exports `SB.views.<name>.render(state)` returning a DOM node and nothing else —
@@ -2231,8 +2235,8 @@ and emptied.
 
 ## 7. Screens (from the mock-up — `out/01.html` … `out/07.html`)
 
-1. **Workspace / Changes** — header: name, sub line (`TASK-352 · 6 changes · 1 repo behind main`
-   `· ● running 14s`), `Pull main`, `Start`/`Stop`. Segmented `Changes | Logs | Terminal |
+1. **Workspace / Changes** — header: name, `Pull main`, `Start`/`Stop` (the mock-up's sub
+   line `TASK-352 · 6 changes · 1 repo behind main · ● running 14s` was cut, see R4). Segmented `Changes | Logs | Terminal |
    Editor | Notes` (R4; the mock-up predates the last three). One row per
    repo: name (150px), branch pill (`⎇ TASK-352 #218`), refresh icon button (only when on
    main), summary button (`4 files +84 −3 ›`) when it has changes else plain state text

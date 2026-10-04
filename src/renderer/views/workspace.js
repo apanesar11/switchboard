@@ -109,69 +109,15 @@ SB.views = SB.views || {};
 
   // ── header ────────────────────────────────────────────────────────────────
 
-  function dur(ms) {
-    var s = Math.max(0, Math.round(ms / 1000));
-    if (s < 60) return s + 's';
-    var m = Math.floor(s / 60);
-    if (m < 60) return m + 'm';
-    var hours = Math.floor(m / 60);
-    var rest = m % 60;
-    return rest ? hours + 'h ' + rest + 'm' : hours + 'h';
-  }
-
-  // The running duration ticks in place. The interval stops itself the moment the
-  // node leaves the document, which is what every re-render does to it.
-  function tick(span, label, startedAt) {
-    var id = setInterval(function () {
-      if (!span.isConnected) { clearInterval(id); return; }
-      label.nodeValue = 'running ' + dur(Date.now() - startedAt);
-    }, 1000);
-  }
-
-  function liveSpan(run) {
-    if (run.status === 'starting') return h('span.live', h('span.dot.run'), 'starting…');
-    if (run.status === 'running') {
-      var started = run.startedAt || Date.now();
-      var label = dom.text('running ' + dur(Date.now() - started));
-      var span = h('span.live', h('span.dot.run'), label);
-      tick(span, label, started);
-      return span;
-    }
-    if (run.status === 'exited') {
-      if (run.exitCode) return h('span.live', h('span.dot.fail'), 'exited ' + run.exitCode);
-      return h('span.live', null, 'stopped');
-    }
-    return null;
-  }
-
-  function subLine(ws, state, run) {
-    if (ws.self && state.publish && state.publish.message) {
-      return h('div.sub.sec', { role: 'status', 'aria-live': 'polite' }, state.publish.message);
-    }
-    if (!scanned(ws)) return h('div.sub.sec', null, 'scanning…');
-
-    var parts = [];
-    if (!(ws.repos || []).length) {
-      // A folder git has never seen has no branch to be on and nothing to be clean:
-      // the scan's summary falls back to 'main' and 0 files would read 'clean',
-      // and both would be a lie. The body says the same thing at more length.
-      parts.push('not a git repo');
-    } else {
-      parts.push(ws.branchSummary || 'main');
-      parts.push(ws.files ? dom.plural(ws.files, 'change') : 'clean');
-      if (ws.behindRepos > 0) parts.push(dom.plural(ws.behindRepos, 'repo') + ' behind main');
-    }
-    // The app itself has no Start to be missing a script for (see runButton).
-    if (!ws.self && !startable(ws)) parts.push('no dev script');
-    var live = liveSpan(run);
-    if (live) parts.push(live);
-
-    var el = h('div.sub.sec');
-    for (var i = 0; i < parts.length; i++) {
-      if (i) el.appendChild(dom.text(' · '));
-      el.appendChild(typeof parts[i] === 'string' ? dom.text(parts[i]) : parts[i]);
-    }
-    return el;
+  // No sub line under the name: the user cut "main · clean" (2026-10-04) because it
+  // only cost height above the segment. Nothing in it was the header's alone —
+  // running and failed are the rail's dot and the Stop button, changes and behind
+  // are the Changes tab, a missing dev script is the Changes tab's notice and the
+  // greyed Start, and Publish names its own progress. A failed Publish is the one
+  // thing said nowhere else, so that alone still gets a line.
+  function publishError(ws, state) {
+    if (!ws.self || !state.publish || state.publish.status !== 'error' || !state.publish.message) return null;
+    return h('div.sub.sec', { role: 'status', 'aria-live': 'polite' }, state.publish.message);
   }
 
   function pullButton(ws) {
@@ -251,7 +197,7 @@ SB.views = SB.views || {};
 
     return h('div.hd',
       h('div.top', title, pullButton(ws), runButton(ws, run, state)),
-      subLine(ws, state, run),
+      publishError(ws, state),
       segmented(
         [{ key: 'changes', label: 'Changes' }, { key: 'logs', label: 'Logs' },
           { key: 'terminal', label: 'Terminal' }, { key: 'editor', label: 'Editor' },
