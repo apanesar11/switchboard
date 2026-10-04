@@ -6,11 +6,12 @@
 // the work to git.js / github.js / runner.js, then shape the result into the
 // exact payload §4 promises.  Nothing here throws across IPC.
 
-const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeTheme, shell } = require('electron');
+const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeTheme, net, protocol, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { execFile, execFileSync } = require('child_process');
+const { pathToFileURL } = require('url');
 
 const config = require('./config.js');
 const workspaces = require('./workspaces.js');
@@ -31,6 +32,10 @@ const usage = require('./usage.js');
 const editor = require('./editor.js');
 // The Notes tab's one markdown file per workspace (§4.15) — outside every repo.
 const notes = require('./notes.js');
+// The Diagrams tab's files (§4.17) — one per diagram, per workspace, outside every repo —
+// and ✦ Answer (§4.18): who answers a box's question, a CLI in the workspace or an API.
+const diagrams = require('./diagrams.js');
+const answer = require('./answer.js');
 const { Publisher } = require('./publisher.js');
 const publisher = new Publisher({
   target: app.isPackaged ? path.resolve(process.execPath, '..', '..', '..')
@@ -67,6 +72,12 @@ let noteDirty = 0;
 // Set once the renderer has been asked to write its notes for a close that is not a
 // quit, so the second pass through 'close' lets the window go.
 let noteClose = false;
+// How many diagrams hold edits the renderer has not written yet (sb:diagrams:dirty) — 0
+// or 1, one being open at a time. Unlike noteDirty this is usually just the editor's
+// 700 ms autosave in flight, so it is FLUSHED before anything is asked: a close holds
+// for the renderer to write it (the same flush the notes use), and only a diagram that
+// still could not be written by then joins the question.
+let diagramDirty = 0;
 
 process.on('unhandledRejection', reason => {
   console.error('[switchboard] unhandled rejection:', reason);
@@ -236,7 +247,7 @@ function openExternal(url) {
  * says what it would have asked and lets the close go ahead.
  */
 function confirmDiscard() {
-  const n = editorDirty + noteDirty;
+  const n = editorDirty + noteDirty + diagramDirty;
   if (process.env.SB_SMOKE) {
     console.log(`SMOKE unsaved: ${n}`);
     return true;
@@ -297,7 +308,7 @@ function createWindow() {
     // would die with the WebContents. So the close is held for one round trip while
     // the renderer writes, and the second pass through here lets it go. Before the
     // question below, so a note that saved fine is not asked about at all.
-    if (!quitting && !noteClose && noteDirty > 0) {
+    if (!quitting && !noteClose && (noteDirty + diagramDirty) > 0) {
       event.preventDefault();
       noteClose = true;
       flushNotes().then(() => {
@@ -307,7 +318,7 @@ function createWindow() {
       });
       return;
     }
-    if (!quitting && !discardOk && (editorDirty + noteDirty) > 0 && !confirmDiscard()) {
+    if (!quitting && !discardOk && (editorDirty + noteDirty + diagramDirty) > 0 && !confirmDiscard()) {
       event.preventDefault();
       noteClose = false;               // a cancelled close must flush again next time
       return;
@@ -315,15 +326,18 @@ function createWindow() {
   });
   mainWindow.on('closed', () => {
     mainWindow = null;
+    // Nobody is left to read an answer still on its way.
+    answer.stopAll();
     editorDirty = 0;                      // the renderer, and every buffer in it, is gone
     noteDirty = 0;
+    diagramDirty = 0;
     noteClose = false;
   });
   // Likewise when the page itself goes — a reload from DevTools, a crashed renderer: the
   // buffers are gone and the count main holds would ask about files nobody has any more.
   // The page that comes back starts at 0 and reports again from its first edit.
-  mainWindow.webContents.on('did-navigate', () => { editorDirty = 0; });
-  mainWindow.webContents.on('render-process-gone', () => { editorDirty = 0; });
+  mainWindow.webContents.on('did-navigate', () => { editorDirty = 0; diagramDirty = 0; });
+  mainWindow.webContents.on('render-process-gone', () => { editorDirty = 0; diagramDirty = 0; });
 
   // Every http(s) link in the app — the ports on a repo row, Open on GitHub —
   // belongs in the user's browser, never in this window.
@@ -727,7 +741,28 @@ function buildMenu() {
   const appearance = storedAppearance();
   const sidebarShown = storedSidebar();
   const template = [];
-  if (process.platform === 'darwin') template.push({ role: 'appMenu' });   // keeps ⌘Q
+  // The app menu by hand rather than `role: 'appMenu'`, for the one item that role has no
+  // room for: Settings… (⌘,), where ✦ Answer's choices and API keys live (§4.18). A menu
+  // item rather than a page shortcut, so it works from every screen and the Mac's own
+  // place for it has it. Everything else is the role's own list.
+  if (process.platform === 'darwin') {
+    template.push({
+      label: app.name,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => send('sb:evt:openSettings') },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    });
+  }
   template.push(
     {
       label: 'File',
@@ -1254,6 +1289,75 @@ handle('sb:notes:dirty', count => {
   return { ok: true };
 });
 
+// ---------------------------------------------------------------------------
+// Diagrams (§4.17)
+// The Diagrams tab's flow diagrams, in <config dir>/diagrams/<workspace>/. diagrams.js
+// hashes the workspace id into its folder name, as notes.js does, so these pass their
+// arguments through; the bundle has validated a spec before it asks for a write.
+// ---------------------------------------------------------------------------
+
+handle('sb:diagrams:list', id => diagrams.list(id));
+handle('sb:diagrams:get', (id, diagramId) => diagrams.get(id, diagramId));
+handle('sb:diagrams:create', (id, name, spec) => diagrams.create(id, name, spec));
+handle('sb:diagrams:update', (id, diagramId, name, spec) => diagrams.update(id, diagramId, name, spec));
+handle('sb:diagrams:archive', (id, diagramId, archived) => diagrams.setArchived(id, diagramId, archived));
+handle('sb:diagrams:delete', (id, diagramId) => diagrams.remove(id, diagramId));
+handle('sb:diagrams:saveImage', (bytes, type) => diagrams.saveImage(bytes, type));
+
+// The clipboard's picture, for Edit ▸ Paste over a canvas. The same read as
+// clipboardImagePaste() below, handing back the bytes rather than a file path.
+handle('sb:diagrams:clipboardImage', async () => {
+  let hasImage = false;
+  try { hasImage = await clipboard.has('image/png'); } catch (_) { hasImage = false; }
+  if (!hasImage) return { ok: false, error: 'there is no picture on the clipboard' };
+  try {
+    const items = await clipboard.read();
+    const item = (items || []).find(it => it && it.types && it.types.includes('image/png'));
+    if (!item) return { ok: false, error: 'there is no picture on the clipboard' };
+    const blob = await item.getType('image/png');
+    return { ok: true, bytes: new Uint8Array(await blob.arrayBuffer()), type: 'image/png' };
+  } catch (err) {
+    return { ok: false, error: 'could not read the clipboard: ' + err.message };
+  }
+});
+
+// 0 or 1 — see `diagramDirty`. Like sb:notes:dirty, a count that rises during a quit
+// takes back a Discard given for the smaller one.
+handle('sb:diagrams:dirty', count => {
+  const n = Number(count);
+  const next = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  if (quitting && next > diagramDirty) discardOk = false;
+  diagramDirty = next;
+  return { ok: true };
+});
+
+// ---------------------------------------------------------------------------
+// ✦ Answer (§4.18)
+// Who answers a box's question, and the asking. answer.js owns the four providers,
+// the stored choice and the keys; a CLI runs in the workspace's folder, which is
+// resolved HERE from the workspace id — never a path the page hands over.
+// ---------------------------------------------------------------------------
+
+/** After any change, every window hears the new status: the menu and Settings agree. */
+function broadcastAnswer(status) {
+  if (status && status.ok) send('sb:evt:answerStatus', status);
+  return status;
+}
+
+handle('sb:answer:status', opts => answer.status(opts || {}));
+handle('sb:answer:setSettings', async patch => broadcastAnswer(await answer.setSettings(patch)));
+handle('sb:answer:setKey', async (provider, key) => broadcastAnswer(await answer.setKey(provider, key)));
+handle('sb:answer:removeKey', async provider => broadcastAnswer(await answer.removeKey(provider)));
+handle('sb:answer:start', async (id, req) => {
+  const r = req && typeof req === 'object' ? req : {};
+  const dir = r.wsId ? await workspaces.dirOf(r.wsId) : null;
+  if ((r.provider === 'claude-code' || r.provider === 'codex') && !dir) {
+    return { ok: false, error: `could not find the folder for ${r.wsId || 'this workspace'}` };
+  }
+  return answer.start(id, Object.assign({}, r, { dir }), step => send('sb:evt:answerStep', id, step));
+});
+handle('sb:answer:stop', id => answer.stop(id));
+
 // The renderer answering flushNotes(). Resolving a promise, not returning a value: the
 // quit is waiting on it. The generation matters: a quit can be CANCELLED (an unsaved
 // Editor buffer, a failed applyOnQuit) after this one has timed out, and without the id
@@ -1267,7 +1371,7 @@ handle('sb:notes:flushed', id => {
 /** Ask the renderer to write every unsaved note, and wait — but never for long. */
 function flushNotes() {
   const win = mainWindow;
-  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return notes.settle();
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return Promise.all([notes.settle(), diagrams.settle()]);
   const id = ++noteFlushId;
   return new Promise(resolve => {
     const done = () => { noteFlush = null; clearTimeout(timer); resolve(); };
@@ -1278,7 +1382,7 @@ function flushNotes() {
     } catch (_) {
       done();
     }
-  }).then(() => notes.settle());
+  }).then(() => Promise.all([notes.settle(), diagrams.settle()]));
 }
 
 // ⌘W anywhere the Editor does not want it (File ▸ Close is an item now — buildMenu says
@@ -1456,6 +1560,9 @@ handle('sb:editor', dir => new Promise(resolve => {
 // that takes its full SIGTERM→SIGKILL grace must not hold the shells' SIGHUP back,
 // and neither must be skipped because the other threw.
 async function stopEverything() {
+  // A CLI still answering a diagram's box is a process of ours, with children of its
+  // own: it goes with the app, on every way out (§4.18).
+  answer.stopAll();
   const stopSessions = (async () => {
     try {
       const result = await runner.stopAll();
@@ -1483,6 +1590,23 @@ async function stopEverything() {
   await Promise.all([stopSessions, closeShells]);
 }
 
+// sbimg://image/<file> — a picture on a diagram, kept on this Mac (diagrams.js). A
+// standard, secure scheme so the page can show it like any image; registered before
+// `ready`, as Electron requires, and served from the images folder and nowhere else.
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'sbimg', privileges: { standard: true, secure: true, supportFetchAPI: true } },
+]);
+
+function serveDiagramImage(request) {
+  let file = null;
+  try {
+    const url = new URL(request.url);
+    if (url.host === 'image') file = diagrams.imagePath(decodeURIComponent(url.pathname.replace(/^\/+/, '')));
+  } catch (_) { file = null; }
+  if (!file) return new Response('not found', { status: 404 });
+  return net.fetch(pathToFileURL(file).toString()).catch(() => new Response('not found', { status: 404 }));
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
@@ -1508,6 +1632,7 @@ if (!app.requestSingleInstanceLock()) {
       if (storedAppearance() === 'system') applyAppearance();
     });
     buildMenu();
+    protocol.handle('sbimg', serveDiagramImage);
     // Before the window: the first answer is usually in hand by the time the renderer
     // asks, so the Grid's gauge is there on the first paint rather than a beat later.
     usage.start();
@@ -1553,7 +1678,9 @@ if (!app.requestSingleInstanceLock()) {
       // before-quit (`quitting`) nor the window's close would ask. Before applyOnQuit(),
       // so a Cancel keeps the prepared update for the next quit, along with the buffers;
       // the dev servers and shells are already stopped, which a cancelled quit can live with.
-      if (!discardOk && (editorDirty + noteDirty) > 0 && !confirmDiscard()) {
+      // A diagram counts only here, after the flush has written it: before it, its count
+      // is the editor's autosave in flight, not something to ask about.
+      if (!discardOk && (editorDirty + noteDirty + diagramDirty) > 0 && !confirmDiscard()) {
         quitting = false;
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
         return;

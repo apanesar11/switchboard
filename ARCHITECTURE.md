@@ -15,7 +15,14 @@ edit files you do not own.
 ## 0. Ground rules
 
 - **No build step, no bundler, no framework.** Plain CommonJS in the main process,
-  plain *classic* scripts (no ES modules, no `import`) in the renderer.
+  plain *classic* scripts (no ES modules, no `import`) in the renderer. **One exception,
+  and only one:** the Diagrams tab's editor (§4.17, R15) is a web admin's React Flow
+  editor, copied into `src/diagrams/` and mirrored by hand — four thousand lines that would
+  otherwise be two editors to keep alike. `scripts/build-diagrams.js` builds it into
+  `src/renderer/diagrams/diagrams.{js,css}`: one IIFE that sets `window.SBDiagrams`, and a
+  stylesheet scoped to the element the editor is mounted in. Both are generated and
+  ignored by git; `npm start` (prestart) and `scripts/package.js` build them. Nothing else
+  in the app may import from the bundle or be built.
 - **Renderer modules attach to a single global**, `window.SB`. Every renderer file
   starts with `window.SB = window.SB || {}` and assigns its namespace. Load order is
   fixed by `index.html`; a file may only call into namespaces loaded before it, except
@@ -85,6 +92,12 @@ switchboard/
   src/renderer/views/prs.js     — Pull requests screen: every open PR of yours    [R12]
   src/renderer/views/editor.js  — Editor tab (Monaco over the workspace's repos)  [R13]
   src/main/notes.js             — the Notes tab's one markdown file per workspace    [M9]
+  src/main/diagrams.js          — the Diagrams tab's files, per workspace; pictures  [M10]
+  src/main/answer.js            — ✦ Answer: Claude Code / Codex / Claude API / OpenAI [M11]
+  src/renderer/views/diagrams.js — Diagrams tab: the seam to the editor bundle       [R15]
+  src/renderer/views/settings.js — Settings screen: who answers, API keys            [R16]
+  src/diagrams/                 — the editor bundle's sources (mirrored by hand)     [R15]
+  scripts/build-diagrams.js     — builds src/diagrams into src/renderer/diagrams/   [R15]
   src/renderer/noteedit.js      — SB.noteEditor: a block editor over markdown       [R14]
   src/renderer/views/notes.js   — Notes tab, and the note a Grid square can show    [R14]
 ```
@@ -773,6 +786,122 @@ their realpath: realpath follows links, so `CLAUDE.md -> AGENTS.md` and `AGENTS.
 resolved to one path, read as "the same file", and `fs.rename` replaced the real file with
 the link — a dangling self-reference, the bytes gone and never in the Trash. Measured.
 
+### 4.17 Diagrams
+
+The sixth workspace tab, **Diagrams** (added 2026-10-04, the user's ask: their web
+admin's diagram feature as a desktop app, inside Switchboard, with its ✦ Answer using
+"the corresponding workspace and the CLI tool … I should be able to select what CLI tool
+it is, whether it's Codex or Claude"). Flow diagrams — boxes, arrows, sticky notes, text
+and pictures, arranged by hand, Tab for the next box — in the admin's own editor, saved
+as you go. The renderer side is R15; who answers ✦ Answer is §4.18.
+
+**The editor is the admin's, mirrored by hand.** `src/diagrams/` holds copies of the
+admin's `app/dashboard/diagrams/*` and `lib/diagrams/*` under the same paths, so a change
+there can be carried across file by file. Where Switchboard differs the copy says so
+(`Switchboard:`), and the differences sit behind module boundaries wherever they can: the
+admin's server actions, Vercel Blob uploads and OpenAI client are replaced by modules of
+the same names that call `window.sb` (`lib/diagrams/actions.ts`, `upload.ts`,
+`ai-client.ts`). It is the one React in the app, built by `scripts/build-diagrams.js`
+(§0).
+
+**A diagram belongs to a workspace and lives on this Mac.** One JSON file per diagram —
+the admin's row, `{ id, name, kind, createdAt, updatedAt, archivedAt, spec }` minus the
+product — in `<config dir>/diagrams/<workspace>-<hash>/<id>.json`, beside the config like
+a note and for the same reason: never in a repo, never in Changes, never one `git add -A`
+from a commit. The folder name hashes the whole workspace id, as `notes.js` does. These
+are not the admin's diagrams and never sync with them; the format is the same, so a spec
+can be carried either way by hand.
+
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.diagramsList(id)` | `sb:diagrams:list` | `{ ok, data: DiagramSummary[] }` — archived ones included, newest-touched first, no specs. A workspace with none answers `[]` |
+| `sb.diagramsGet(id, diagramId)` | `sb:diagrams:get` | `{ ok, data: summary + spec }` — the spec as stored; the bundle re-parses it with the admin's validator and shows what is wrong with one that no longer draws |
+| `sb.diagramsCreate(id, name, spec)` | `sb:diagrams:create` | `{ ok, data: detail }`, or `{ ok:false, error }` — a name already taken IN THAT WORKSPACE says so |
+| `sb.diagramsUpdate(id, diagramId, name, spec)` | `sb:diagrams:update` | the autosave: `{ ok, data: detail }`; `archivedAt` is left alone |
+| `sb.diagramsArchive(id, diagramId, archived)` | `sb:diagrams:archive` | `{ ok, data: summary }` — `updatedAt` does not move, so archiving reshuffles nothing |
+| `sb.diagramsDelete(id, diagramId)` | `sb:diagrams:delete` | `{ ok, data: { id } }` — for good; the confirmation dialog is the gate |
+| `sb.diagramsSaveImage(bytes, type)` | `sb:diagrams:saveImage` | `{ ok, src }` — `sbimg://image/<file>`; see below |
+| `sb.diagramsClipboardImage()` | `sb:diagrams:clipboardImage` | `{ ok, bytes, type }` — the clipboard's PNG, for Edit ▸ Paste over the canvas |
+| `sb.diagramsDirty(count)` | `sb:diagrams:dirty` | `{ ok }` — 0 or 1, whenever it changes; see below |
+
+**Pictures are kept once, by content.** A picture dropped, pasted or picked onto a
+canvas is written to `<config dir>/diagrams/images/<sha256>.<png|jpg|webp>` and the image
+node's `src` is `sbimg://image/<file>`. `sbimg` is registered as a standard, secure
+scheme before `ready` and served by `protocol.handle` from that folder and nowhere else:
+a request names a file only by a name `imagePath()` accepts (32 hex and one of three
+extensions). The bundle's copy of the admin's validator accepts that one scheme beside
+`https:`. Deleting a diagram leaves its pictures — another diagram may show the same one.
+
+**Unsaved edits are flushed, not asked about.** The editor saves 700 ms after the last
+change, so a close or a quit usually lands inside that wait. The admin holds the page
+with a `beforeunload`, which Electron answers by refusing to close in silence; here the
+editor reports whether it holds anything (`sb:diagrams:dirty`) and rides on the notes'
+flush instead (§4.15): `notes.js`'s `onFlush` writes the open diagram before it answers,
+and `flushNotes()` waits on `diagrams.settle()` too. A close holds while `noteDirty +
+diagramDirty > 0` and flushes; only a diagram that STILL could not be written joins the
+"unsaved changes" question. The quit asks about diagrams only after its flush, never
+before — before it, the count is the autosave in flight.
+
+**The Edit menu reaches the canvas.** ⌘Z, ⇧⌘Z and ⌘V are menu items (§4.7), so the
+editor never sees them as keystrokes: `handleEdit` asks R15 right after the terminal, and
+while the canvas has the keyboard — not a box's own text field, which gets the document's
+fallback like any field — Undo and Redo are the editor's, and an image Paste fetches the
+clipboard's picture and adds it.
+
+### 4.18 ✦ Answer and Settings
+
+✦ Answer, on the Diagrams tab, puts a box's question to an AI and hangs the answer off it
+as 1–4 boxes. The admin asks one OpenAI model; here it is any of four, chosen per Mac —
+the user has Claude Code on one laptop and Codex on another:
+
+| provider | what it is | sees |
+|---|---|---|
+| `claude-code` | `claude -p` in the workspace folder, `--tools Read,Grep,Glob` and nothing else, `--permission-mode dontAsk`, prompt on stdin, `--json-schema` for the answer, `--output-format stream-json` for the steps | the workspace's code |
+| `codex` | `codex exec --json --sandbox read-only --cd <folder> --output-schema … --output-last-message …` | the workspace's code |
+| `claude-api` | the Messages API, the answer as one forced tool call whose input is the schema's JSON | only the diagram |
+| `openai-api` | the Responses API with the admin's json_schema format, streamed, the admin's models and probed efforts | only the diagram |
+
+A CLI is slower — it opens and searches files first — and knows the code; an API answers
+in seconds and is exactly the admin's ✦ Answer. The user rejected sending an API any part
+of the workspace: "the API options will be very limited." The prompt and the answer's
+JSON shape are the admin's either way (`lib/diagrams/ai.ts`, copied unchanged); a CLI is
+also told it is in the workspace, that it can only read, and to name the file in a box's
+second line when the answer came from code (`lib/diagrams/answer.ts`).
+
+**main owns all of it**: which providers exist, which models and efforts each takes,
+whether each CLI is installed and signed in (`claude --version` / `auth status`, `codex
+--version` / `login status`, cached a minute), the stored choice (config.json's `answer`
+block), and the keys. The page names a provider and the workspace; main resolves the
+workspace's folder itself (`workspaces.dirOf`) — a CLI never runs in a path the page
+handed over — and reads the model and effort from the stored settings, never from the
+request.
+
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.answerStatus({fresh})` | `sb:answer:status` | `{ ok, settings, providers, keysSafe }` — `settings.provider` is never null: with nothing chosen it is the first one ready (a CLI that is here, then an API with a key). `fresh` looks for the CLIs again |
+| `sb.answerSetSettings(patch)` | `sb:answer:setSettings` | the status, after merging `{ provider, split, context, claudeCodeEffort, claudeApiModel, openaiModel, openaiEffort }` |
+| `sb.answerSetKey(provider, key)` | `sb:answer:setKey` | the status — after the provider accepted the key (`GET /v1/models`); a refused key is never stored and answers `{ ok:false, error, code:'bad-key' }` |
+| `sb.answerRemoveKey(provider)` | `sb:answer:removeKey` | the status |
+| `sb.answerStart(id, req)` | `sb:answer:start` | `{ ok, text, files? }` — the answer's JSON, which the bundle reads into boxes — or `{ ok:false, error, code }`, `code` one of `missing`, `signed-out`, `no-key`, `bad-key`, `timeout`, `stopped`. `req`: `{ provider, wsId, system, user, schema }` |
+| `sb.answerStop(id)` | `sb:answer:stop` | `{ ok }` — the CLI's whole process group, or the request |
+
+`sb:evt:answerStep` carries `(id, { kind, text, target })` for every tool call a CLI
+makes — "Reading lib/diagrams/ai.ts" — which the canvas shows in a card over its strip, so
+a minute's wait never looks stuck. `sb:evt:answerStatus` goes out after every change,
+wherever it was made, so the ✦ Answer menu and the Settings screen never disagree.
+
+**Keys never touch config.json.** `safeStorage` (the Keychain) encrypts them into
+`<config dir>/keys.json` (mode 0600) beside the last four characters, which are all the
+page ever gets back. Nothing logs a key; the Settings field is always empty.
+
+**A CLI never outlives what asked it.** It is spawned detached, so Stop, the 5-minute
+limit, the window closing and `stopEverything()` all signal its whole process group, the
+ripgrep and shells it runs included.
+
+**Settings** is a fourth free screen (`{view:'settings'}`, R16): App ▸ Settings… (⌘,),
+the rail's last row under Usage, and the ✦ Answer menu's "Settings…". It is not
+remembered as the screen to reopen on — it is visited, not worked in.
+
 ### 4.7 Push events (main → renderer)
 `preload.js` exposes subscribe helpers returning an unsubscribe function:
 
@@ -788,6 +917,10 @@ sb.onAppearance((s) => {})           // 'sb:evt:appearance' — {appearance, eff
 sb.onSidebar((s) => {})              // 'sb:evt:sidebar' — {visible}; see §4.9
 sb.onNotesFlush((id) => {})          // 'sb:evt:notesFlush' — write every unsaved note NOW, and
                                      // answer sb:notes:flushed with the same `id`; §4.15
+                                     // (the Diagrams tab's editor is written on the same flush)
+sb.onAnswerStep((id, step) => {})    // 'sb:evt:answerStep' — what a CLI answering a box is doing; §4.18
+sb.onAnswerStatus((status) => {})    // 'sb:evt:answerStatus' — who can answer, after any change; §4.18
+sb.onOpenSettings(() => {})          // 'sb:evt:openSettings' — App ▸ Settings… (⌘,)
 ```
 
 `sb:evt:edit` exists because a menu accelerator wins over the renderer's keydown, and
@@ -1338,6 +1471,30 @@ throws: every failure resolves to `{ ok:false, error }`. `scripts/test-notes.js`
 against a scratch notes folder and `scripts/test-noteedit.js` runs the markdown half of
 R14's editor against a corpus, both with plain `node --test` (`npm run test:notes`).
 
+### M10 `diagrams.js`
+The Diagrams tab's files (§4.17): `list(id)`, `get(id, diagramId)`, `create`, `update`,
+`setArchived`, `remove`, `saveImage(bytes, type)`, `imagePath(name)` and `settle()`, plus
+`rootDir()` / `dirFor()` / `keyFor()` for the tests. The admin's server actions as files:
+the same answers, the same name rule (unique within a workspace), the same "archiving
+does not touch updatedAt". It checks only what keeps the folder sane — an object of kind
+`flow` under 512 KB, a name of 1–120 characters, a UUID for an id — because the bundle has
+run the admin's validator before it asks. Writes go through a temp file and a rename,
+serialised per workspace folder so two creates under one name cannot both pass the
+check. Nothing throws. `scripts/test-diagrams.js` (`npm run test:diagrams`) runs it
+against a scratch folder, with the stylesheet scoping from `build-diagrams.js`.
+
+### M11 `answer.js`
+✦ Answer (§4.18): `status({fresh})`, `settings()`, `setSettings(patch)`, `setKey`,
+`removeKey`, `start(id, req, onStep)`, `stop(id)`, `stopAll()`. The provider catalogue —
+the admin's OpenAI models with their probed efforts, the Claude models, Claude Code's
+`--effort` levels — is here and only here; the menu and the Settings screen draw what
+`status()` says. Each provider is one function that turns `{ system, user, schema }` into
+the answer's JSON: a CLI through `spawnCli()` (detached, its stdout read a line at a
+time, stopped by process group), an API through `net.fetch` with the request's own
+AbortController wired to Stop until the body is in. Failures carry a `code` the page can
+act on. It needs Electron (`net`, `safeStorage`), so it has no plain-node test; its
+paths were checked against the real CLI and APIs when it was written.
+
 ---
 
 ## 6. Renderer
@@ -1451,7 +1608,7 @@ element already mounted (the reuse path), where every other view is torn down.
 `SB.layout.full()` / `SB.layout.setFull(on)` are its full screen (§4.9): the `.edfull`
 class on `.win`, dropped by `renderMain()` off the Editor's route and by ⌃⌘S.
 
-Routes: `{view:'workspace', wsId, tab:'changes'|'logs'|'terminal'|'editor'|'notes'}`, `{view:'files', wsId, tab:'files'|'all'}`,
+Routes: `{view:'workspace', wsId, tab:'changes'|'logs'|'terminal'|'editor'|'notes'|'diagrams'}`, `{view:'settings'}` (no workspace; §4.18), `{view:'files', wsId, tab:'files'|'all'}`,
 `{view:'diff', wsId, repo, path}`, `{view:'pr', wsId, repo, tab:'overview'|'files'|'all'}`,
 `{view:'pr', owner, repo, number, tab}` (no workspace — a pull request opened from the
 list; its parent for the back caret and Esc is `prs`, not `workspace`),
@@ -2032,6 +2189,45 @@ on disk — unsaved buffers are not searched, and its field says so. A file drop
 slab is refused rather than navigating the window.
 
 ---
+
+### R15 `views/diagrams.js`, and the bundle in `src/diagrams/`
+The Diagrams tab (§4.17). `views/diagrams.js` is the classic-script seam; the editor is
+the React bundle, which sets `window.SBDiagrams` (`mount`, `update`, `flush`,
+`editAction`, `fullscreen`, `leaveFullscreen`, `refreshAnswers`).
+
+Like the Editor and Notes it hands back the SAME root every render and swaps only the
+header, so a re-render for a bell or a run state never tears a live canvas out of the
+page. There is ONE bundle root for the window's life; its page is keyed by workspace,
+and the editor being left writes what it holds as it unmounts.
+
+**The tree stays mounted behind every other screen**, so `renderMain()` tells the view on
+every render whether its tab is the one showing (`shown(route)`), and the bundle turns
+every key off while it is not: React Flow listens on the whole document, and Backspace
+on the Terminal would otherwise delete the boxes selected on a canvas nobody can see.
+
+**Keys.** app.js asks `onKey` after the Editor and Notes: Esc leaves a full-screen
+diagram before it means back, and ⌘↵ over the canvas is ✦ Answer (the editor's own
+listener) and never Start. The editor's own Esc, in the capture phase, stops propagation
+when it uses one, so app.js never sees it.
+
+**Styles.** The bundle's stylesheet is the admin's Tailwind plus React Flow's, every rule
+scoped to `.sbdg` behind `:where()` and with the cascade layers flattened
+(`build-diagrams.js` says why), and Radix's portals render into an element inside the
+root rather than `<body>`. One collision that went the other way was fixed at its source:
+styles.css's `.grid` (the Grid screen's 2x2) is `.gridbd > .grid` now, since `grid` is a
+Tailwind utility the editor uses. The canvas follows Terminal appearance, as the Notes
+and Editor slabs do: dark is `[data-term-theme="dark"]`.
+
+`npm run check:diagrams` type-checks `src/diagrams/` (esbuild builds without checking).
+
+### R16 `views/settings.js`
+The Settings screen (§4.18): a plain view, rebuilt on every render like Usage. One
+section today, ✦ Answer on diagrams — a row per provider (the radio that makes it the
+one ✦ Answer uses, its name, what it does, whether it is ready on this Mac, one action),
+and under an API's row, opened by Add key / Edit, its key field, its model and (OpenAI)
+its effort. It asks main on the way in (and looks for the CLIs again after 30 s away),
+follows `sb:evt:answerStatus`, and never holds a key: the field is sent to main on Save
+and emptied.
 
 ## 7. Screens (from the mock-up — `out/01.html` … `out/07.html`)
 

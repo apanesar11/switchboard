@@ -34,6 +34,9 @@ function buildIcon() {
 async function packageApp(options = {}) {
   if (process.platform !== 'darwin') throw new Error('Building the desktop app requires macOS.');
   require('./fix-node-pty.js');
+  // The Diagrams tab's bundle is generated, not committed: build it from the source
+  // this app is being made from, so the installed app never carries a stale one.
+  await require('./build-diagrams.js').build();
   const icon = buildIcon();
   const { packager } = await import('@electron/packager');
   const [output] = await packager({
@@ -52,6 +55,8 @@ async function packageApp(options = {}) {
     asar: false,
     ignore: [
       /^\/dist(?:\/|$)/,
+      // The Diagrams tab's TypeScript sources: the app loads src/renderer/diagrams/, built from them.
+      /^\/src\/diagrams(?:\/|$)/,
       // monaco-editor ships ~100 MB (dev/, esm/, min/); the Editor tab loads only min/vs through its AMD loader.
       /^\/node_modules\/monaco-editor\/(?!min(?:\/|$)|package\.json$|LICENSE$|ThirdPartyNotices\.txt$)/,
       // Legacy per-language worker entry points (the assets/ workers are the ones used) and non-English NLS bundles.

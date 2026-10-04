@@ -552,8 +552,12 @@ SB.views = SB.views || {};
       flushing = null;
       return call('notesFlushed', id);
     }
+    // The Diagrams tab's editor rides on the same flush (§4.17): main asks once and
+    // waits for one answer, so the diagram on screen is written before it is given.
+    var dg = SB.views.diagrams;
+    var diagrams = dg && typeof dg.flushAll === 'function' ? dg.flushAll() : null;
     flushing = Promise.race([
-      flushAll(),
+      Promise.all([flushAll(), diagrams]),
       new Promise(function (done) { setTimeout(done, FLUSH_MS); }),
     ]).then(answer, answer);
     return flushing;

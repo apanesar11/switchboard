@@ -580,17 +580,19 @@ aside .it.top{margin-bottom:4px}
 aside .it .ic{color:var(--ink-3)}
 aside .it.on .ic{color:var(--ink)}
 
-/* 2x2, each square a quarter of the body, and the body itself never scrolls. */
+/* 2x2, each square a quarter of the body, and the body itself never scrolls. Scoped to
+   the Grid's own body: `grid` is also a Tailwind utility the Diagrams tab's editor uses,
+   and a bare .grid here gave every one of those two rows and a flex:1. */
 .bd.gridbd{overflow-y:auto;overflow-x:hidden;padding-bottom:26px;container-type:inline-size}
-.grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:12px;
+.gridbd > .grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:12px;
   flex:1;min-height:0}
-.grid > *{min-height:0;min-width:0}
+.gridbd > .grid > *{min-height:0;min-width:0}
 /* Narrow: one square per row and the page scrolls. The rows are a FIXED height, not
    auto: an auto row takes its height from the terminal, the terminal takes its rows
    from the height, and the pair settle wherever xterm's default 24 rows happened to
    put them — measured at 556px, which is an accident, not a size. */
 @container (max-width:860px){
-  .grid{grid-template-columns:1fr;grid-template-rows:none;
+  .gridbd > .grid{grid-template-columns:1fr;grid-template-rows:none;
     grid-auto-rows:clamp(320px,55vh,560px);flex:none}
 }
 .cell{display:flex;flex-direction:column;
@@ -1443,3 +1445,63 @@ aside .empty p{font-size:var(--fs-xs)}
    (views/notes.js editable()). The text it does show stays readable. */
 .note.shut .ne{cursor:default}
 .note.shut .nbc.nbe::before{content:none}
+
+/* ── Diagrams tab (§4.17, R15) ───────────────────────────────────────────── */
+/* The same slab Notes and the Editor sit in: the card under the header, which the
+   editor bundle (diagrams/diagrams.js) is mounted inside. Everything in it is styled by
+   diagrams/diagrams.css, scoped to .sbdg; this only places the slab. */
+.dgbd{padding-top:18px}
+.dgslab{position:relative;flex:1;min-height:0;display:flex;flex-direction:column;margin-top:4px;
+  border-radius:var(--r-card);overflow:hidden;background:var(--surface);
+  box-shadow:inset 0 0 0 1px var(--line)}
+/* An inset shadow paints under the children, so the editor's own surfaces would hide
+   the edge; drawn again over them, clear of the pointer. */
+.dgslab::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  box-shadow:inset 0 0 0 1px var(--line);z-index:2}
+.dgslab.blank{align-items:center;justify-content:center;background:var(--term-bg)}
+
+/* ── Settings (§4.18, R16) ───────────────────────────────────────────────── */
+/* One row per way to answer: the radio that makes it the default, its name and what
+   it does, whether it is ready on this Mac, and one action. Usage's row rhythm
+   (.ulim): a hairline between rows, inset by the row's own padding. */
+.stsec{max-width:980px;display:flex;flex-direction:column}
+.sth{font-size:var(--fs-micro);font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--sec);margin:4px 0 6px}
+.stdesc{max-width:660px;margin-bottom:12px;font-size:var(--fs-base)}
+.stlist{display:flex;flex-direction:column}
+.strow{display:flex;align-items:center;gap:14px;min-height:56px;padding:8px;margin:0 -8px;
+  position:relative;border-radius:var(--r-md)}
+.strow+.strow::before,.stedit+.strow::before{content:"";position:absolute;left:8px;right:8px;top:0;
+  height:1px;background:var(--hair);pointer-events:none}
+.strow.picked{background:var(--tint)}
+.rad{width:16px;height:16px;flex:none;border-radius:50%;background:var(--surface);
+  box-shadow:inset 0 0 0 1.5px var(--chev);display:flex;align-items:center;justify-content:center}
+.rad:hover:not([disabled]){box-shadow:inset 0 0 0 1.5px var(--ink-3)}
+.rad.on{box-shadow:inset 0 0 0 1.5px var(--ink)}
+.rad.on::after{content:"";width:8px;height:8px;border-radius:50%;background:var(--ink)}
+.rad[disabled]{opacity:.4}
+.rad:focus-visible{border-radius:50%}
+.stnm{width:290px;flex:none;display:flex;flex-direction:column;gap:2px;min-width:0}
+.stname{display:flex;align-items:center;gap:7px;font-weight:600;font-size:var(--fs-item)}
+.stname .pill{height:18px;padding:0 6px;font-size:10.5px}
+.stwhat{font-size:var(--fs-sm)}
+.ststate{flex:1;min-width:0;display:flex;align-items:center;gap:7px;font-size:var(--fs-base);
+  overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.ststate .dot{margin-top:1px}
+.stact{width:150px;flex:none;display:flex;align-items:center;justify-content:flex-end;gap:8px}
+.stdef{font-size:var(--fs-xs);font-weight:600;color:var(--ink-3);background:var(--fill);
+  border-radius:var(--r-pill);padding:2px 8px}
+.stact .btn.on{background:var(--fill-2)}
+/* The key's panel, under its row: indented to the name column. */
+.stedit{display:flex;flex-direction:column;align-items:flex-start;padding:4px 8px 16px 38px;margin:0 -8px}
+.stlbl{font-size:var(--fs-xs);font-weight:600;color:var(--ink-3);margin:10px 0 6px}
+.stlbl:first-child{margin-top:4px}
+.stkey{width:440px;max-width:100%;height:30px;padding:0 10px;border-radius:var(--r-btn);
+  border:1px solid var(--edge);background:var(--surface);color:var(--ink);font-size:12.5px;
+  -webkit-user-select:text;user-select:text}
+.stkey:focus{outline:none;border-color:var(--link);box-shadow:0 0 0 3px rgba(9,105,218,.18)}
+.stedit .seg{margin-top:0}
+.stbtns{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:var(--fs-sm)}
+.stbtns > span{margin-left:6px}
+.stfoot{display:flex;align-items:flex-start;gap:8px;margin-top:16px;max-width:660px;font-size:var(--fs-sm)}
+.stfoot .ic{margin-top:2px}

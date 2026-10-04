@@ -24,6 +24,9 @@ to whichever coding CLI you use on that machine, then run `codex` or `claude` in
 Switchboard terminal. Claude is optional, and there is no Codex usage meter yet.
 Install tmux if you want terminal sessions to survive quitting Switchboard.
 
+`npm start` first builds the Diagrams tab's editor (`npm run build:diagrams`, a second or
+so); it is the one part of the app that is built rather than run as written.
+
 ## Set up your workspaces
 
 The shipped `src/main/default-config.json` is `{}`. On first launch, Switchboard
@@ -134,6 +137,31 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   no block for — a table, an image, a link definition, a line of HTML — is shown as the
   source it is, in monospace, and saved back untouched; so is anything it cannot write
   out exactly as you had it. Opening a note never rewrites it.
+- **Diagrams** — the sixth tab: flow diagrams for a workspace — boxes, arrows, sticky
+  notes, free text and pictures, arranged by hand. Click a shape on the toolbar down the
+  left and click the canvas to place it; with a box selected, Tab adds the next one joined
+  to its right and starts you typing, ⇧Tab steps back, the arrow keys move between boxes
+  and ⌘D duplicates. Drag from a box's dot to draw an arrow. Drop, paste or pick a picture
+  to put it on the canvas. A toolbar floats over whatever is selected: shape, colour and
+  outline for a box, size and style for its text, label and line for an arrow. It saves as
+  you go; ⌘Z and ⇧⌘Z undo and redo. The picker over the canvas switches between diagrams
+  (← and → step through them), **New diagram** makes one, and **Actions** archives or
+  deletes the one on screen. Each diagram is a file in `~/.switchboard/diagrams/`, one
+  folder per workspace — never in your repo.
+
+  **✦ Answer** leads a box's toolbar (and ⌘↵): write a question in a box and the answer
+  comes back as one to four boxes hanging off it, as one undo step. The chevron beside it
+  picks who answers — **Claude Code** or **Codex**, which run in the workspace's folder and
+  read its code before they answer (slower; a card over the canvas shows each file they
+  open), or the **Claude API** or **OpenAI API**, which see only the diagram and answer in
+  seconds. The CLIs can only read: Claude Code gets nothing but its read and search tools,
+  and Codex runs in its read-only sandbox. Install and sign in to the CLI you use on each
+  Mac; Switchboard finds it, and picks the first one that can answer.
+- **Settings** — the row under Usage, or ⌘,: who answers ✦ Answer on this Mac, one row
+  each — whether a CLI is installed and signed in, and the keys for the two APIs with the
+  model each one uses. A key is checked with its provider before it is kept, encrypted with
+  your Mac's Keychain in `~/.switchboard/keys.json`, and never shown again — only its last
+  four characters.
 - **Terminal appearance** — light by default, so a Claude Code set to its light theme is
   actually readable and the terminal belongs to the rest of the app. **View ▸ Terminal
   appearance** switches between Light, Dark and Match system; the choice is remembered in
@@ -234,14 +262,20 @@ optionally inside tmux. The Editor is Monaco, the editor inside VS Code, bundled
 the app; it reads the files in your repos through `git` and the file system, and
 writes, moves or bins one only when you ask it to — a save, a new file or folder, a
 rename, a delete. Notes are plain markdown files of Switchboard's own, one per
-workspace, in `~/.switchboard/notes/`; nothing in a repo. Dev commands also run in
+workspace, in `~/.switchboard/notes/`; nothing in a repo. Diagrams are JSON files of its
+own too, in `~/.switchboard/diagrams/`, with the pictures on them kept once each in
+`~/.switchboard/diagrams/images/`. ✦ Answer runs `claude` or `codex` in the workspace's
+folder with read-only tools, or calls the Anthropic or OpenAI API directly with a key you
+entered; nothing else leaves the Mac. Dev commands also run in
 local shells. Claude usage
 uses the direct request described above; local port checks use sockets and system
 utilities, and ngrok discovery calls its local HTTP API.
 
 The source does not need account credentials. Each computer uses its own Git/GitHub
 and coding CLI sign-ins. Switchboard's configuration stays in
-`~/.switchboard/config.json` and your notes beside it in `~/.switchboard/notes/`;
+`~/.switchboard/config.json`, your notes and diagrams beside it in `~/.switchboard/notes/`
+and `~/.switchboard/diagrams/`, and any API keys for ✦ Answer, encrypted with the
+Keychain, in `~/.switchboard/keys.json`;
 window state, browser storage and publish logs live in
 Electron's Application Support folder. Terminal programs can save their own history
 and credentials outside this checkout. Pasted images are saved in a temporary

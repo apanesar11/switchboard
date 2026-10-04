@@ -96,6 +96,13 @@ window.SB = window.SB || {};
   // A folder with a + on it: the Editor tree's New folder. Same box and weight.
   var folderPlus = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.9 12.6V4.2a1 1 0 0 1 1-1h3.1l1.4 1.7h5.7a1 1 0 0 1 1 1v6.7a1 1 0 0 1-1 1H2.9a1 1 0 0 1-1-1z"/><path d="M8 7.4v4M6 9.4h4"/></svg>';
 
+  // Two sliders: the rail's Settings row (§4.18), under Usage. 14x14 at 1.4, the weight
+  // of the gauge above it.
+  var sliders = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2.5 4.5h5.6M12.1 4.5h1.4M2.5 11.5h1.4M8 11.5h5.5"/><circle cx="10.1" cy="4.5" r="1.7"/><circle cx="6" cy="11.5" r="1.7"/></svg>';
+
+  // A padlock: the Settings screen's line about where API keys are kept. 12x12 at 1.4.
+  var lock = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>';
+
   SB.icons = {
     publish: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10V2m-3 3 3-3 3 3M3 10v3h10v-3"/></svg>',
     branch: branch,
@@ -121,6 +128,8 @@ window.SB = window.SB || {};
     eye: eye,
     note: note,
     term: term,
-    folderPlus: folderPlus
+    folderPlus: folderPlus,
+    sliders: sliders,
+    lock: lock
   };
 })(window.SB);

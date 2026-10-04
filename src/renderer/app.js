@@ -55,21 +55,23 @@ window.SB = window.SB || {};
   // the user's open pull requests in every repository. Their routes carry no wsId on
   // purpose — and nor does a pull request opened FROM that list, which is named by
   // owner/repo/number instead (views/pr.js) since its repo may be cloned nowhere here.
-  var VIEWS = { workspace: 1, files: 1, diff: 1, pr: 1, grid: 1, usage: 1, prs: 1 };
+  // 'settings' is the fourth: this Mac's settings (§4.18) — today, who answers ✦ Answer
+  // on the Diagrams tab and the API keys for it.
+  var VIEWS = { workspace: 1, files: 1, diff: 1, pr: 1, grid: 1, usage: 1, prs: 1, settings: 1 };
   var TABS = {
-    workspace: ['changes', 'logs', 'terminal', 'editor', 'notes'],
-    files: ['files', 'all'], pr: ['overview', 'files', 'all'], diff: [], grid: [], usage: [], prs: []
+    workspace: ['changes', 'logs', 'terminal', 'editor', 'notes', 'diagrams'],
+    files: ['files', 'all'], pr: ['overview', 'files', 'all'], diff: [], grid: [], usage: [], prs: [], settings: []
   };
-  var FREE = { grid: 1, usage: 1, prs: 1 };
+  var FREE = { grid: 1, usage: 1, prs: 1, settings: 1 };
 
   // Tabs of the workspace route that live in their own file and compose the whole
   // screen themselves — Logs, Terminal and the Editor each borrow the shared header
   // and own everything below it; see buildView(). Anything not listed is
   // views/workspace.js. A new tab needs both lines: one missing from TABS.workspace
   // is rewritten by normalize() to the remembered tab before it is ever looked up.
-  var TAB_VIEWS = { logs: 'logs', terminal: 'terminal', editor: 'editor', notes: 'notes' };
+  var TAB_VIEWS = { logs: 'logs', terminal: 'terminal', editor: 'editor', notes: 'notes', diagrams: 'diagrams' };
 
-  var PARENT = { diff: 'files', files: 'workspace', pr: 'workspace', workspace: null, grid: null, usage: null, prs: null };
+  var PARENT = { diff: 'files', files: 'workspace', pr: 'workspace', workspace: null, grid: null, usage: null, prs: null, settings: null };
 
   // A route that needs no workspace on screen: the three free screens, and a pull
   // request from the list.
@@ -294,6 +296,8 @@ window.SB = window.SB || {};
 
   // A pull request from the list counts as the list: the window comes back to it.
   function rememberScreen(route) {
+    // Settings is visited, not worked in: the window comes back to wherever it was before.
+    if (route.view === 'settings') return;
     var screen = standalone(route) ? (route.view === 'pr' ? 'prs' : route.view) : 'workspace';
     try { window.localStorage.setItem(SCREEN_KEY, screen); } catch (e) { /* storage off */ }
   }
@@ -935,29 +939,45 @@ window.SB = window.SB || {};
     return u && u.session && u.session.severity === 'critical' ? 'fail' : '';
   }
 
-  // The rail's last row, pinned under the groups. Its own signature, like the nav's,
-  // so a poll that changed nothing visible leaves it alone.
+  // The rail's last rows, pinned under the groups: Usage, while there is a Claude sign-in
+  // to read it from, and Settings (§4.18), always. Their own signature, like the nav's,
+  // so a poll that changed nothing visible leaves them alone.
   function renderFoot() {
     var side = document.getElementById('side');
     var foot = side ? side.querySelector('.foot') : null;
     if (!foot) return;
-    var on = state.route.view === 'usage';
+    var onUsage = state.route.view === 'usage';
+    var onSettings = state.route.view === 'settings';
     var dot = usageDot();
-    var sig = state.usageConfigured + '/' + (on ? 'on' : 'off') + '/' + dot;
+    var sig = state.usageConfigured + '/' + (onUsage ? 'on' : 'off') + '/' + dot + '/' + (onSettings ? 'S' : '');
     if (foot.getAttribute('data-sig') === sig) return;
     var hadFocus = foot.contains(document.activeElement);
+    var focusedSettings = hadFocus && document.activeElement && document.activeElement.getAttribute('data-foot') === 'settings';
     foot.setAttribute('data-sig', sig);
     d.clear(foot);
-    foot.hidden = !state.usageConfigured;
-    if (!state.usageConfigured) return;
-    var btn = h('button.it' + (on ? '.on' : ''), {
+    foot.hidden = false;
+    var usageBtn = null;
+    if (state.usageConfigured) {
+      usageBtn = h('button.it' + (onUsage ? '.on' : ''), {
+        type: 'button',
+        title: 'How much of your Claude plan is used',
+        'aria-current': onUsage ? 'true' : null,
+        onClick: function () { go({ view: 'usage' }); }
+      }, d.icon('gauge'), h('span', null, 'Usage'), h('span.sp'), dot ? h('span.dot.' + dot) : null);
+      foot.appendChild(usageBtn);
+    }
+    var settingsBtn = h('button.it' + (onSettings ? '.on' : ''), {
       type: 'button',
-      title: 'How much of your Claude plan is used',
-      'aria-current': on ? 'true' : null,
-      onClick: function () { go({ view: 'usage' }); }
-    }, d.icon('gauge'), h('span', null, 'Usage'), h('span.sp'), dot ? h('span.dot.' + dot) : null);
-    foot.appendChild(btn);
-    if (hadFocus) { try { btn.focus({ preventScroll: true }); } catch (e) { btn.focus(); } }
+      title: 'Settings  \u2318,',
+      'aria-current': onSettings ? 'true' : null,
+      dataset: { foot: 'settings' },
+      onClick: function () { go({ view: 'settings' }); }
+    }, d.icon('sliders'), h('span', null, 'Settings'), h('span.sp'));
+    foot.appendChild(settingsBtn);
+    if (hadFocus) {
+      var back = focusedSettings || !usageBtn ? settingsBtn : usageBtn;
+      try { back.focus({ preventScroll: true }); } catch (e) { back.focus(); }
+    }
   }
 
   function usageSignature(u) {
@@ -1378,7 +1398,7 @@ window.SB = window.SB || {};
     if (name === 'usage' && !state.usageConfigured) name = 'grid';
     // Usage is about this Mac's Claude sign-in and Pull requests about its GitHub
     // sign-in, not a workspace: both show with none, as does a PR opened from the list.
-    var free = name === 'usage' || name === 'prs' || (name === 'pr' && !state.route.wsId && !!state.route.number);
+    var free = name === 'usage' || name === 'prs' || name === 'settings' || (name === 'pr' && !state.route.wsId && !!state.route.number);
     if (!free && !state.workspaces.length) return noWorkspacesScreen();
     if (!free && name !== 'grid' && !currentWorkspace()) return noWorkspacesScreen();
 
@@ -1546,6 +1566,13 @@ window.SB = window.SB || {};
 
     mounted.key = key;
     applyNotice(main);
+
+    // The Diagrams tab's editor stays mounted behind every other screen; it has to know
+    // the moment it is not the one showing, or it would answer keys meant for that one.
+    var dg = SB.views.diagrams;
+    if (dg && typeof dg.shown === 'function') {
+      try { dg.shown(state.route); } catch (err) { console.error('[switchboard] diagrams shown:', err); }
+    }
 
     if (!reuse) {
       restoreScroll(key);
@@ -1752,6 +1779,15 @@ window.SB = window.SB || {};
     var done = term && typeof term.editAction === 'function'
       ? term.editAction(e.action, e.text) : false;
     if (done) return;
+    // The Diagrams canvas: Undo and Redo are its own, and a pasted screenshot goes onto
+    // it as a picture — before the line below throws an image paste away. Only while
+    // the canvas has the keyboard; a box's text field gets the document's fallback.
+    var dg = SB.views.diagrams;
+    if (dg && typeof dg.editAction === 'function') {
+      try {
+        if (dg.editAction(e.action, e.text, e.image)) return;
+      } catch (err) { console.error('[switchboard] diagrams edit:', err); }
+    }
     // A pasted screenshot arrives as the escaped path of a PNG main saved it to (§4.7):
     // that is for a terminal, whose Claude Code reads the image from it. Typed into a
     // source file, the Editor's ⌘P / ⇧⌘F fields or the Grid's name field it is only junk,
@@ -1882,6 +1918,11 @@ window.SB = window.SB || {};
     if (notes && typeof notes.refresh === 'function') {
       try { notes.refresh(); } catch (err) { console.error('[switchboard] notes refresh:', err); }
     }
+    // A CLI installed or signed in to while the window was away changes who can answer.
+    var dgv = SB.views.diagrams;
+    if (dgv && typeof dgv.refresh === 'function') {
+      try { dgv.refresh(); } catch (err) { console.error('[switchboard] diagrams refresh:', err); }
+    }
     var a = api();
     if (a) Promise.resolve(a.runStates()).then(adoptRunStates, noop);
   }
@@ -1900,6 +1941,9 @@ window.SB = window.SB || {};
     try { a.onSidebar(handleSidebar); } catch (e) { console.error('[switchboard] onSidebar:', e); }
     try { a.onUsage(handleUsage); } catch (e) { console.error('[switchboard] onUsage:', e); }
     try { a.onPublish(handlePublish); } catch (e) { console.error('[switchboard] onPublish:', e); }
+    if (typeof a.onOpenSettings === 'function') {
+      try { a.onOpenSettings(function () { go({ view: 'settings' }); }); } catch (e) { console.error('[switchboard] onOpenSettings:', e); }
+    }
   }
 
   // No render() — term-theme.js rewrites the :root tokens and hands the new palette
@@ -1935,6 +1979,14 @@ window.SB = window.SB || {};
         var took = false;
         try { took = nv.onKey(e); } catch (err) { console.error('[switchboard] notes key:', err); }
         if (took) { e.preventDefault(); return; }
+      }
+      // The Diagrams tab: Esc leaves a full-screen diagram before it means back, and ⌘↵
+      // over the canvas is ✦ Answer (the editor's own listener), never Start.
+      var dv = SB.views.diagrams;
+      if (dv && typeof dv.onKey === 'function') {
+        var kept = false;
+        try { kept = dv.onKey(e); } catch (err) { console.error('[switchboard] diagrams key:', err); }
+        if (kept) { e.preventDefault(); return; }
       }
       if (e.key === 'Escape') {
         // The composer, the terminal and Monaco (a textarea too) keep Esc.

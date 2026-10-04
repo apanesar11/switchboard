@@ -1,0 +1,68 @@
+/* The Diagrams bundle's stylesheet: Tailwind over the copied admin components, then
+   React Flow's own. scripts/build-diagrams.js compiles it and SCOPES every rule to
+   .sbdg — the element views/diagrams.js mounts the editor in — so none of it can
+   restyle the rest of Switchboard, and drops the cascade layers so that it is not
+   outranked by Switchboard's own unlayered resets inside that element either. */
+
+@import "tailwindcss" source(none);
+/* After Tailwind on purpose: in the admin it is an unlayered sheet, which wins over
+   every Tailwind layer; once the layers are gone, coming later is what keeps that. */
+@import "@xyflow/react/dist/style.css";
+
+@source ".";
+
+@plugin "@tailwindcss/forms";
+
+/* Dark follows View ▸ Terminal appearance, as the Notes and Editor slabs do:
+   term-theme.js sets data-term-theme on <html>. */
+@custom-variant dark (&:where([data-term-theme="dark"], [data-term-theme="dark"] *));
+
+@theme {
+  /* Switchboard's own type (styles.css --ui / --mono), so the boxes are measured
+     (lib/diagrams/measure.ts reads the body's font) in the font they are drawn in. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SF Mono", Menlo, Consolas, monospace;
+
+  /* The admin's app/globals.css from here down. */
+  --color-brand: var(--brand-primary);
+  --color-brand-hover: color-mix(in oklab, var(--brand-primary), black 14%);
+  --color-brand-light: color-mix(in oklab, var(--brand-primary), white 35%);
+  --color-brand-faint: color-mix(in oklab, var(--brand-primary), white 88%);
+
+  --animate-hide: hide 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-slideDownAndFade: slideDownAndFade 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-slideLeftAndFade: slideLeftAndFade 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-slideUpAndFade: slideUpAndFade 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-slideRightAndFade: slideRightAndFade 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-dialogOverlayShow: dialogOverlayShow 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-dialogContentShow: dialogContentShow 150ms cubic-bezier(0.16, 1, 0.3, 1);
+
+  @keyframes hide {
+    from { opacity: 1; }
+    to { opacity: 0; }
+  }
+  @keyframes slideDownAndFade {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes slideLeftAndFade {
+    from { opacity: 0; transform: translateX(6px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+  @keyframes slideUpAndFade {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes slideRightAndFade {
+    from { opacity: 0; transform: translateX(-6px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+  @keyframes dialogOverlayShow {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes dialogContentShow {
+    from { opacity: 0; transform: translate(-50%, -45%) scale(0.95); }
+    to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  }
+}

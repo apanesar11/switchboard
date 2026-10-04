@@ -92,6 +92,47 @@ contextBridge.exposeInMainWorld('sb', {
   onNotesFlush: cb => subscribe('sb:evt:notesFlush', cb),
   notesFlushed: id => ipcRenderer.invoke('sb:notes:flushed', id),
 
+  // Diagrams (§4.17) — the Diagrams tab's flow diagrams, one file each, kept per
+  // workspace beside the config and never in a repo. Every answer is { ok, data } or
+  // { ok:false, error }; a diagram is the admin's row: { id, name, kind, createdAt,
+  // updatedAt, archivedAt } plus `spec` where the whole diagram is asked for. The
+  // bundle (src/diagrams) validates a spec before it asks for a write.
+  diagramsList: id => ipcRenderer.invoke('sb:diagrams:list', id),
+  diagramsGet: (id, diagramId) => ipcRenderer.invoke('sb:diagrams:get', id, diagramId),
+  diagramsCreate: (id, name, spec) => ipcRenderer.invoke('sb:diagrams:create', id, name, spec),
+  diagramsUpdate: (id, diagramId, name, spec) => ipcRenderer.invoke('sb:diagrams:update', id, diagramId, name, spec),
+  diagramsArchive: (id, diagramId, archived) => ipcRenderer.invoke('sb:diagrams:archive', id, diagramId, !!archived),
+  diagramsDelete: (id, diagramId) => ipcRenderer.invoke('sb:diagrams:delete', id, diagramId),
+  // A picture for a canvas: its bytes and MIME type in, { ok, src } out — the
+  // sbimg://image/<file> address main serves it from.
+  diagramsSaveImage: (bytes, type) => ipcRenderer.invoke('sb:diagrams:saveImage', bytes, type),
+  // The clipboard's picture as { ok, bytes, type } — Edit ▸ Paste over the canvas,
+  // which a menu item delivers instead of a paste event.
+  diagramsClipboardImage: () => ipcRenderer.invoke('sb:diagrams:clipboardImage'),
+  // How many diagrams hold edits not yet written (0 or 1), whenever that changes:
+  // main has the page write them before a close or a quit, as it does for notes.
+  diagramsDirty: count => ipcRenderer.invoke('sb:diagrams:dirty', count),
+
+  // ✦ Answer (§4.18) — who answers a box's question on this Mac, and the asking.
+  // answerStatus: { ok, settings, providers, keysSafe }; `opts.fresh` looks for the
+  // CLIs again. The setters answer the same, and main also pushes it to every
+  // window as sb:evt:answerStatus, so the menu and the Settings screen agree.
+  answerStatus: opts => ipcRenderer.invoke('sb:answer:status', opts || {}),
+  answerSetSettings: patch => ipcRenderer.invoke('sb:answer:setSettings', patch || {}),
+  // The key is checked with its provider, then encrypted with the Keychain; it never
+  // comes back — only whether there is one and its last four characters.
+  answerSetKey: (provider, key) => ipcRenderer.invoke('sb:answer:setKey', provider, key),
+  answerRemoveKey: provider => ipcRenderer.invoke('sb:answer:removeKey', provider),
+  // Ask. `req`: { provider, wsId, system, user, schema }. Resolves { ok, text, files? }
+  // — the answer's JSON — or { ok:false, error, code }; a CLI's steps arrive meanwhile
+  // as sb:evt:answerStep (id, step). answerStop ends it, CLI process and all.
+  answerStart: (id, req) => ipcRenderer.invoke('sb:answer:start', id, req),
+  answerStop: id => ipcRenderer.invoke('sb:answer:stop', id),
+  onAnswerStep: cb => subscribe('sb:evt:answerStep', cb),
+  onAnswerStatus: cb => subscribe('sb:evt:answerStatus', cb),
+  // App ▸ Settings… (⌘,), a menu item, so the shortcut reaches the page as this.
+  onOpenSettings: cb => subscribe('sb:evt:openSettings', cb),
+
   // Pull requests
   prSummary: id => ipcRenderer.invoke('sb:pr:summary', id),
   // `opts.fresh` skips main's 60 s cache — ⌘R on the screen.
