@@ -115,7 +115,7 @@ export async function requestFlowAnswer(
     if (signal.aborted) throw new DOMException("Stopped", "AbortError")
     if (!result.ok) throw new AnswerError(result.error, "code" in result ? result.code : undefined)
     return {
-      parts: parseFlowAiAnswer(result.text, ask.question.split),
+      parts: parseFlowAiAnswer(result.text, ask.question.split, ask.question.subtext !== false),
       files: "files" in result && typeof result.files === "number" ? result.files : null,
     }
   } finally {

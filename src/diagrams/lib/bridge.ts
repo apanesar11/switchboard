@@ -8,7 +8,7 @@ export type Result<T> = { ok: true; data: T } | { ok: false; error: string }
 
 /** What a CLI is doing while it answers, a line at a time — main/answer.js claudeStep(). */
 export type AnswerStep = {
-  kind: "read" | "search" | "list" | "run" | "think" | "write" | "other"
+  kind: "read" | "search" | "list" | "run" | "think" | "write" | "fetch" | "web" | "other"
   text: string
   target?: string
 }
@@ -47,6 +47,10 @@ export type AnswerSettings = {
   chosen: ProviderId | null
   split: "auto" | "one"
   context: boolean
+  /** Web access: whoever answers may open a link or search the web, when it needs to. */
+  web: boolean
+  /** A line of detail under each answer box. */
+  subtext: boolean
   claudeCodeEffort: string
   claudeApiModel: string
   openaiModel: string

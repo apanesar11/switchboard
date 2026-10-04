@@ -160,17 +160,20 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   never in your repo.
 
   **✦ Answer** leads a box's toolbar (and ⌘I or ⌘↵): write a question in a box and the
-  answer comes back as one to four boxes hanging off it, as one undo step. Several boxes
+  answer comes back as a box for each part it has, hanging off it, as one undo step. Several boxes
   can wait on their answers at once. The chevron beside it picks who answers — **Claude
   Code** or **Codex**, which run in the workspace's folder and read its code before they
   answer (slower; a card over the canvas shows each file they open), or the **Claude API**
   or **OpenAI API**, which see only the diagram and answer in seconds. The CLIs can only
-  read: Claude Code gets nothing but its read and search tools, and Codex runs in its
-  read-only sandbox. Install and sign in to the CLI you use on each Mac; Switchboard finds
-  it, and picks the first one that can answer.
+  read: Claude Code gets nothing but its read and search tools (and, with Web access, its
+  web fetch and search), and Codex runs in its read-only sandbox. Install and sign in to the CLI you use on each Mac; Switchboard finds
+  it, and picks the first one that can answer. Two switches under the chevron, and in
+  Settings: **Web access** (on) lets whichever answers open a link in the question or
+  search the web, only when the question needs it; **Subtext** (off) adds a line of detail
+  under each answer box.
 - **Settings** — the row under Usage, or ⌘,: who answers ✦ Answer on this Mac, one row
   each — whether a CLI is installed and signed in, and the keys for the two APIs with the
-  model each one uses. A key is checked with its provider before it is kept, encrypted with
+  model each one uses — and the Web access and Subtext switches. A key is checked with its provider before it is kept, encrypted with
   your Mac's Keychain in `~/.switchboard/keys.json`, and never shown again — only its last
   four characters.
 - **Terminal appearance** — light by default, so a Claude Code set to its light theme is

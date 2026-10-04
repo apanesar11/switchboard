@@ -78,6 +78,8 @@ const DEFAULTS = {
   provider: null,                     // null: the first one that is ready (effectiveProvider)
   split: 'auto',
   context: true,
+  web: true,                          // Web access: it may open a link or search, when it needs to
+  subtext: false,                     // a line of detail under each answer box
   claudeCodeEffort: 'own',
   claudeApiModel: 'claude-sonnet-5-5',
   openaiModel: 'gpt-5.6-terra',
@@ -122,6 +124,8 @@ function settings() {
     provider: pickFrom(PROVIDER_IDS, s.provider, null),
     split: s.split === 'one' ? 'one' : 'auto',
     context: typeof s.context === 'boolean' ? s.context : DEFAULTS.context,
+    web: typeof s.web === 'boolean' ? s.web : DEFAULTS.web,
+    subtext: typeof s.subtext === 'boolean' ? s.subtext : DEFAULTS.subtext,
     claudeCodeEffort: pickFrom(CLAUDE_CODE_EFFORTS, s.claudeCodeEffort, DEFAULTS.claudeCodeEffort),
     claudeApiModel: pickFrom(CLAUDE_MODELS.map(m => m.id), s.claudeApiModel, DEFAULTS.claudeApiModel),
     openaiModel: model,
@@ -136,6 +140,8 @@ function setSettings(patch) {
   if ('provider' in p) next.provider = pickFrom(PROVIDER_IDS, p.provider, next.provider);
   if ('split' in p) next.split = p.split === 'one' ? 'one' : 'auto';
   if ('context' in p) next.context = !!p.context;
+  if ('web' in p) next.web = !!p.web;
+  if ('subtext' in p) next.subtext = !!p.subtext;
   if ('claudeCodeEffort' in p) next.claudeCodeEffort = pickFrom(CLAUDE_CODE_EFFORTS, p.claudeCodeEffort, next.claudeCodeEffort);
   if ('claudeApiModel' in p) next.claudeApiModel = pickFrom(CLAUDE_MODELS.map(m => m.id), p.claudeApiModel, next.claudeApiModel);
   if ('openaiModel' in p) next.openaiModel = pickFrom(OPENAI_MODELS.map(m => m.id), p.openaiModel, next.openaiModel);
@@ -393,6 +399,25 @@ async function fetchWithTimeout(url, init, ms) {
   }
 }
 
+// ── web access ──────────────────────────────────────────────────────────────
+
+/** Whether `provider` gets its web tools for this answer: Web access is on. */
+function webFor(provider, s) {
+  return !!(s && s.web);
+}
+
+/** What whoever answers is told about the web, matching the tools it was handed. */
+function webPrompt(on, provider) {
+  if (!on) {
+    return "You can't open web pages or search the web here. If the question depends on a page you can't see, " +
+      "say so in the answer rather than guess what the page says.";
+  }
+  const own = provider === 'claude-code' || provider === 'codex' ? 'the diagram and the code' : 'the diagram';
+  return `You can also open a web page or search the web. Do it only when the question needs something ${own} ` +
+    "can't tell you — a link written in a box, or facts that live elsewhere — and answer without the web otherwise. " +
+    'The answer is still only the boxes: no list of sources, no links or markdown in them.';
+}
+
 /**
  * start(id, req, onStep) → { ok, text } — the answer's JSON, for the renderer to read
  * into boxes — or { ok:false, error, code }.
@@ -413,12 +438,16 @@ function start(id, req, onStep) {
   if (!provider) return Promise.resolve({ ok: false, error: 'Pick who answers first' });
   const step = typeof onStep === 'function' ? onStep : () => {};
   const s = settings();
+  // Web access: the tools go to whoever answers here, so what it is told about the web
+  // is added here too — the prompt and the tools never disagree.
+  const web = webFor(provider, s);
+  const ask = Object.assign({}, r, { system: r.system + '\n\n' + webPrompt(web, provider) });
 
   let job;
-  if (provider === 'claude-code') job = askClaudeCode(r, s, step);
-  else if (provider === 'codex') job = askCodex(r, step);
-  else if (provider === 'claude-api') job = askClaudeApi(r, s);
-  else job = askOpenAi(r, s);
+  if (provider === 'claude-code') job = askClaudeCode(ask, s, web, step);
+  else if (provider === 'codex') job = askCodex(ask, web, step);
+  else if (provider === 'claude-api') job = askClaudeApi(ask, s, web);
+  else job = askOpenAi(ask, s, web, step);
 
   runs.set(key, job);
   return job.done.then(res => {
@@ -523,6 +552,16 @@ function clip(text, n) {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
 
+/** A page as the activity card names it: "example.com/docs/intro", no scheme, no query. */
+function pageName(url) {
+  try {
+    const u = new URL(String(url || ''));
+    return clip(u.host.replace(/^www\./, '') + (u.pathname === '/' ? '' : u.pathname), 70);
+  } catch (_) {
+    return clip(url, 70);
+  }
+}
+
 /** What one of Claude Code's tool calls is doing, in a line the activity card shows. */
 function claudeStep(dir, block) {
   const input = (block && block.input) || {};
@@ -533,6 +572,8 @@ function claudeStep(dir, block) {
       return { kind: 'search', text: 'Searching for', target: clip(input.pattern, 60) + (where ? ' in ' + where : '') };
     }
     case 'Glob': return { kind: 'list', text: 'Looking for', target: clip(input.pattern, 60) };
+    case 'WebFetch': return { kind: 'fetch', text: 'Opening', target: pageName(input.url) };
+    case 'WebSearch': return { kind: 'web', text: 'Searching the web for', target: clip(input.query, 60) };
     case 'StructuredOutput': return { kind: 'write', text: 'Writing the answer', target: '' };
     default: return { kind: 'other', text: clip(block && block.name, 40) || 'Working', target: '' };
   }
@@ -540,17 +581,21 @@ function claudeStep(dir, block) {
 
 const SIGNED_OUT_RE = /(not logged in|please run \/login|log in|invalid api key|authentication|unauthori[sz]ed|oauth token)/i;
 
-function askClaudeCode(r, s, step) {
-  const dir = r.dir;
-  if (!dir) return { done: Promise.resolve({ ok: false, error: 'This workspace has no folder to read' }), stop: () => {} };
+/**
+ * Claude Code's arguments. Read and search only — nothing it can do changes a file or
+ * runs a command — and with Web access, its two web tools too. A tool left out of
+ * --tools is one it never sees: leaving it out of --allowedTools alone would not do,
+ * since dontAsk still lets WebFetch open the documentation sites Claude Code trusts.
+ */
+function claudeCodeArgs(r, s, web) {
+  const tools = web ? 'Read,Grep,Glob,WebFetch,WebSearch' : 'Read,Grep,Glob';
   const args = [
     '-p',
     '--output-format', 'stream-json',
     '--verbose',
     '--json-schema', JSON.stringify(r.schema),
-    // Read and search only. Nothing it can do changes a file or runs a command.
-    '--tools', 'Read,Grep,Glob',
-    '--allowedTools', 'Read,Grep,Glob',
+    '--tools', tools,
+    '--allowedTools', tools,
     '--permission-mode', 'dontAsk',
     '--strict-mcp-config',
     '--disable-slash-commands',
@@ -558,6 +603,13 @@ function askClaudeCode(r, s, step) {
     '--append-system-prompt', r.system,
   ];
   if (s.claudeCodeEffort && s.claudeCodeEffort !== 'own') args.push('--effort', s.claudeCodeEffort);
+  return args;
+}
+
+function askClaudeCode(r, s, web, step) {
+  const dir = r.dir;
+  if (!dir) return { done: Promise.resolve({ ok: false, error: 'This workspace has no folder to read' }), stop: () => {} };
+  const args = claudeCodeArgs(r, s, web);
 
   let result = null;
   let files = 0;
@@ -599,26 +651,52 @@ function askClaudeCode(r, s, step) {
   return { done, stop: run.stop };
 }
 
-function askCodex(r, step) {
+/**
+ * `codex exec`'s arguments. Read-only: the commands it runs to look around cannot write
+ * anything, nor reach the network. Its web search is OpenAI's, run on OpenAI's side —
+ * and on by default ("cached", OpenAI's index) since Codex 0.92, so Web access off has
+ * to say "disabled", and on says "live" so it can open the page a box links to. A
+ * Codex too old to know the key ignores it.
+ */
+function codexArgs(r, web, dir, schemaFile, outFile) {
+  // `codex exec` has no separate system prompt: the instructions lead the prompt.
+  const prompt = r.system + '\n\n' + r.user;
+  return [
+    'exec',
+    '--json',
+    '--sandbox', 'read-only',
+    '--skip-git-repo-check',
+    '-c', web ? 'web_search="live"' : 'web_search="disabled"',
+    '--cd', dir,
+    '--output-schema', schemaFile,
+    '--output-last-message', outFile,
+    prompt,
+  ];
+}
+
+/**
+ * A finished web search, as the activity card says it — Codex's `web_search` item and
+ * the Responses API's `web_search_call` carry the same `action`. Null when there is
+ * nothing to say (an action it doesn't name).
+ */
+function webStep(action, query) {
+  const a = action && typeof action === 'object' ? action : {};
+  if (a.type === 'open_page' || a.type === 'find_in_page') {
+    const url = a.url || query;
+    return url ? { kind: 'fetch', text: 'Opened', target: pageName(url) } : null;
+  }
+  const q = a.query || (Array.isArray(a.queries) && a.queries[0]) || query;
+  return q ? { kind: 'web', text: 'Searched the web for', target: clip(q, 60) } : null;
+}
+
+function askCodex(r, web, step) {
   const dir = r.dir;
   if (!dir) return { done: Promise.resolve({ ok: false, error: 'This workspace has no folder to read' }), stop: () => {} };
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'switchboard-codex-'));
   const schemaFile = path.join(tmp, 'schema.json');
   const outFile = path.join(tmp, 'answer.json');
   fs.writeFileSync(schemaFile, JSON.stringify(r.schema));
-  // `codex exec` has no separate system prompt: the instructions lead the prompt.
-  const prompt = r.system + '\n\n' + r.user;
-  const args = [
-    'exec',
-    '--json',
-    // Read-only: the commands it runs to look around cannot write anything.
-    '--sandbox', 'read-only',
-    '--skip-git-repo-check',
-    '--cd', dir,
-    '--output-schema', schemaFile,
-    '--output-last-message', outFile,
-    prompt,
-  ];
+  const args = codexArgs(r, web, dir, schemaFile, outFile);
 
   let lastMessage = '';
   let failure = '';
@@ -635,6 +713,10 @@ function askCodex(r, step) {
           step({ kind: 'run', text: 'Running', target: clip(String(item.command || '').replace(/^bash -lc /, ''), 70) });
         } else if (item.type === 'reasoning' && ev.type === 'item.started') {
           step({ kind: 'think', text: 'Thinking', target: '' });
+        } else if (item.type === 'web_search' && ev.type === 'item.completed') {
+          // Only once it is done: until then the item has no query or address yet.
+          const st = webStep(item.action, typeof item.query === 'string' ? item.query : '');
+          if (st) step(st);
         } else if (item.type === 'agent_message' && ev.type === 'item.completed' && typeof item.text === 'string') {
           lastMessage = item.text;
         }
@@ -642,6 +724,9 @@ function askCodex(r, step) {
         // Older `codex exec --json` spoke in protocol events instead of items.
         files++;
         step({ kind: 'run', text: 'Running', target: clip([].concat(ev.msg.command || []).join(' '), 70) });
+      } else if (ev.msg && ev.msg.type === 'web_search_end' && typeof ev.msg.query === 'string') {
+        const st = webStep(null, ev.msg.query);
+        if (st) step(st);
       } else if (ev.msg && ev.msg.type === 'agent_message' && typeof ev.msg.message === 'string') {
         lastMessage = ev.msg.message;
       } else if (ev.type === 'turn.failed' || ev.type === 'error') {
@@ -684,42 +769,124 @@ function apiJob(fn) {
   return { done, stop: () => { if (!why) why = 'stopped'; controller.abort(); } };
 }
 
-function askClaudeApi(r, s) {
+// Anthropic's own web tools, run on its side. The basic versions: every model on offer
+// takes them, and they are called directly rather than from code execution. A few
+// uses each — a question on a diagram needs a page or two, not a research project.
+const CLAUDE_WEB_TOOLS = [
+  { type: 'web_search_20250305', name: 'web_search', max_uses: 3 },
+  { type: 'web_fetch_20250910', name: 'web_fetch', max_uses: 3, max_content_tokens: 20000 },
+];
+
+// How many times a turn Anthropic paused in its web loop (stop_reason "pause_turn") is
+// sent back to carry on, before giving up.
+const CLAUDE_MAX_RESUMES = 3;
+
+/**
+ * The Messages API request. The answer comes back as the response's text, in the
+ * schema's shape (structured outputs) — not as a forced tool call, which Opus 5.5,
+ * Sonnet 5.5 and Fable 5.1 refuse with a 400, and which would leave no room to look
+ * anything up first.
+ */
+function claudeApiBody(r, s, web) {
+  const body = {
+    model: s.claudeApiModel,
+    max_tokens: 4096,
+    system: r.system,
+    messages: [{ role: 'user', content: r.user }],
+    output_config: { format: { type: 'json_schema', schema: r.schema } },
+  };
+  if (web) body.tools = CLAUDE_WEB_TOOLS;
+  return body;
+}
+
+/**
+ * The answer's JSON out of a turn's content: the text after the last web block (any
+ * words before a search are not the answer). The text can come split across blocks,
+ * so they are joined.
+ */
+function claudeAnswerText(content) {
+  const blocks = Array.isArray(content) ? content.filter(Boolean) : [];
+  let at = blocks.length;
+  while (at > 0 && blocks[at - 1].type === 'text') at--;
+  return blocks.slice(at).map(b => (typeof b.text === 'string' ? b.text : '')).join('').trim();
+}
+
+function askClaudeApi(r, s, web) {
   return apiJob(async signal => {
     const key = keyFor('claude-api');
     if (!key) return { ok: false, code: 'no-key', error: 'There is no Claude API key on this Mac yet' };
-    const res = await net.fetch('https://api.anthropic.com/v1/messages', {
-      signal,
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: s.claudeApiModel,
-        max_tokens: 1024,
-        system: r.system,
-        messages: [{ role: 'user', content: r.user }],
-        // The answer as one forced tool call, whose input IS the JSON the schema says.
-        tools: [{
-          name: 'flow_answer',
-          description: 'Give the answer as the boxes to add to the flowchart.',
-          input_schema: r.schema,
-        }],
-        tool_choice: { type: 'tool', name: 'flow_answer' },
-      }),
-    });
-    const body = await res.text();
-    if (res.status === 401 || res.status === 403) {
-      return { ok: false, code: 'bad-key', error: "Anthropic says the Claude API key isn't valid" };
+    const body = claudeApiBody(r, s, web);
+    let turn = [];                                   // the assistant's turn so far, across pauses
+    let searchDropped = false;
+    for (let resumes = 0; ; resumes++) {
+      const messages = turn.length ? body.messages.concat([{ role: 'assistant', content: turn }]) : body.messages;
+      const res = await net.fetch('https://api.anthropic.com/v1/messages', {
+        signal,
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify(Object.assign({}, body, { messages })),
+      });
+      const raw = await res.text();
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, code: 'bad-key', error: "Anthropic says the Claude API key isn't valid" };
+      }
+      if (!res.ok) {
+        const said = errorText(raw);
+        // Web search always cites what it found, and should the API ever refuse citations
+        // beside a structured answer, the answer goes again with only web fetch, whose
+        // citations are off: a link in a box still opens.
+        if (web && res.status === 400 && /citation/i.test(said) && !searchDropped && !turn.length) {
+          searchDropped = true;
+          body.tools = body.tools.filter(t => t.name !== 'web_search');
+          resumes--;
+          continue;
+        }
+        // An organisation can switch Anthropic's web tools off; the way through is ours.
+        if (web && /web[ _-]?(search|fetch)/i.test(said)) {
+          return { ok: false, error: `The Claude API won't use the web with this key — ${said}. Turn Web access off to answer without it.` };
+        }
+        return { ok: false, error: `The Claude API answered ${res.status} — ${said || 'try again'}` };
+      }
+      let data;
+      try { data = JSON.parse(raw); } catch (_) { return { ok: false, error: 'The Claude API sent back something that is not JSON' }; }
+      turn = turn.concat(Array.isArray(data.content) ? data.content : []);
+      // A long web turn is paused, not finished: sent back as it is, it carries on.
+      if (data.stop_reason === 'pause_turn' && resumes < CLAUDE_MAX_RESUMES) continue;
+      if (data.stop_reason === 'refusal') return { ok: false, error: 'Claude declined to answer that' };
+      if (data.stop_reason === 'max_tokens') return { ok: false, error: 'The answer was cut off before it finished — try asking for less' };
+      const text = claudeAnswerText(turn);
+      if (!text) return { ok: false, error: 'The Claude API answered without boxes' };
+      return { ok: true, text };
     }
-    if (!res.ok) return { ok: false, error: `The Claude API answered ${res.status} — ${errorText(body) || 'try again'}` };
-    let data;
-    try { data = JSON.parse(body); } catch (_) { return { ok: false, error: 'The Claude API sent back something that is not JSON' }; }
-    const block = (data.content || []).find(b => b && b.type === 'tool_use');
-    if (!block || !block.input) return { ok: false, error: 'The Claude API answered without boxes' };
-    return { ok: true, text: JSON.stringify(block.input) };
   });
 }
 
-function askOpenAi(r, s) {
+/**
+ * The Responses API request. With Web access, OpenAI's own web search, which also opens
+ * a page a box links to; a few calls at most, and the smallest search context, since a
+ * box is eight words.
+ */
+function openAiBody(r, s, web) {
+  const body = {
+    model: s.openaiModel,
+    reasoning: { effort: s.openaiEffort },
+    // Streamed, as the admin's caller does: a long think with nothing on the wire is
+    // the connection a VPN or a proxy drops.
+    stream: true,
+    input: [
+      { role: 'system', content: r.system },
+      { role: 'user', content: r.user },
+    ],
+    text: { format: { type: 'json_schema', name: 'flow_answer', strict: true, schema: r.schema } },
+  };
+  if (web) {
+    body.tools = [{ type: 'web_search', search_context_size: 'low' }];
+    body.max_tool_calls = 4;
+  }
+  return body;
+}
+
+function askOpenAi(r, s, web, step) {
   return apiJob(async signal => {
     const key = keyFor('openai-api');
     if (!key) return { ok: false, code: 'no-key', error: 'There is no OpenAI API key on this Mac yet' };
@@ -727,18 +894,7 @@ function askOpenAi(r, s) {
       signal,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
-      body: JSON.stringify({
-        model: s.openaiModel,
-        reasoning: { effort: s.openaiEffort },
-        // Streamed, as the admin's caller does: a long think with nothing on the wire is
-        // the connection a VPN or a proxy drops.
-        stream: true,
-        input: [
-          { role: 'system', content: r.system },
-          { role: 'user', content: r.user },
-        ],
-        text: { format: { type: 'json_schema', name: 'flow_answer', strict: true, schema: r.schema } },
-      }),
+      body: JSON.stringify(openAiBody(r, s, web)),
     });
     if (res.status === 401 || res.status === 403) {
       return { ok: false, code: 'bad-key', error: "OpenAI says the API key isn't valid" };
@@ -747,13 +903,16 @@ function askOpenAi(r, s) {
       const detail = await res.text().catch(() => '');
       return { ok: false, error: `OpenAI answered ${res.status} — ${errorText(detail) || 'try again'}` };
     }
-    return { ok: true, text: await readOpenAiStream(res.body) };
+    return { ok: true, text: await readOpenAiStream(res.body, step) };
   });
 }
 
 // The admin's own Responses API stream reader, ported: output-text deltas
 // accumulated into the answer, a refusal or a failed response surfaced as an error.
-async function readOpenAiStream(body) {
+// Switchboard: each finished web search goes to `onStep`, and only the final message's
+// text is the answer — a model may say a word before it searches (a "commentary"
+// message), which is not part of the JSON.
+async function readOpenAiStream(body, onStep) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -761,14 +920,28 @@ async function readOpenAiStream(body) {
   let refusal = '';
   let streamError = '';
   let incomplete = '';
+  const step = typeof onStep === 'function' ? onStep : () => {};
+  const messages = [];                   // [{ id, phase, text }], in the order they began
+  const byId = new Map();
 
   const handle = raw => {
     const data = raw.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).replace(/^ /, '')).join('\n');
     if (!data || data === '[DONE]') return;
     let ev;
     try { ev = JSON.parse(data); } catch (_) { return; }
-    if (ev.type === 'response.output_text.delta' && typeof ev.delta === 'string') text += ev.delta;
-    else if (ev.type === 'response.refusal.delta' && typeof ev.delta === 'string') refusal += ev.delta;
+    const item = ev.item && typeof ev.item === 'object' ? ev.item : null;
+    if (ev.type === 'response.output_item.added' && item && item.type === 'message' && item.id) {
+      const m = { id: item.id, phase: item.phase || null, text: '' };
+      messages.push(m);
+      byId.set(item.id, m);
+    } else if (ev.type === 'response.output_item.done' && item && item.type === 'web_search_call') {
+      const st = webStep(item.action, '');
+      if (st) step(st);
+    } else if (ev.type === 'response.output_text.delta' && typeof ev.delta === 'string') {
+      text += ev.delta;
+      const m = byId.get(ev.item_id);
+      if (m) m.text += ev.delta;
+    } else if (ev.type === 'response.refusal.delta' && typeof ev.delta === 'string') refusal += ev.delta;
     else if (ev.type === 'response.incomplete') {
       const reason = ev.response && ev.response.incomplete_details && ev.response.incomplete_details.reason;
       incomplete = typeof reason === 'string' ? reason : 'incomplete';
@@ -797,6 +970,13 @@ async function readOpenAiStream(body) {
   }
   if (streamError) throw new Error('OpenAI: ' + streamError);
   if (refusal.trim()) throw new Error('The model refused to answer: ' + refusal.trim());
+  // The last message that isn't commentary — none, when all it said was commentary (an
+  // answer cut short says why below). Every delta together only when the stream named
+  // no messages at all (the admin's reading).
+  if (messages.length) {
+    const answers = messages.filter(m => m.phase !== 'commentary' && m.text.trim());
+    text = answers.length ? answers[answers.length - 1].text : '';
+  }
   if (!text.trim()) throw new Error(incomplete ? `The answer stopped early (${incomplete}). Try a lower effort.` : 'OpenAI sent back an empty answer');
   return text;
 }
@@ -817,6 +997,14 @@ module.exports = {
   claudeStep,
   openaiEffortFor,
   keysFile,
+  webPrompt,
+  webStep,
+  claudeCodeArgs,
+  codexArgs,
+  claudeApiBody,
+  claudeAnswerText,
+  openAiBody,
+  readOpenAiStream,
 };
 
 // A request id the renderer can use when it has none of its own.

@@ -1,7 +1,9 @@
 // AI answers on the Flow editor: write a question in a box, press ✦ Answer in
-// its toolbar, and the answer comes back as one box — or up to four, when it
+// its toolbar, and the answer comes back as one box — or one per part, when it
 // has parts — hanging off the question's right side, laid out the way Tab
 // lays out boxes.
+// Switchboard: no cap of four (six repos are six boxes), and the line of detail
+// under each box only when Subtext is on.
 //
 // This is the pure half, shared by the editor (app/dashboard/diagrams/
 // FlowEditor.tsx), the route that calls OpenAI (app/api/diagrams/answer) and
@@ -97,7 +99,7 @@ export function effortFor(model: FlowAiModelId, effort: FlowAiEffort): FlowAiEff
 
 // ─── settings ───
 
-/** "auto": the model splits an answer into up to four boxes when it has parts. */
+/** "auto": the model splits an answer into a box per part when it has parts. */
 export const FLOW_AI_SPLITS = ["auto", "one"] as const
 
 export type FlowAiSplit = (typeof FLOW_AI_SPLITS)[number]
@@ -141,12 +143,18 @@ export function sanitizeFlowAiSettings(raw: unknown): FlowAiSettings {
 
 // ─── the request ───
 
-/** Most parts an answer is split into — the most boxes one press adds. */
-export const FLOW_AI_MAX_PARTS = 4
+/**
+ * Switchboard: not a cap on the answer — the prompt asks for a part per item, however
+ * many that is — only a backstop against a runaway list from a confused model.
+ */
+export const FLOW_AI_MAX_PARTS = 40
 /** How many boxes leading up to the question go along as context. */
 export const FLOW_AI_MAX_CONTEXT = 12
-/** How many boxes already hanging off the question are named, so they aren't repeated. */
-export const FLOW_AI_MAX_EXISTING = 12
+/**
+ * How many boxes already hanging off the question are named, so they aren't repeated.
+ * Switchboard: as many as one answer can add, now that it can add more than four.
+ */
+export const FLOW_AI_MAX_EXISTING = FLOW_AI_MAX_PARTS
 
 /** One box on the way to the question, and the label of the arrow out of it. */
 export type FlowAiStep = { label: string; detail?: string; arrow?: string }
@@ -164,6 +172,8 @@ export type FlowAiRequest = {
   model: FlowAiModelId
   effort: FlowAiEffort
   split: FlowAiSplit
+  /** Switchboard: a line of detail under each box. Unset is the admin's: yes. */
+  subtext?: boolean
 }
 
 export type FlowAiPart = { label: string; detail?: string }
@@ -229,19 +239,27 @@ export function parseFlowAiRequest(raw: unknown): Parsed<FlowAiRequest> {
 
 // ─── the prompt ───
 
-const SYSTEM_PROMPT = `You help someone think through a flowchart. They wrote a question in one box and want the answer as the next box or boxes, drawn to the right of it with an arrow from the question.
+// Switchboard: the detail line depends on Subtext, and there is no "at most 4" — a part
+// for every separate thing, so a question with six answers gets six boxes.
+function systemPrompt(subtext: boolean): string {
+  return `You help someone think through a flowchart. They wrote a question in one box and want the answer as the next box or boxes, drawn to the right of it with an arrow from the question.
 
 Each part of your answer becomes one box:
 - "label": the answer itself, at most 8 words. Plain and specific. No trailing full stop.
-- "detail": one short supporting line, at most 12 words, or "" when the label says it all.
+${
+  subtext
+    ? `- "detail": one short supporting line, at most 12 words, or "" when the label says it all.`
+    : `- "detail": always "". The boxes have no second line, so the label has to stand on its own.`
+}
 
-Give several parts only when the answer genuinely has separate parts — reasons, options, steps or outcomes — and then at most 4, most important first. Otherwise give exactly one part.
+When the answer has separate parts — items, reasons, options, steps or outcomes — give one part for each of them, as many as there are: a list of six things is six parts. Never put two of them in one part. Keep their natural order, or put the most important first. When the answer is a single thing, give exactly one part.
 
 If the box isn't a question, treat it as a topic and give what follows from it, or its main parts.
 
 Use the boxes leading up to the question as context: the arrow labels say which way the flow went. Don't repeat anything already hanging off the question.
 
 Plain text only — no markdown, numbering, emoji or surrounding quotes.`
+}
 
 /** The system and user messages for one request. */
 export function flowAiPrompt(request: FlowAiRequest): { system: string; user: string } {
@@ -263,9 +281,9 @@ export function flowAiPrompt(request: FlowAiRequest): { system: string; user: st
   lines.push(
     request.split === "one"
       ? "Answer in exactly one part."
-      : `Answer in 1 to ${FLOW_AI_MAX_PARTS} parts.`,
+      : "Answer in as many parts as the answer has: one for each separate thing.",
   )
-  return { system: SYSTEM_PROMPT, user: lines.join("\n") }
+  return { system: systemPrompt(request.subtext !== false), user: lines.join("\n") }
 }
 
 /** The Responses API structured-output format the answer must come back in. */
@@ -295,11 +313,25 @@ export const FLOW_AI_TEXT_FORMAT = {
 } as const
 
 /**
+ * Switchboard: a box's text without the links a model that went on the web may leave
+ * in it despite being told not to — a citation "([site](https://…))" goes, and a link
+ * "[words](https://…)" keeps its words.
+ */
+function unlinked(value: unknown): unknown {
+  if (typeof value !== "string") return value
+  // An address may hold one level of brackets of its own: …/wiki/Rust_(programming_language).
+  return value
+    .replace(/\s*\(\[[^\]]*\]\((?:[^()\s]|\([^()\s]*\))*\)\)/g, "")
+    .replace(/\[([^\]]*)\]\((?:https?:)?\/\/(?:[^()\s]|\([^()\s]*\))*\)/g, "$1")
+}
+
+/**
  * The model's JSON read back into boxes: text tidied the way the spec
  * validator would, empty parts dropped, at most FLOW_AI_MAX_PARTS (one for
  * "one"). Throws when nothing usable came back.
+ * Switchboard: without `subtext`, no detail line, whatever the model wrote there.
  */
-export function parseFlowAiAnswer(text: string, split: FlowAiSplit): FlowAiPart[] {
+export function parseFlowAiAnswer(text: string, split: FlowAiSplit, subtext = true): FlowAiPart[] {
   let data: unknown
   try {
     data = JSON.parse(text)
@@ -314,9 +346,9 @@ export function parseFlowAiAnswer(text: string, split: FlowAiSplit): FlowAiPart[
   for (const entry of raw) {
     if (typeof entry !== "object" || entry === null) continue
     const part = entry as Record<string, unknown>
-    const label = tidy(part.label)
+    const label = tidy(unlinked(part.label))
     if (!label) continue
-    parts.push({ label, detail: tidy(part.detail) })
+    parts.push({ label, detail: subtext ? tidy(unlinked(part.detail)) : undefined })
   }
   if (parts.length === 0) throw new Error("The model came back without an answer — try again.")
   return parts.slice(0, split === "one" ? 1 : FLOW_AI_MAX_PARTS)

@@ -1505,3 +1505,15 @@ aside .empty p{font-size:var(--fs-xs)}
 .stbtns > span{margin-left:6px}
 .stfoot{display:flex;align-items:flex-start;gap:8px;margin-top:16px;max-width:660px;font-size:var(--fs-sm)}
 .stfoot .ic{margin-top:2px}
+/* Web access and Subtext: on/off rows after the list, the whole row the switch, its
+   switch where a provider row has its radio. */
+.stopts{margin-top:18px}
+.stsw{width:auto;text-align:left;cursor:default}
+.stsw:hover{background:var(--fill)}
+.stnm.wide{width:auto;flex:1}
+.tgl{width:28px;height:16px;flex:none;border-radius:8px;background:var(--chev);position:relative;
+  transition:background .12s}
+.tgl::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;
+  background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.18);transition:transform .12s}
+.tgl.on{background:var(--link)}
+.tgl.on::after{transform:translateX(12px)}

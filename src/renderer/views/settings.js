@@ -268,6 +268,20 @@ SB.views = SB.views || {};
     return panel;
   }
 
+  // An on/off row under the list — the whole row is the switch.
+  function switchRow(name, what, on, onToggle) {
+    return h('button.strow.stsw', {
+      type: 'button',
+      role: 'switch',
+      'aria-checked': on ? 'true' : 'false',
+      onClick: onToggle,
+    },
+      h('span.tgl' + (on ? '.on' : ''), { 'aria-hidden': 'true' }),
+      h('span.stnm.wide', null,
+        h('span.stname', null, name),
+        h('span.stwhat.sec', null, what)));
+  }
+
   function section(status) {
     var settings = status.settings;
     var list = h('div.stlist', { role: 'radiogroup', 'aria-label': 'Who answers' });
@@ -275,6 +289,14 @@ SB.views = SB.views || {};
       list.appendChild(row(p, settings));
       if (p.kind === 'api' && st.editing === p.id) list.appendChild(keyPanel(p, settings));
     });
+    // Whichever of the four answers, and in the ✦ Answer menu too.
+    var options = h('div.stlist.stopts', null,
+      switchRow('Web access',
+        'Opens a link in the question, or searches the web, only when the answer needs it. Public pages only.',
+        settings.web, function () { change({ web: !settings.web }); }),
+      switchRow('Subtext',
+        'A line of detail under each answer box, such as the file it came from. Off: just the answer.',
+        settings.subtext, function () { change({ subtext: !settings.subtext }); }));
     return h('div.stsec', null,
       h('div.sth', null, '✦ Answer on diagrams'),
       h('p.stdesc.sec', null,
@@ -284,7 +306,8 @@ SB.views = SB.views || {};
       list,
       h('p.stfoot.sec', null, D.icon('lock'), h('span', null, status.keysSafe
         ? 'Keys are encrypted with this Mac’s Keychain and kept in ~/.switchboard/keys.json. Once saved, a key is never shown again — only its last four characters.'
-        : 'This Mac’s Keychain isn’t available to Switchboard, so API keys can’t be kept here.')));
+        : 'This Mac’s Keychain isn’t available to Switchboard, so API keys can’t be kept here.')),
+      options);
   }
 
   function render() {

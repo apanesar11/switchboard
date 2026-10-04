@@ -24,7 +24,7 @@
 //
 // A box's toolbar also leads with ✦ Answer (⌘↵, or Switchboard's ⌘I): the box's text goes to an
 // OpenAI model (lib/diagrams/ai.ts, app/api/diagrams/answer) and the answer
-// comes back as one box — or up to four when it has parts — hanging off the
+// comes back as one box — or one per part when it has parts — hanging off the
 // box's right side, placed the way Tab would place them, as one undo step.
 // The chevron beside it picks the model and the reasoning effort.
 // Switchboard: any number of boxes can be waiting on an answer at once, one
@@ -275,6 +275,8 @@ type Asking = {
   name: string
   /** A CLI reads the workspace first, and the strip shows what it is doing. */
   cli: boolean
+  /** Web access was on when it was asked: it may look things up on the web too. */
+  web: boolean
   /** Which answer this is, counted from 1 — keys its status, so its timer restarts. */
   serial: number
 }
@@ -2245,6 +2247,7 @@ function FlowEditorCanvas({
         provider: provider.id,
         name: provider.name,
         cli: provider.kind === "cli",
+        web: settings.web,
         serial,
       },
     ])
@@ -2266,6 +2269,7 @@ function FlowEditorCanvas({
             existing,
             title: diagramName ?? meta.title,
             split: settings.split,
+            subtext: settings.subtext,
           },
         },
         controller.signal,
@@ -2719,9 +2723,10 @@ function FlowEditorCanvas({
   // Switchboard: the CLI answer whose steps the card over the strip follows —
   // the selected box's, or else the one asked for last.
   const followed = useMemo(() => {
-    const clis = askings.filter((entry) => entry.cli)
-    return clis.find((entry) => entry.id === soleNodeId) ?? clis[clis.length - 1] ?? null
-  }, [askings, soleNodeId])
+    // A CLI from the start; an API once it has gone on the web, the one step it reports.
+    const shown = askings.filter((entry) => entry.cli || (steps[entry.serial]?.length ?? 0) > 0)
+    return shown.find((entry) => entry.id === soleNodeId) ?? shown[shown.length - 1] ?? null
+  }, [askings, soleNodeId, steps])
 
   function deleteSelection() {
     void deleteElements({ nodes: selectedNodes, edges: selectedEdges })
@@ -3650,9 +3655,21 @@ function keepInCanvas(panel: HTMLDivElement | null) {
     bounds.left + margin - rect.left,
   )
   if (shift !== 0) panel.style.marginLeft = `${shift}px`
+  // Switchboard: the strip along the canvas's foot — undo, redo, saved, and the card
+  // over it while an answer is on its way — is drawn over the toolbar, so where the
+  // panel would run under it (where it is after the shift), the room ends where the
+  // strip starts.
+  const strip = panel
+    .closest(".react-flow")
+    ?.querySelector(".react-flow__panel.bottom.center")
+    ?.getBoundingClientRect()
+  const floor =
+    strip && strip.height > 0 && strip.left < rect.right + shift && strip.right > rect.left + shift
+      ? Math.min(bounds.bottom, strip.top)
+      : bounds.bottom
   const anchor = panel.parentElement?.getBoundingClientRect()
-  if (!anchor || rect.bottom <= bounds.bottom - margin) return
-  const up = anchor.top - bounds.top > bounds.bottom - anchor.bottom
+  if (!anchor || rect.bottom <= floor - margin) return
+  const up = anchor.top - bounds.top > floor - anchor.bottom
   if (up) {
     panel.style.top = "auto"
     panel.style.bottom = "100%"
@@ -3665,7 +3682,7 @@ function keepInCanvas(panel: HTMLDivElement | null) {
   // canvas, which clips it.
   const room = up
     ? anchor.top - bounds.top - margin * 2
-    : bounds.bottom - anchor.bottom - margin * 2
+    : floor - anchor.bottom - margin * 2
   if (rect.height > room) {
     panel.style.maxHeight = `${Math.max(140, room)}px`
     panel.style.overflowY = "auto"
@@ -4018,9 +4035,45 @@ function providerLine(provider: ProviderStatus, workspaceName?: string): string 
   return `${model?.name ?? provider.model} · only this diagram · fast`
 }
 
+// One on/off line in the menu below: what it is, a hint, and the switch.
+function MenuSwitch({
+  label,
+  hint,
+  on,
+  onToggle,
+}: {
+  label: string
+  hint: string
+  on: boolean
+  onToggle: () => void
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      onClick={onToggle}
+      className={cx("flex items-center gap-3 rounded-lg px-2 py-1 text-left hover:bg-white/5", focusRing)}
+    >
+      <span className="min-w-0 flex-1">
+        <span className="block text-gray-200">{label}</span>
+        <span className="block text-[11px] leading-4 text-gray-400">{hint}</span>
+      </span>
+      <span
+        aria-hidden="true"
+        className={cx("flex h-[18px] w-8 shrink-0 rounded-full p-0.5 transition-colors", on ? "bg-violet-500" : "bg-white/20")}
+      >
+        <span className={cx("size-3.5 rounded-full bg-white transition-transform", on && "translate-x-3.5")} />
+      </span>
+    </button>
+  )
+}
+
 // Under the chevron: who answers — the four ways, each saying whether it can on
-// this Mac — and how: a CLI's effort, an API's model. Kept by main, on this Mac,
-// for every diagram; the Settings screen shows and changes the same things.
+// this Mac — and how: a CLI's effort, an API's model; then whether it reads the boxes
+// before the question, writes a line under each box, and may go on the web. Kept by
+// main, on this Mac, for every diagram; the Settings screen shows and changes the same
+// things.
 function AiSettingsMenu({
   status,
   workspaceName,
@@ -4045,48 +4098,60 @@ function AiSettingsMenu({
   return (
     <div className="w-[33rem] text-sm text-gray-200">
       <div className="grid grid-cols-[1.08fr_1fr]">
-        <div role="radiogroup" aria-label="Answer with" className="flex flex-col gap-0.5 pr-1.5">
-          <MenuHeading>Answer with</MenuHeading>
-          {status.providers.map((option) => {
-            const checked = settings.provider === option.id
-            return (
-              <button
-                key={option.id}
-                type="button"
-                role="radio"
-                aria-checked={checked}
-                onClick={() => onChange({ provider: option.id })}
-                className={cx(
-                  "flex items-start gap-2 rounded-lg px-2 py-1 text-left transition-colors",
-                  checked
-                    ? "bg-white/15 text-white"
-                    : option.ready
-                      ? "text-gray-300 hover:bg-white/10 hover:text-white"
-                      : "text-gray-500 hover:bg-white/5 hover:text-gray-300",
-                  focusRing,
-                )}
-              >
-                <RiCheckLine
-                  className={cx("mt-0.5 size-4 shrink-0", checked ? "opacity-100" : "opacity-0")}
-                  aria-hidden="true"
-                />
-                <span className="min-w-0">
-                  <span className="flex items-center gap-1.5 font-medium">
-                    {option.name}
-                    <KindTag kind={option.kind} />
+        <div className="flex flex-col pr-1.5">
+          <div role="radiogroup" aria-label="Answer with" className="flex flex-col gap-0.5">
+            <MenuHeading>Answer with</MenuHeading>
+            {status.providers.map((option) => {
+              const checked = settings.provider === option.id
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={checked}
+                  onClick={() => onChange({ provider: option.id })}
+                  className={cx(
+                    "flex items-start gap-2 rounded-lg px-2 py-1 text-left transition-colors",
+                    checked
+                      ? "bg-white/15 text-white"
+                      : option.ready
+                        ? "text-gray-300 hover:bg-white/10 hover:text-white"
+                        : "text-gray-500 hover:bg-white/5 hover:text-gray-300",
+                    focusRing,
+                  )}
+                >
+                  <RiCheckLine
+                    className={cx("mt-0.5 size-4 shrink-0", checked ? "opacity-100" : "opacity-0")}
+                    aria-hidden="true"
+                  />
+                  <span className="min-w-0">
+                    <span className="flex items-center gap-1.5 font-medium">
+                      {option.name}
+                      <KindTag kind={option.kind} />
+                    </span>
+                    <span
+                      className={cx(
+                        "block text-[11px] leading-4",
+                        option.ready ? "text-gray-400" : "text-gray-500",
+                      )}
+                    >
+                      {providerLine(option, workspaceName)}
+                    </span>
                   </span>
-                  <span
-                    className={cx(
-                      "block text-[11px] leading-4",
-                      option.ready ? "text-gray-400" : "text-gray-500",
-                    )}
-                  >
-                    {providerLine(option, workspaceName)}
-                  </span>
-                </span>
-              </button>
-            )
-          })}
+                </button>
+              )
+            })}
+          </div>
+          {/* Whichever of the four answers — what it may do, beside who it is (and outside
+              the radio group, which holds only the four). */}
+          <div className="mt-auto border-t border-white/10 pt-1">
+            <MenuSwitch
+              label="Web access"
+              hint="Opens links and searches when needed"
+              on={settings.web}
+              onToggle={() => onChange({ web: !settings.web })}
+            />
+          </div>
         </div>
         <div className="flex flex-col gap-1 border-l border-white/10 pl-2.5">
           {current ? <HowItAnswers provider={current} settings={settings} onChange={onChange} /> : null}
@@ -4095,36 +4160,24 @@ function AiSettingsMenu({
             <Segment label="Let it decide" checked={settings.split === "auto"} onClick={() => onChange({ split: "auto" })} />
             <Segment label="One box" checked={settings.split === "one"} onClick={() => onChange({ split: "one" })} />
           </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={settings.context}
-            onClick={() => onChange({ context: !settings.context })}
-            className={cx("mt-1 flex items-center gap-3 rounded-lg px-2 py-1.5 text-left hover:bg-white/5", focusRing)}
-          >
-            <span className="min-w-0 flex-1">
-              <span className="block text-gray-200">Read the boxes before it</span>
-              <span className="block text-[11px] leading-4 text-gray-400">The arrows leading to the question</span>
-            </span>
-            <span
-              aria-hidden="true"
-              className={cx(
-                "flex h-[18px] w-8 shrink-0 rounded-full p-0.5 transition-colors",
-                settings.context ? "bg-violet-500" : "bg-white/20",
-              )}
-            >
-              <span
-                className={cx(
-                  "size-3.5 rounded-full bg-white transition-transform",
-                  settings.context && "translate-x-3.5",
-                )}
-              />
-            </span>
-          </button>
+          <div className="mt-1 flex flex-col">
+            <MenuSwitch
+              label="Read the boxes before it"
+              hint="The arrows leading to the question"
+              on={settings.context}
+              onToggle={() => onChange({ context: !settings.context })}
+            />
+            <MenuSwitch
+              label="Subtext"
+              hint="A line of detail under each box"
+              on={settings.subtext}
+              onToggle={() => onChange({ subtext: !settings.subtext })}
+            />
+          </div>
         </div>
       </div>
       <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-white/10 px-2 pb-0.5 pt-2 text-[11px] text-gray-400">
-        <span>Up to four boxes when an answer has parts. Remembered on this Mac.</span>
+        <span>A box for each part an answer has. Remembered on this Mac.</span>
         {onOpenSettings ? (
           <button
             type="button"
@@ -4286,11 +4339,14 @@ const DONE_TEXT: Record<AnswerStep["kind"], string> = {
   run: "Ran",
   think: "Thought it over",
   write: "Wrote the answer",
+  fetch: "Opened",
+  web: "Searched the web for",
   other: "",
 }
 
 // Switchboard: the card over the strip while a CLI answers — the last few things it
-// did, the one it is doing now, and that it can only read.
+// did, the one it is doing now, and that it can only read. An API gets it too, once it
+// has gone on the web.
 function AnswerActivity({
   asking,
   steps,
@@ -4312,7 +4368,7 @@ function AnswerActivity({
       <p className="mb-1.5 flex items-center gap-2 font-semibold text-gray-900 dark:text-gray-50">
         <RiSparkling2Fill className="size-3.5 shrink-0 text-violet-500" aria-hidden="true" />
         <span className="truncate">
-          {asking.name} is reading {workspaceName ?? "the workspace"}
+          {asking.cli ? `${asking.name} is reading ${workspaceName ?? "the workspace"}` : `${asking.name} is looking it up`}
         </span>
         <span className="ml-auto font-medium tabular-nums text-gray-500" aria-hidden="true">
           {seconds}s
@@ -4363,7 +4419,11 @@ function AnswerActivity({
           : done > 0
             ? `${done === 1 ? "1 step" : `${done} steps`} so far · `
             : ""}
-        Read-only: it can open and search files, never change them.
+        {!asking.cli
+          ? "It sees only the diagram, and the web when the question needs it."
+          : asking.web
+            ? "Read-only: it can open and search files, never change them, and look things up on the web."
+            : "Read-only: it can open and search files, never change them."}
       </p>
     </div>
   )

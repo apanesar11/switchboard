@@ -1010,22 +1010,36 @@ main's own, and runs `fetchImage` itself, with Node's fetch standing in for the 
 ### 4.18 ✦ Answer and Settings
 
 ✦ Answer, on the Diagrams tab, puts a box's question to an AI and hangs the answer off it
-as 1–4 boxes. The admin asks one OpenAI model; here it is any of four, chosen per Mac —
-the user has Claude Code on one laptop and Codex on another:
+as one box per part — six repos are six boxes; the admin's cap of four is gone here (40 is
+only a backstop against a runaway list). The admin asks one OpenAI model; here it is any
+of four, chosen per Mac — the user has Claude Code on one laptop and Codex on another:
 
 | provider | what it is | sees |
 |---|---|---|
-| `claude-code` | `claude -p` in the workspace folder, `--tools Read,Grep,Glob` and nothing else, `--permission-mode dontAsk`, prompt on stdin, `--json-schema` for the answer, `--output-format stream-json` for the steps | the workspace's code |
-| `codex` | `codex exec --json --sandbox read-only --cd <folder> --output-schema … --output-last-message …` | the workspace's code |
-| `claude-api` | the Messages API, the answer as one forced tool call whose input is the schema's JSON | only the diagram |
-| `openai-api` | the Responses API with the admin's json_schema format, streamed, the admin's models and probed efforts | only the diagram |
+| `claude-code` | `claude -p` in the workspace folder, `--tools Read,Grep,Glob` (plus `WebFetch,WebSearch` with Web access) and nothing else, `--permission-mode dontAsk`, prompt on stdin, `--json-schema` for the answer, `--output-format stream-json` for the steps | the workspace's code |
+| `codex` | `codex exec --json --sandbox read-only -c web_search="live"\|"disabled" --cd <folder> --output-schema … --output-last-message …` | the workspace's code |
+| `claude-api` | the Messages API, the answer as structured output (`output_config.format`, the schema) — not a forced tool call, which Opus 5.5, Sonnet 5.5 and Fable 5.1 refuse with a 400 — plus `web_search_20250305` / `web_fetch_20250910` with Web access, a paused turn (`pause_turn`) sent back to carry on | only the diagram |
+| `openai-api` | the Responses API with the admin's json_schema format, streamed, the admin's models and probed efforts, plus `{type:'web_search'}` with Web access | only the diagram |
 
 A CLI is slower — it opens and searches files first — and knows the code; an API answers
-in seconds and is exactly the admin's ✦ Answer. The user rejected sending an API any part
+in seconds, much as the admin's ✦ Answer does. The user rejected sending an API any part
 of the workspace: "the API options will be very limited." The prompt and the answer's
-JSON shape are the admin's either way (`lib/diagrams/ai.ts`, copied unchanged); a CLI is
-also told it is in the workspace, that it can only read, and to name the file in a box's
-second line when the answer came from code (`lib/diagrams/answer.ts`).
+JSON shape are the admin's either way (`lib/diagrams/ai.ts`, mirrored by hand), with
+Switchboard's changes marked "Switchboard:" — no cap of four, the Subtext variant of the
+prompt, link stripping — so re-copying the admin's file would undo them; a CLI is
+also told it is in the workspace, that it can only read, and — with Subtext on — to name
+the file in a box's second line when the answer came from code (`lib/diagrams/answer.ts`).
+
+**Subtext** (off by default) is that second line: off, the prompt asks for none and the
+bundle drops whatever the model wrote there anyway. **Web access** (on by default) gives
+whoever answers its own web tools — a page a box links to, or a search — and main adds a
+line to the system prompt saying so, and to use them only when the question needs
+something the diagram (and the code) can't tell it; off, the tools are left out
+altogether (for Claude Code, out of `--tools`: dontAsk would still let WebFetch open the
+documentation sites Claude Code trusts) and the prompt says to admit a page it can't see
+rather than guess. Codex's own default is a cached search, so off says `"disabled"`
+outright. Should the Claude API ever refuse web search's always-on citations beside a
+structured answer (a 400 naming citations), the answer goes again with web fetch alone. Links a model leaves in a box anyway are taken out (`ai.ts` `unlinked`).
 
 **main owns all of it**: which providers exist, which models and efforts each takes,
 whether each CLI is installed and signed in (`claude --version` / `auth status`, `codex
@@ -1038,15 +1052,16 @@ request.
 | `window.sb` | channel | returns |
 |---|---|---|
 | `sb.answerStatus({fresh})` | `sb:answer:status` | `{ ok, settings, providers, keysSafe }` — `settings.provider` is never null: with nothing chosen it is the first one ready (a CLI that is here, then an API with a key). `fresh` looks for the CLIs again |
-| `sb.answerSetSettings(patch)` | `sb:answer:setSettings` | the status, after merging `{ provider, split, context, claudeCodeEffort, claudeApiModel, openaiModel, openaiEffort }` |
+| `sb.answerSetSettings(patch)` | `sb:answer:setSettings` | the status, after merging `{ provider, split, context, web, subtext, claudeCodeEffort, claudeApiModel, openaiModel, openaiEffort }` |
 | `sb.answerSetKey(provider, key)` | `sb:answer:setKey` | the status — after the provider accepted the key (`GET /v1/models`); a refused key is never stored and answers `{ ok:false, error, code:'bad-key' }` |
 | `sb.answerRemoveKey(provider)` | `sb:answer:removeKey` | the status |
 | `sb.answerStart(id, req)` | `sb:answer:start` | `{ ok, text, files? }` — the answer's JSON, which the bundle reads into boxes — or `{ ok:false, error, code }`, `code` one of `missing`, `signed-out`, `no-key`, `bad-key`, `timeout`, `stopped`. `req`: `{ provider, wsId, system, user, schema }` |
 | `sb.answerStop(id)` | `sb:answer:stop` | `{ ok }` — the CLI's whole process group, or the request |
 
 `sb:evt:answerStep` carries `(id, { kind, text, target })` for every tool call a CLI
-makes — "Reading lib/diagrams/ai.ts" — which the canvas shows in a card over its strip, so
-a minute's wait never looks stuck. `sb:evt:answerStatus` goes out after every change,
+makes — "Reading lib/diagrams/ai.ts", "Opening example.com/docs" — which the canvas shows
+in a card over its strip, so a minute's wait never looks stuck. The OpenAI API reports its
+finished web searches the same way, and gets the card once it has one. `sb:evt:answerStatus` goes out after every change,
 wherever it was made, so the ✦ Answer menu and the Settings screen never disagree.
 
 **Keys never touch config.json.** `safeStorage` (the Keychain) encrypts them into
@@ -1655,8 +1670,13 @@ the admin's OpenAI models with their probed efforts, the Claude models, Claude C
 the answer's JSON: a CLI through `spawnCli()` (detached, its stdout read a line at a
 time, stopped by process group), an API through `net.fetch` with the request's own
 AbortController wired to Stop until the body is in. Failures carry a `code` the page can
-act on. It needs Electron (`net`, `safeStorage`), so it has no plain-node test; its
-paths were checked against the real CLI and APIs when it was written.
+act on. Each provider's request is built by a pure function (`claudeCodeArgs`,
+`codexArgs`, `claudeApiBody`, `openAiBody`) and its answer read by another
+(`claudeAnswerText`, `readOpenAiStream`), so `scripts/test-answer.js` (`npm run
+test:diagrams`) checks them with Electron stubbed — Web access and Subtext included, with
+the bundle's prompt and answer reading beside them. The live paths were checked against
+Claude Code and the OpenAI API; the Claude API (no key on hand) and Codex (not installed)
+only against their documentation.
 
 ### M12 `images.js`
 Google Images beside a diagram, main's half (§4.17): `hardenWebview(webPreferences,
@@ -2412,7 +2432,8 @@ The Settings screen (§4.18): a plain view, rebuilt on every render like Usage. 
 section today, ✦ Answer on diagrams — a row per provider (the radio that makes it the
 one ✦ Answer uses, its name, what it does, whether it is ready on this Mac, one action),
 and under an API's row, opened by Add key / Edit, its key field, its model and (OpenAI)
-its effort. It asks main on the way in (and looks for the CLIs again after 30 s away),
+its effort; after the list, the Web access and Subtext switches, a whole row each (the
+✦ Answer menu has the same two). It asks main on the way in (and looks for the CLIs again after 30 s away),
 follows `sb:evt:answerStatus`, and never holds a key: the field is sent to main on Save
 and emptied.
 
