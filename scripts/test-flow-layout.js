@@ -32,6 +32,7 @@ const {
   flowBranches,
   flowSpecFromCanvas,
   foldFlow,
+  carryFoldedPositions,
   FLOW_TAB_GAP_X,
   FLOW_TAB_GAP_Y,
   FLOW_ROOM_GAP,
@@ -225,6 +226,110 @@ test('folding a branch closes the tree up as if it had no children there; unfold
   const reopened = apply(back, tidyFlowTree(back, deeper.edges, ['q'], hidden));
   const fresh = tabTimes(tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']).boxes, start.edges, 'b', ['b1', 'b2', 'b3']);
   for (const b of fresh.boxes) assert.equal(reopened.get(b.id).y, b.y, b.id);
+});
+
+test('folding and unfolding a branch does not reposition a separately placed image', () => {
+  const start = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']);
+  const b = start.boxes.find(item => item.id === 'b');
+  // The image happens to sit beside the branch being folded. Its placement is
+  // deliberate, even though the remaining boxes move into that space.
+  const image = { id: 'image', x: b.x, y: b.y, width: 320, height: 100, shape: 'image' };
+  const canvas = [...start.boxes, image];
+  const showing = canvas.filter(item => item.id !== 'b');
+  const showingEdges = start.edges.filter(edge => edge.target !== 'b');
+
+  const folded = apply(showing, tidyFlowTree(showing, showingEdges, ['q'], [], { pinImages: true }));
+  assert.equal(folded.get('image').y, image.y, 'collapse preserves the image position');
+  assert.equal(folded.get('c').y - (folded.get('a').y + H), FLOW_TAB_GAP_Y);
+
+  const restored = [...folded.values(), b];
+  const unfolded = apply(restored, tidyFlowTree(restored, start.edges, ['q'], ['b'], { pinImages: true }));
+  assert.equal(unfolded.get('image').y, image.y, 'expand preserves the image position');
+});
+
+test('a visible image with an incoming side arrow stays where it was placed during a fold', () => {
+  const start = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']);
+  const image = { id: 'image', x: W + FLOW_TAB_GAP_X, y: 600, width: 320, height: 100, shape: 'image' };
+  const sideArrow = { source: 'q', target: 'image', sourceHandle: 'bottom', targetHandle: 'top' };
+  const showing = [...start.boxes.filter(item => item.id !== 'b'), image];
+  const edges = [...start.edges.filter(edge => edge.target !== 'b'), sideArrow];
+
+  const folded = apply(showing, tidyFlowTree(showing, edges, ['q'], [], { pinImages: true }));
+  assert.deepEqual({ x: folded.get('image').x, y: folded.get('image').y },
+    { x: image.x, y: image.y });
+});
+
+test('a loose box pushed by a fold does not land on a pinned image', () => {
+  const image = { ...box('image', 280, 352), shape: 'image' };
+  const boxes = [box('q', 0, 200), box('a', 280, 100), box('c', 280, 300), box('d', 280, 160), image];
+  const moved = tidyFlowTree(boxes, [tab('q', 'a'), tab('q', 'c')], ['q'], [], { pinImages: true });
+  const at = apply(boxes, moved);
+
+  assert.equal(at.get('image').y, image.y, 'the image keeps its placed position');
+  assert.notEqual(at.get('d').y, 160, 'the loose box moves out of the branch’s way');
+  assert.ok(!overlapping(at.get('d'), at.get('image')),
+    'the loose box does not get pushed onto the image');
+});
+
+test('a visible image in a Tab branch anchors the boxes hanging off it during a fold', () => {
+  const siblings = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']);
+  const withImage = tabTimes(siblings.boxes, siblings.edges, 'a', ['image']);
+  const expanded = tabTimes(withImage.boxes, withImage.edges, 'image', ['caption']);
+  const before = expanded.boxes.map(item => item.id === 'image' ? { ...item, shape: 'image' } : item);
+  const showing = before.filter(item => item.id !== 'b');
+  const edges = expanded.edges.filter(edge => edge.target !== 'b');
+
+  const folded = apply(showing, tidyFlowTree(showing, edges, ['q'], [], { pinImages: true }));
+  assert.notEqual(folded.get('a').y, before.find(item => item.id === 'a').y,
+    'visible siblings close around the folded branch');
+  for (const id of ['image', 'caption']) {
+    const original = before.find(item => item.id === id);
+    assert.deepEqual({ x: folded.get(id).x, y: folded.get(id).y },
+      { x: original.x, y: original.y }, `${id} stays anchored to the placed image`);
+  }
+});
+
+test('adding a Tab child still carries an attached image with its parent', () => {
+  const siblings = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'c']);
+  const withImage = tabTimes(siblings.boxes, siblings.edges, 'a', ['image']);
+  const canvas = withImage.boxes.map(item => item.id === 'image' ? { ...item, shape: 'image' } : item);
+  const { moved } = placeTabChild(canvas, withImage.edges, 'q', { id: 'b', width: W, height: H });
+
+  assert.ok(moved.has('a'), 'new sibling re-centres its parent');
+  assert.equal(moved.get('image').y - canvas.find(item => item.id === 'image').y,
+    moved.get('a').y - canvas.find(item => item.id === 'a').y);
+});
+
+test('a previously folded image follows its parent when a different branch folds', () => {
+  const siblings = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']);
+  const withImage = tabTimes(siblings.boxes, siblings.edges, 'a', ['image']);
+  const before = withImage.boxes.map(item => ({
+    id: item.id,
+    position: { x: item.x, y: item.y },
+    data: { shape: item.id === 'image' ? 'image' : 'box' },
+  }));
+  const edges = withImage.edges.map(edge => ({
+    ...edge,
+    collapsed: edge.target === 'image' || edge.target === 'b',
+  }));
+  const hidden = foldFlow(before.map(node => node.id), edges).hidden;
+  assert.deepEqual(sorted(hidden), ['b', 'image']);
+
+  const showing = withImage.boxes.filter(item => !hidden.has(item.id));
+  const showingEdges = edges.filter(edge => !edge.collapsed && !hidden.has(edge.source));
+  const moved = tidyFlowTree(showing, showingEdges, ['q'], [], { pinImages: true });
+  const parentDelta = moved.get('a').y - before.find(node => node.id === 'a').position.y;
+  assert.notEqual(parentDelta, 0, 'folding the sibling moves the image parent');
+  const after = before.map(node => ({
+    ...node,
+    position: moved.get(node.id) ?? node.position,
+  }));
+  const carried = carryFoldedPositions(before, after, edges);
+  const position = (nodes, id) => nodes.find(node => node.id === id).position;
+  assert.equal(position(carried, 'image').y - position(before, 'image').y, parentDelta,
+    'the hidden image keeps the same offset from a');
+  assert.deepEqual(position(carried, 'b'), position(before, 'b'),
+    'the separately folded branch does not move');
 });
 
 // ── dragging a box within its branch ──

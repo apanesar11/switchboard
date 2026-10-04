@@ -13,7 +13,7 @@
 // — a spec it produces lays out as exactly the canvas it came from, which is
 // what lets undo restore a snapshot by laying it out again.
 
-import { defaultFlowSides, type FlowBoxNodeData, type FlowEdgeData } from "./layout"
+import { defaultFlowSides, foldFlow, type FlowBoxNodeData, type FlowEdgeData, type FlowFoldEdge } from "./layout"
 import { normalizeFlowText } from "./validate"
 import {
   DEFAULT_FLOW_SHAPE,
@@ -25,6 +25,7 @@ import {
   isFlowSizedShape,
   type FlowEdgeSpec,
   type FlowNodeSpec,
+  type FlowShape,
   type FlowSide,
   type FlowSpec,
 } from "./types"
@@ -235,7 +236,7 @@ export function nextChildPosition(
  * A box on the canvas, by id. Switchboard: `detached` is a box someone detached
  * from its branch (FlowNodeSpec.detached) — none of its arrows make a tree.
  */
-export type FlowTreeBox = FlowRect & { id: string; detached?: boolean }
+export type FlowTreeBox = FlowRect & { id: string; detached?: boolean; shape?: FlowShape }
 
 export type FlowTreeEdge = Pick<
   FlowCanvasEdge,
@@ -267,12 +268,16 @@ function flowTrees(
   // New boxes, whose y means nothing yet: they go after their siblings, in
   // this order.
   fresh: string[] = [],
+  // Folding keeps pictures where they were placed. Their children can still
+  // form a branch, but an incoming arrow cannot make the picture a child of a
+  // tree that will be rearranged around a different box.
+  pinned: ReadonlySet<string> = new Set(),
 ): FlowTrees {
   const sources = new Map<string, Set<string>>()
   for (const edge of edges) {
     const from = byId.get(edge.source)
     const to = byId.get(edge.target)
-    if (!from || !to || to.x <= from.x || from.detached || to.detached) continue
+    if (!from || !to || to.x <= from.x || from.detached || to.detached || pinned.has(to.id)) continue
     if (edge.sourceHandle !== "right" || edge.targetHandle !== "left") continue
     sources.set(to.id, (sources.get(to.id) ?? new Set()).add(from.id))
   }
@@ -393,6 +398,7 @@ function makeRoom(
   was: Map<string, FlowRect>,
   tree: Set<string>,
   edges: FlowTreeEdge[],
+  pinned: ReadonlySet<string> = new Set(),
 ): void {
   // The room a pair must keep: FLOW_ROOM_GAP, or what they had before when
   // that was less.
@@ -423,8 +429,11 @@ function makeRoom(
     pieces.set(r, [...(pieces.get(r) ?? []), id])
   }
 
-  const settled = new Set(tree)
-  const waiting = new Set(pieces.values())
+  // Images are placed by hand. Keep their connected pieces in place, and let
+  // other pieces make room around them instead of being pushed on top of one.
+  const pinnedPieces = [...pieces.values()].filter((piece) => piece.some((id) => pinned.has(id)))
+  const settled = new Set([...tree, ...pinnedPieces.flat()])
+  const waiting = new Set([...pieces.values()].filter((piece) => !piece.some((id) => pinned.has(id))))
   // Each pass moves one piece and settles it, so this ends.
   while (waiting.size > 0) {
     let crowded: { piece: string[]; box: FlowRect; by: FlowRect } | null = null
@@ -485,14 +494,15 @@ function tidyTrees(
   anchors: string[],
   fresh: string[],
   was: Map<string, FlowRect>,
+  pinned: ReadonlySet<string> = new Set(),
 ): Map<string, FlowTreeBox> {
   const at = new Map(boxes.map((box) => [box.id, box]))
-  const trees = flowTrees(at, edges, fresh)
+  const trees = flowTrees(at, edges, fresh, pinned)
   const tops = new Set(anchors.filter((id) => at.has(id)).map((id) => topOf(trees, id)))
   for (const top of tops) {
     const placed = layoutTree(at, trees, top)
     for (const [id, box] of placed) at.set(id, box)
-    makeRoom(at, was, new Set(placed.keys()), edges)
+    makeRoom(at, was, new Set(placed.keys()), edges, pinned)
   }
   return at
 }
@@ -634,14 +644,19 @@ export function tidyFlowTree(
   edges: FlowTreeEdge[],
   anchors: string[],
   revealed: Iterable<string> = [],
+  { pinImages = false }: { pinImages?: boolean } = {},
 ): Map<string, FlowPoint> {
   const unknown = new Set(revealed)
+  const pinned = pinImages
+    ? new Set(boxes.filter((box) => box.shape === "image").map((box) => box.id))
+    : new Set<string>()
   const after = tidyTrees(
     boxes,
     edges,
     anchors,
     [],
     new Map(boxes.filter((box) => !unknown.has(box.id)).map((box) => [box.id, box])),
+    pinned,
   )
   return movesFrom(boxes, after)
 }
@@ -781,7 +796,48 @@ export function tidyAfterMove(
 
 // Switchboard: folding a branch away behind its arrow lives with the layout
 // (layout.ts foldFlow), which the read-only canvas draws through too.
-export { foldFlow, type FlowFoldEdge } from "./layout"
+export { foldFlow, type FlowFoldEdge }
+
+/**
+ * Carry an already folded branch by the same distance as its visible source.
+ * Folding can rearrange that source, but its hidden descendants do not take
+ * part in the layout until they are opened again.
+ */
+export function carryFoldedPositions<NodeWithPosition extends { id: string; position: FlowPoint }>(
+  before: NodeWithPosition[],
+  after: NodeWithPosition[],
+  edges: ReadonlyArray<FlowFoldEdge & { data?: unknown }>,
+): NodeWithPosition[] {
+  const collapsed = (edge: FlowFoldEdge & { data?: unknown }) =>
+    edge.collapsed === true ||
+    (typeof edge.data === "object" && edge.data !== null &&
+      (edge.data as { collapsed?: unknown }).collapsed === true)
+  if (!edges.some(collapsed)) return after
+  const { hidden, folded } = foldFlow(
+    after.map((node) => node.id),
+    edges.map((edge) => ({ source: edge.source, target: edge.target, collapsed: collapsed(edge) })),
+  )
+  if (hidden.size === 0) return after
+  const was = new Map(before.map((node) => [node.id, node.position]))
+  const now = new Map(after.map((node) => [node.id, node.position]))
+  const shift = new Map<string, FlowPoint>()
+  for (const [index, boxes] of folded) {
+    const source = edges[index].source
+    const from = was.get(source)
+    const to = now.get(source)
+    if (hidden.has(source) || !from || !to || (from.x === to.x && from.y === to.y)) continue
+    for (const id of boxes) {
+      if (!shift.has(id)) shift.set(id, { x: to.x - from.x, y: to.y - from.y })
+    }
+  }
+  if (shift.size === 0) return after
+  return after.map((node) => {
+    const by = shift.get(node.id)
+    return by
+      ? { ...node, position: { x: node.position.x + by.x, y: node.position.y + by.y } }
+      : node
+  })
+}
 
 /**
  * Keeps a hand-made arrangement across a republish. Claude writes flow specs

@@ -164,6 +164,7 @@ import {
   tidyFlowTree,
   flowBranches,
   foldFlow,
+  carryFoldedPositions as carryFolded,
   UNTITLED_FLOW_LABEL,
   type FlowCanvasEdge,
   type FlowCanvasNode,
@@ -642,6 +643,7 @@ function showing(nodes: Node[], edges: Edge[], hidden: Set<string> = foldOf(node
         id: node.id,
         ...rectOf(node),
         detached: (node.data as FlowBoxNodeData).detached === true,
+        shape: (node.data as FlowBoxNodeData).shape,
       })),
     edges: edges.filter(
       (edge) => !isCollapsed(edge) && !hidden.has(edge.source) && !hidden.has(edge.target),
@@ -668,35 +670,6 @@ function inBranch(node: Node, edges: Edge[]): boolean {
 function attached(node: Node): Node {
   const box = node.data as FlowBoxNodeData
   return box.detached ? { ...node, data: { ...box, detached: undefined } } : node
-}
-
-/**
- * A folded branch moves with the box it is folded into — dragged or nudged —
- * so it comes back beside it. `after` is `before` with some boxes moved.
- */
-function carryFolded(before: Node[], after: Node[], edges: Edge[]): Node[] {
-  if (!edges.some(isCollapsed)) return after
-  const { hidden, folded } = foldOf(after, edges)
-  if (hidden.size === 0) return after
-  const was = new Map(before.map((node) => [node.id, node.position]))
-  const now = new Map(after.map((node) => [node.id, node.position]))
-  const shift = new Map<string, { dx: number; dy: number }>()
-  for (const [index, boxes] of folded) {
-    const source = edges[index].source
-    const from = was.get(source)
-    const to = now.get(source)
-    if (hidden.has(source) || !from || !to || (from.x === to.x && from.y === to.y)) continue
-    for (const id of boxes) {
-      if (!shift.has(id)) shift.set(id, { dx: to.x - from.x, dy: to.y - from.y })
-    }
-  }
-  if (shift.size === 0) return after
-  return after.map((node) => {
-    const by = shift.get(node.id)
-    return by
-      ? { ...node, position: { x: node.position.x + by.dx, y: node.position.y + by.dy } }
-      : node
-  })
 }
 
 /** What a box's folded arrows hide, for its "+N". */
@@ -2862,7 +2835,7 @@ function FlowEditorCanvas({
       }
       record()
       const shown = showing(current, next, hidden)
-      const moved = tidyFlowTree(shown.boxes, shown.edges, [edge.source])
+      const moved = tidyFlowTree(shown.boxes, shown.edges, [edge.source], [], { pinImages: true })
       for (const pending of tabMovesRef.current.values()) {
         for (const id of moved.keys()) pending.delete(id)
       }
@@ -2870,12 +2843,16 @@ function FlowEditorCanvas({
       edgesRef.current = next
       setEdges((now) => collapse(now))
       setNodes((now) =>
-        now.map((node) => {
-          const to = moved.get(node.id)
-          const selected = node.id === edge.source
-          if (!to && Boolean(node.selected) === selected) return node
-          return { ...node, ...(to ? { position: to } : {}), selected }
-        }),
+        carryFolded(
+          now,
+          now.map((node) => {
+            const to = moved.get(node.id)
+            const selected = node.id === edge.source
+            if (!to && Boolean(node.selected) === selected) return node
+            return { ...node, ...(to ? { position: to } : {}), selected }
+          }),
+          next,
+        ),
       )
       settleSelection()
     },
@@ -2904,6 +2881,7 @@ function FlowEditorCanvas({
         shown.edges,
         [id],
         [...was].filter((box) => !hidden.has(box)),
+        { pinImages: true },
       )
       for (const pending of tabMovesRef.current.values()) {
         for (const box of moved.keys()) pending.delete(box)
@@ -2911,10 +2889,14 @@ function FlowEditorCanvas({
       edgesRef.current = next
       setEdges((now) => open(now))
       setNodes((now) =>
-        now.map((node) => {
-          const to = moved.get(node.id)
-          return to ? { ...node, position: to } : node
-        }),
+        carryFolded(
+          now,
+          now.map((node) => {
+            const to = moved.get(node.id)
+            return to ? { ...node, position: to } : node
+          }),
+          next,
+        ),
       )
     },
     [record],
