@@ -145,11 +145,13 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   to put it on the canvas. Tab keeps a branch symmetrical around the box it hangs off,
   and so do ✦ Answer's boxes and a delete; anything in the branch's way moves aside. A
   drag-select takes every box it touches, and ⌘C / ⌘V copy boxes and paste them at the
-  pointer. A toolbar floats over whatever is selected: shape, colour and outline for a
-  box, size and style for its text, label and line for an arrow. It saves as you go; ⌘Z
-  and ⇧⌘Z undo and redo. The picker over the canvas switches between diagrams (← and →
-  step through them), **New diagram** makes one, and **Actions** archives or deletes the
-  one on screen. Each diagram is a file in
+  pointer. An arrow's toolbar can **collapse** it: what it points at, and everything
+  beyond, folds away behind a "+N" on the box, and the branch closes up; click the "+N" to
+  bring it back. A diagram has no limit on boxes. A toolbar floats over whatever is
+  selected: shape, colour and outline for a box, size and style for its text, label and
+  line for an arrow. It saves as you go; ⌘Z and ⇧⌘Z undo and redo. The picker over the
+  canvas switches between diagrams (← and → step through them), **New diagram** makes one,
+  and **Actions** renames, archives or deletes the one on screen. Each diagram is a file in
   `~/.switchboard/diagrams/`, one folder per workspace — never in your repo.
 
   **✦ Answer** leads a box's toolbar (and ⌘I or ⌘↵): write a question in a box and the

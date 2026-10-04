@@ -229,6 +229,8 @@ export type FlowBoxNodeData = {
 export type FlowEdgeData = {
   label?: string
   dashed: boolean
+  /** Switchboard: what the edge points at is folded away — see foldFlow. */
+  collapsed?: boolean
 }
 
 export type DiagramLayout = {
@@ -601,6 +603,13 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
 
   const position = flowPositions(spec, direction, sizeOf)
 
+  // Switchboard: boxes folded away behind a collapsed edge are not drawn, nor any
+  // edge to or from them.
+  const { hidden } = foldFlow(
+    spec.nodes.map((node) => node.id),
+    spec.edges.map((edge) => ({ source: edge.from, target: edge.to, collapsed: edge.collapsed })),
+  )
+
   const nodes: Node[] = spec.nodes.map((node) => ({
     id: node.id,
     type: "flowBox",
@@ -623,6 +632,7 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
     } satisfies FlowBoxNodeData,
     draggable: false,
     selectable: false,
+    hidden: hidden.has(node.id) || undefined,
   }))
 
   // The flow kind uses React Flow's OWN routing: real handles on the boxes and
@@ -638,6 +648,7 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
     const data: FlowEdgeData = {
       label: edge.label,
       dashed: edge.dashed === true,
+      collapsed: edge.collapsed === true ? true : undefined,
     }
     return {
       id: `flow-edge-${index}`,
@@ -648,6 +659,7 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
       type: "smoothstep",
       selectable: false,
       focusable: false,
+      hidden: edge.collapsed === true || hidden.has(edge.from) || hidden.has(edge.to) || undefined,
       data,
       ...flowEdgeAppearance(data),
     }
@@ -660,12 +672,13 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
   let maxX = -Infinity
   let maxY = -Infinity
   for (const node of nodes) {
+    if (node.hidden) continue
     minX = Math.min(minX, node.position.x)
     minY = Math.min(minY, node.position.y)
     maxX = Math.max(maxX, node.position.x + (node.width ?? FLOW_NODE_WIDTH))
     maxY = Math.max(maxY, node.position.y + (node.height ?? 0))
   }
-  const empty = nodes.length === 0
+  const empty = !nodes.some((node) => !node.hidden)
 
   return {
     nodes,
@@ -678,6 +691,105 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+
+// ─── Switchboard: folding a branch away behind its edge ───
+
+/** An arrow as folding sees it: where it goes, and whether it is collapsed. */
+export type FlowFoldEdge = { source: string; target: string; collapsed?: boolean }
+
+/**
+ * What the collapsed arrows fold away: the box each one points at and
+ * everything beyond it — every box that can no longer be reached from the
+ * diagram's starting boxes without crossing a collapsed arrow. A box something
+ * still showing points at stays, and so does everything upstream of the fold.
+ *
+ * "Starting boxes" are the ones nothing points at, once the arrows that close a
+ * loop are set aside (found as the layout finds them, by a walk in the boxes'
+ * order) — so an arrow from deep in a branch back to an earlier box never drags
+ * that box, or what leads to the fold, in with the branch.
+ *
+ * `folded` is, for each collapsed arrow (by its index in `edges`), the boxes
+ * it hides; `hidden` is all of them.
+ */
+export function foldFlow(
+  ids: Iterable<string>,
+  edges: FlowFoldEdge[],
+): { hidden: Set<string>; folded: Map<number, Set<string>> } {
+  const hidden = new Set<string>()
+  const folded = new Map<number, Set<string>>()
+  if (!edges.some((edge) => edge.collapsed)) return { hidden, folded }
+
+  const order = [...ids]
+  const known = new Set(order)
+  const out = new Map<string, number[]>()
+  edges.forEach((edge, index) => {
+    if (!known.has(edge.source) || !known.has(edge.target)) return
+    const list = out.get(edge.source)
+    if (list) list.push(index)
+    else out.set(edge.source, [index])
+  })
+
+  // The arrows that close a loop: one landing on a box still open on the walk.
+  const back = new Set<number>()
+  const state = new Map<string, number>() // 1 open, 2 done
+  for (const start of order) {
+    if (state.has(start)) continue
+    state.set(start, 1)
+    const stack = [{ id: start, next: 0 }]
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1]
+      const leaving = out.get(frame.id) ?? []
+      if (frame.next >= leaving.length) {
+        state.set(frame.id, 2)
+        stack.pop()
+        continue
+      }
+      const index = leaving[frame.next++]
+      const to = edges[index].target
+      if (state.get(to) === 1) back.add(index)
+      else if (!state.has(to)) {
+        state.set(to, 1)
+        stack.push({ id: to, next: 0 })
+      }
+    }
+  }
+
+  // Showing: the starting boxes, and whatever they reach along arrows that
+  // neither close a loop nor are collapsed.
+  const pointedAt = new Set<string>()
+  for (const [, leaving] of out) {
+    for (const index of leaving) if (!back.has(index)) pointedAt.add(edges[index].target)
+  }
+  const showing = new Set(order.filter((id) => !pointedAt.has(id)))
+  const stack = [...showing]
+  while (stack.length > 0) {
+    const id = stack.pop()!
+    for (const index of out.get(id) ?? []) {
+      if (back.has(index) || edges[index].collapsed) continue
+      const to = edges[index].target
+      if (!showing.has(to)) {
+        showing.add(to)
+        stack.push(to)
+      }
+    }
+  }
+  for (const id of order) if (!showing.has(id)) hidden.add(id)
+
+  // What each collapsed arrow hides: the hidden boxes beyond it.
+  edges.forEach((edge, index) => {
+    if (!edge.collapsed || back.has(index) || !hidden.has(edge.target)) return
+    const mine = new Set<string>()
+    const walk = [edge.target]
+    while (walk.length > 0) {
+      const id = walk.pop()!
+      if (mine.has(id) || !hidden.has(id)) continue
+      mine.add(id)
+      for (const next of out.get(id) ?? []) if (!back.has(next)) walk.push(edges[next].target)
+    }
+    folded.set(index, mine)
+  })
+  return { hidden, folded }
+}
 
 /** The entry point: a validated spec in, a drawable canvas out. */
 export function layoutDiagram(spec: DiagramSpec): DiagramLayout {

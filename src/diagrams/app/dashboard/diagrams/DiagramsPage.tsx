@@ -9,6 +9,7 @@
 //     so "New diagram" moves into the bar over the canvas, beside Actions.
 //   * Full screen covers the window, below the macOS traffic lights — its bar is a
 //     window drag region with room left for them, as the Editor's full screen is.
+//   * Actions ▸ Rename (RenameDiagramDialog), which the admin doesn't have.
 //   * `active`: false while another tab or workspace is on screen. The tree stays
 //     mounted behind it (views/diagrams.js keeps it), and nothing here may answer a
 //     key meant for that screen — Backspace on the Terminal deleting the boxes
@@ -35,6 +36,7 @@ import {
   RiArrowLeftSLine,
   RiArrowRightSLine,
   RiDeleteBinLine,
+  RiEditLine,
   RiFlowChart,
   RiFullscreenExitLine,
   RiFullscreenLine,
@@ -74,6 +76,7 @@ import { DiagramPicker } from "./DiagramPicker"
 import { DeleteDiagramDialog } from "./DeleteDiagramDialog"
 import { FlowEditor, type FlowEditorHandle } from "./FlowEditor"
 import { NewFlowDiagramDialog } from "./NewFlowDiagramDialog"
+import { RenameDiagramDialog } from "./RenameDiagramDialog"
 import { useArrowKeys } from "../mockups/useArrowKeys"
 
 // Short relative label. Only ever rendered after the fetch resolves.
@@ -205,6 +208,8 @@ export function DiagramsPage({
     archived: boolean
   } | null>(null)
   const [newFlowOpen, setNewFlowOpen] = useState(false)
+  // Switchboard: the diagram Actions ▸ Rename is open for.
+  const [renameTarget, setRenameTarget] = useState<{ id: string; name: string } | null>(null)
   // The editor, so a pending autosave can be written before the diagram is
   // deleted out from under it.
   const flowEditorRef = useRef<FlowEditorHandle | null>(null)
@@ -300,7 +305,8 @@ export function DiagramsPage({
 
   // The keys belong to whatever owns focus while a dialog or menu is open — and to
   // nothing here at all while the tab is off screen.
-  const keyboardEnabled = active && !actionsOpen && deleteTarget === null && !newFlowOpen
+  const keyboardEnabled =
+    active && !actionsOpen && deleteTarget === null && !newFlowOpen && renameTarget === null
 
   function stepDiagram(delta: -1 | 1) {
     const target = delta === -1 ? nav.previous : nav.next
@@ -434,6 +440,25 @@ export function DiagramsPage({
     return null
   }
 
+  // Switchboard: Rename. The diagram's last edits are written first, then the
+  // name with the drawing exactly as it now stands — so the rename never carries
+  // an older drawing over a newer one.
+  async function renameDiagram(id: string, name: string): Promise<string | null> {
+    const editor = id === selectedId ? flowEditorRef.current : null
+    if (editor) await editor.flush()
+    const spec = editor?.currentSpec() ?? (loaded?.diagramId === id ? loaded.spec : null)
+    if (!spec) return "This diagram can't be read, so it can't be renamed"
+    const result = await updateDiagram({ productId, id, name, spec })
+    if (!result.ok) return result.error
+    const { spec: savedSpec, ...summary } = result.data
+    applyWrite(summary)
+    setSpecCache((prev) =>
+      prev && prev.diagramId === id ? { ...prev, spec: savedSpec, error: null } : prev,
+    )
+    toast({ title: `Renamed to ${summary.name}`, variant: "success" })
+    return null
+  }
+
   const hasDiagrams = (diagrams ?? []).length > 0
   const editable = !isArchived
 
@@ -554,6 +579,15 @@ export function DiagramsPage({
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="min-w-44">
+                      <DropdownMenuItem
+                        disabled={loaded?.spec == null}
+                        onSelect={() => setRenameTarget({ id: selected.id, name: selected.name })}
+                      >
+                        <DropdownMenuIconWrapper className="mr-2">
+                          <RiEditLine className="size-4" aria-hidden="true" />
+                        </DropdownMenuIconWrapper>
+                        Rename…
+                      </DropdownMenuItem>
                       <DropdownMenuItem
                         disabled={archiving}
                         onSelect={() => void handleArchiveToggle()}
@@ -691,6 +725,15 @@ export function DiagramsPage({
         onOpenChange={setNewFlowOpen}
         productId={productId}
         onCreated={handleSaved}
+      />
+
+      <RenameDiagramDialog
+        target={renameTarget}
+        returnFocusRef={actionsRef}
+        onOpenChange={(open) => {
+          if (!open) setRenameTarget(null)
+        }}
+        onRename={renameDiagram}
       />
 
       <DeleteDiagramDialog

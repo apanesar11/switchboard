@@ -27,6 +27,8 @@ const {
   placeTabChild,
   placeTabChildren,
   tidyAfterDelete,
+  tidyFlowTree,
+  foldFlow,
   FLOW_TAB_GAP_X,
   FLOW_TAB_GAP_Y,
   FLOW_ROOM_GAP,
@@ -166,4 +168,58 @@ test('deleting the top of a tree, or a box in no tree, moves nothing', () => {
   assert.equal(tidyAfterDelete(boxes, edges, new Set(['q'])).size, 0);
   const loose = [...boxes, box('loose', 900, 900)];
   assert.equal(tidyAfterDelete(loose, edges, new Set(['loose'])).size, 0);
+});
+
+// ── folding a branch away behind its arrow ──
+
+const arrow = (source, target, collapsed) => ({ source, target, collapsed });
+const sorted = set => [...set].sort();
+
+test('a collapsed arrow hides what it points at and everything beyond it', () => {
+  const ids = ['root', 'a', 'b', 'a1', 'a2', 'a1x'];
+  const edges = [arrow('root', 'a', true), arrow('root', 'b'), arrow('a', 'a1'), arrow('a', 'a2'), arrow('a1', 'a1x')];
+  const { hidden, folded } = foldFlow(ids, edges);
+  assert.deepEqual(sorted(hidden), ['a', 'a1', 'a1x', 'a2']);
+  assert.deepEqual(sorted(folded.get(0)), ['a', 'a1', 'a1x', 'a2']);
+  assert.equal(foldFlow(ids, edges.map(e => ({ ...e, collapsed: false }))).hidden.size, 0);
+});
+
+test('a box something still showing points at stays; one only collapsed arrows reach goes', () => {
+  const ids = ['root', 'a', 'b', 'm'];
+  const one = foldFlow(ids, [arrow('root', 'a'), arrow('root', 'b'), arrow('a', 'm', true), arrow('b', 'm')]);
+  assert.equal(one.hidden.size, 0, 'b still points at m');
+  const both = foldFlow(ids, [arrow('root', 'a'), arrow('root', 'b'), arrow('a', 'm', true), arrow('b', 'm', true)]);
+  assert.deepEqual(sorted(both.hidden), ['m']);
+});
+
+test('an arrow looping back from the branch never folds away what leads to it', () => {
+  // p → s → x → y, and y back to p: folding s → x hides x and y, never p or s.
+  const { hidden } = foldFlow(['p', 's', 'x', 'y'], [arrow('p', 's'), arrow('s', 'x', true), arrow('x', 'y'), arrow('y', 'p')]);
+  assert.deepEqual(sorted(hidden), ['x', 'y']);
+});
+
+test('folds nest: unfolding the outer one leaves the inner one folded', () => {
+  const ids = ['r', 'a', 'b', 'c'];
+  const edges = [arrow('r', 'a', true), arrow('a', 'b', true), arrow('b', 'c')];
+  assert.deepEqual(sorted(foldFlow(ids, edges).hidden), ['a', 'b', 'c']);
+  edges[0].collapsed = false;
+  assert.deepEqual(sorted(foldFlow(ids, edges).hidden), ['b', 'c']);
+});
+
+test('folding a branch closes the tree up as if it had no children there; unfolding opens it again', () => {
+  const start = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']);
+  const deeper = tabTimes(start.boxes, start.edges, 'b', ['b1', 'b2', 'b3']);
+  // Fold q → b: lay out what is left showing.
+  const hidden = new Set(['b', 'b1', 'b2', 'b3']);
+  const showing = deeper.boxes.filter(x => !hidden.has(x.id));
+  const showingEdges = deeper.edges.filter(e => !hidden.has(e.target));
+  const moved = tidyFlowTree(showing, showingEdges, ['q']);
+  const at = apply(showing, moved);
+  assert.equal(at.get('c').y - (at.get('a').y + H), FLOW_TAB_GAP_Y, 'a and c close up');
+  assert.equal((centre(at.get('a')) + centre(at.get('c'))) / 2, centre(at.get('q')));
+  // Unfold: everything back, b's branch laid out again around b.
+  const back = [...at.values(), ...deeper.boxes.filter(x => hidden.has(x.id))];
+  const reopened = apply(back, tidyFlowTree(back, deeper.edges, ['q'], hidden));
+  const fresh = tabTimes(tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']).boxes, start.edges, 'b', ['b1', 'b2', 'b3']);
+  for (const b of fresh.boxes) assert.equal(reopened.get(b.id).y, b.y, b.id);
 });

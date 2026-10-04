@@ -30,6 +30,9 @@
 // Switchboard: any number of boxes can be waiting on an answer at once, one
 // answer per box; a drag-select takes every box it touches, not only the ones
 // wholly inside it; and deleting a box from a branch closes the gap it leaves.
+// An arrow's toolbar collapses it: what it points at, and everything beyond,
+// folds away behind a "+N" on the box it leaves, and the tree closes up as if
+// that branch weren't there. Clicking the "+N" brings the branch back.
 //
 // It edits the SAME spec every other part of the Diagrams feature reads.
 // layoutDiagram() turns the spec into the canvas, and flowSpecFromCanvas()
@@ -102,6 +105,7 @@ import {
   RiArrowDownSLine,
   RiArrowGoBackLine,
   RiArrowGoForwardLine,
+  RiContractRightLine,
   RiArrowLeftRightLine,
   RiArrowLeftSLine,
   RiBold,
@@ -148,6 +152,8 @@ import {
   placeTabChild,
   placeTabChildren,
   tidyAfterDelete,
+  tidyFlowTree,
+  foldFlow,
   UNTITLED_FLOW_LABEL,
   type FlowCanvasEdge,
   type FlowCanvasNode,
@@ -160,8 +166,6 @@ import {
   DEFAULT_FLOW_TEXT_SIZE,
   DIAGRAM_TEXT_MAX_LENGTH,
   FLOW_BOX_SHAPES,
-  FLOW_MAX_EDGES,
-  FLOW_MAX_NODES,
   FLOW_SIDES,
   FLOW_SIZE_MAX,
   FLOW_TEXT_ALIGNS,
@@ -170,6 +174,7 @@ import {
   isFlowBoxShape,
   type FlowBoxShape,
   type FlowShape,
+  type FlowSide,
   type FlowSize,
   type FlowSpec,
   type FlowTextAlign,
@@ -585,6 +590,67 @@ function sameClipboard(a: string, b: string): boolean {
   return plain(a) === plain(b)
 }
 
+// Switchboard: folding a branch away behind a collapsed arrow (layout.ts foldFlow).
+
+function isCollapsed(edge: Edge): boolean {
+  return (edge.data as FlowEdgeData | undefined)?.collapsed === true
+}
+
+/** What the collapsed arrows on the canvas fold away. */
+function foldOf(nodes: Node[], edges: Edge[]) {
+  return foldFlow(
+    nodes.map((node) => node.id),
+    edges.map((edge) => ({ source: edge.source, target: edge.target, collapsed: isCollapsed(edge) })),
+  )
+}
+
+/**
+ * The canvas as the layout sees it: the boxes showing, and the arrows between
+ * them. A folded branch takes no room, so Tab, ✦ Answer, a delete, the arrow
+ * keys and Duplicate all work as if it weren't there.
+ */
+function showing(nodes: Node[], edges: Edge[], hidden: Set<string> = foldOf(nodes, edges).hidden) {
+  return {
+    nodes: nodes.filter((node) => !hidden.has(node.id)),
+    boxes: nodes.filter((node) => !hidden.has(node.id)).map((node) => ({ id: node.id, ...rectOf(node) })),
+    edges: edges.filter(
+      (edge) => !isCollapsed(edge) && !hidden.has(edge.source) && !hidden.has(edge.target),
+    ),
+  }
+}
+
+/**
+ * A folded branch moves with the box it is folded into — dragged or nudged —
+ * so it comes back beside it. `after` is `before` with some boxes moved.
+ */
+function carryFolded(before: Node[], after: Node[], edges: Edge[]): Node[] {
+  if (!edges.some(isCollapsed)) return after
+  const { hidden, folded } = foldOf(after, edges)
+  if (hidden.size === 0) return after
+  const was = new Map(before.map((node) => [node.id, node.position]))
+  const now = new Map(after.map((node) => [node.id, node.position]))
+  const shift = new Map<string, { dx: number; dy: number }>()
+  for (const [index, boxes] of folded) {
+    const source = edges[index].source
+    const from = was.get(source)
+    const to = now.get(source)
+    if (hidden.has(source) || !from || !to || (from.x === to.x && from.y === to.y)) continue
+    for (const id of boxes) {
+      if (!shift.has(id)) shift.set(id, { dx: to.x - from.x, dy: to.y - from.y })
+    }
+  }
+  if (shift.size === 0) return after
+  return after.map((node) => {
+    const by = shift.get(node.id)
+    return by
+      ? { ...node, position: { x: node.position.x + by.dx, y: node.position.y + by.dy } }
+      : node
+  })
+}
+
+/** What a box's folded arrows hide, for its "+N". */
+type FoldBadge = { boxes: number; arrows: number; side: FlowSide }
+
 function newEdgeId(): string {
   return `edge-${Math.random().toString(36).slice(2, 10)}`
 }
@@ -638,6 +704,14 @@ type EditorContextValue = {
   interactive: boolean
   /** Switchboard: the boxes whose ✦ Answers are being waited for. */
   answeringIds: ReadonlySet<string>
+  /** Switchboard: the boxes with a branch folded away behind them, and how much. */
+  folds: ReadonlyMap<string, FoldBadge>
+  /** Switchboard: folds away what an arrow points at, and everything beyond it. */
+  foldArrow: (edgeId: string) => void
+  /** Switchboard: brings back every branch folded away behind a box. */
+  unfold: (id: string) => void
+  /** Switchboard: how many boxes collapsing an arrow would fold away. */
+  foldPreview: (edgeId: string) => number
 }
 
 // How the boxes and arrows reach the editor's state. A context rather than
@@ -875,6 +949,10 @@ function EditableFlowNode({ id, data, selected }: NodeProps) {
             : "border-brand/40 opacity-0 group-hover:opacity-100",
         )}
       />
+      {/* Switchboard: a branch folded away behind this box — click to bring it back. */}
+      {editor !== null && editor.folds.has(id) ? (
+        <FoldButton fold={editor.folds.get(id)!} onClick={() => editor.unfold(id)} />
+      ) : null}
       {editor !== null && editor.answeringIds.has(id) ? (
         <div
           aria-hidden="true"
@@ -963,6 +1041,8 @@ export type FlowEditorHandle = {
   copy: () => boolean
   cut: () => boolean
   pasteBoxes: (text: string) => boolean
+  /** Switchboard: the diagram as the canvas now holds it — what Rename writes. */
+  currentSpec: () => FlowSpec
 }
 
 type Props = {
@@ -1144,6 +1224,7 @@ function FlowEditorCanvas({
       copy: () => shortcutsRef.current.copy(),
       cut: () => shortcutsRef.current.cut(),
       pasteBoxes: (text: string) => shortcutsRef.current.pasteBoxes(text),
+      currentSpec: () => JSON.parse(latestRef.current) as FlowSpec,
     }),
     [flush],
   )
@@ -1326,14 +1407,18 @@ function FlowEditorCanvas({
   const onNodesChange = useCallback(
     (changes: NodeChange[]) =>
       setNodes((current) =>
-        applyNodeChanges(
-          // The last change of a resize carries the size from its last
-          // step, which for a text is from before it re-wrapped. resize()
-          // has already set the real one.
-          changes.filter(
-            (change) => !(change.type === "dimensions" && change.resizing === false),
-          ),
+        carryFolded(
           current,
+          applyNodeChanges(
+            // The last change of a resize carries the size from its last
+            // step, which for a text is from before it re-wrapped. resize()
+            // has already set the real one.
+            changes.filter(
+              (change) => !(change.type === "dimensions" && change.resizing === false),
+            ),
+            current,
+          ),
+          edgesRef.current,
         ),
       ),
     [],
@@ -1343,43 +1428,15 @@ function FlowEditorCanvas({
     [],
   )
 
-  // Room for `boxes` more boxes and `arrows` more arrows, or a toast saying
-  // which limit stands in the way. Counted from the refs, which an answer
-  // landing long after the render that asked for it needs to be current.
-  function roomFor(boxes: number, arrows: number): boolean {
-    if (nodesRef.current.length + boxes > FLOW_MAX_NODES) {
-      toast({
-        title: `A flow diagram can have at most ${FLOW_MAX_NODES} boxes`,
-        variant: "error",
-      })
-      return false
-    }
-    if (edgesRef.current.length + arrows > FLOW_MAX_EDGES) {
-      toast({
-        title: `A flow diagram can have at most ${FLOW_MAX_EDGES} arrows`,
-        variant: "error",
-      })
-      return false
-    }
-    return true
-  }
-
   const onConnect = useCallback(
     (connection: Connection) => {
       if (connection.source === connection.target) return
-      if (edges.length >= FLOW_MAX_EDGES) {
-        toast({
-          title: `A flow diagram can have at most ${FLOW_MAX_EDGES} arrows`,
-          variant: "error",
-        })
-        return
-      }
       record()
       setEdges((current) =>
         addEdge(editableEdge({ id: newEdgeId(), ...connection }, { dashed: false }), current),
       )
     },
-    [edges.length, record],
+    [record],
   )
 
   const onReconnect = useCallback(
@@ -1608,7 +1665,6 @@ function FlowEditorCanvas({
   // dropped (`at`, canvas coordinates): a box or a note centred there, a text
   // starting there, the way a caret would.
   function placeNew(shape: FlowBoxShape | "note" | "text", at: { x: number; y: number }) {
-    if (!roomFor(1, 0)) return
     record()
     const item = PALETTE.find((entry) => entry.shape === shape)
     const box =
@@ -1652,7 +1708,7 @@ function FlowEditorCanvas({
       if (problem) toast({ title: problem, variant: "error" })
       return problem === null
     })
-    if (usable.length === 0 || !roomFor(usable.length, 0)) return
+    if (usable.length === 0) return
     const centre = at ?? viewCentre()
     if (!centre) return
 
@@ -1664,15 +1720,6 @@ function FlowEditorCanvas({
           imageDisplaySize(file),
           uploadDiagramImage(file, productId, uploadsRef.current?.signal),
         ])
-        // The canvas may have filled up while the upload ran.
-        if (nodesRef.current.length >= FLOW_MAX_NODES) {
-          toast({
-            title: `A flow diagram can have at most ${FLOW_MAX_NODES} boxes`,
-            variant: "error",
-          })
-          setUploading((count) => count - (usable.length - index - 1))
-          return
-        }
         const { width, height } = size ?? FLOW_IMAGE_DEFAULT_SIZE
         const label = file.name.replace(/\.[^.]+$/, "").trim() || "Image"
         record()
@@ -1777,7 +1824,6 @@ function FlowEditorCanvas({
   // boxes around it shuffle up so each branch stays centred on the box it
   // hangs off — one undo step with the new box.
   function addChild(parent: Node) {
-    if (!roomFor(1, 1)) return
     record()
     const from = parent.data as FlowBoxNodeData
     // The next of the same kind — but after a picture, a plain box, since
@@ -1798,9 +1844,10 @@ function FlowEditorCanvas({
       nodes.map((node) => node.id),
       box.label,
     )
+    const shown = showing(nodes, edges)
     const { position, moved } = placeTabChild(
-      nodes.map((node) => ({ id: node.id, ...rectOf(node) })),
-      edges,
+      shown.boxes,
+      shown.edges,
       parent.id,
       { id, ...boxSize(box) },
     )
@@ -1854,7 +1901,7 @@ function FlowEditorCanvas({
       retrace?.id ??
       boxInDirection(
         { id: current.id, ...rectOf(current) },
-        nodes.map((node) => ({ id: node.id, ...rectOf(node) })),
+        showing(nodes, edges).boxes,
         direction,
       )?.id
     const next = nodes.find((node) => node.id === nextId)
@@ -1877,10 +1924,14 @@ function FlowEditorCanvas({
     const dx = direction === "left" ? -stepX : direction === "right" ? stepX : 0
     const dy = direction === "up" ? -stepY : direction === "down" ? stepY : 0
     setNodes((current) =>
-      current.map((node) =>
-        node.selected
-          ? { ...node, position: { x: node.position.x + dx, y: node.position.y + dy } }
-          : node,
+      carryFolded(
+        current,
+        current.map((node) =>
+          node.selected
+            ? { ...node, position: { x: node.position.x + dx, y: node.position.y + dy } }
+            : node,
+        ),
+        edgesRef.current,
       ),
     )
     return true
@@ -1899,13 +1950,12 @@ function FlowEditorCanvas({
   }
 
   function duplicate(node: Node) {
-    if (!roomFor(1, 0)) return
     record()
     const box = node.data as FlowBoxNodeData
     const rect = rectOf(node)
     const position = clearOfBoxes(
       { ...rect, y: rect.y + rect.height + FLOW_TAB_GAP_Y },
-      nodes.map(rectOf),
+      showing(nodes, edges).nodes.map(rectOf),
     )
     const id = nextFlowNodeId(
       nodes.map((other) => other.id),
@@ -1973,7 +2023,6 @@ function FlowEditorCanvas({
   function pasteBoxes(text: string): boolean {
     const copy = flowCopy
     if (!copy || !sameClipboard(text, copy.text)) return false
-    if (!roomFor(copy.nodes.length, copy.edges.length)) return true
     record()
     lastRecordAt.current = 0
     const left = Math.min(...copy.nodes.map((node) => node.position.x))
@@ -2070,7 +2119,6 @@ function FlowEditorCanvas({
       setFailure(blocked)
       return
     }
-    if (!roomFor(1, 1)) return
     const settings = known.settings
     const canvasNodes = nodesRef.current
     const canvasEdges = edgesRef.current
@@ -2189,29 +2237,11 @@ function FlowEditorCanvas({
   // them — all one undo step. They arrive selected, so the toolbar restyles
   // them or ⌫ throws them away; but if you are typing somewhere by then, they
   // go in without taking the keyboard, the selection or the view from you.
-  function addAnswers(parentId: string, answer: FlowAiPart[]) {
-    let parts = answer
+  function addAnswers(parentId: string, parts: FlowAiPart[]) {
     const current = nodesRef.current
     if (!current.some((node) => node.id === parentId)) {
       toast({ title: "The answer arrived after its box was deleted, so it wasn't added" })
       return
-    }
-    // The diagram may have filled up while it thought: as many parts as fit.
-    const room = Math.min(
-      FLOW_MAX_NODES - current.length,
-      FLOW_MAX_EDGES - edgesRef.current.length,
-      parts.length,
-    )
-    if (room < 1) {
-      roomFor(1, 1)
-      return
-    }
-    if (room < parts.length) {
-      toast({
-        title: `Only ${room} of ${parts.length} answers fit`,
-        description: `A flow diagram can have at most ${FLOW_MAX_NODES} boxes and ${FLOW_MAX_EDGES} arrows.`,
-      })
-      parts = parts.slice(0, room)
     }
     record()
     // Its own step, apart from whatever was typed just before it landed.
@@ -2227,9 +2257,10 @@ function FlowEditorCanvas({
       taken.push(id)
       return { id, box, ...boxSize(box) }
     })
+    const shown = showing(current, edgesRef.current)
     const { positions, moved } = placeTabChildren(
-      current.map((node) => ({ id: node.id, ...rectOf(node) })),
-      edgesRef.current,
+      shown.boxes,
+      shown.edges,
       parentId,
       fresh.map(({ id, width, height }) => ({ id, width, height })),
     )
@@ -2283,6 +2314,165 @@ function FlowEditorCanvas({
     })
   }
 
+  // ─── Switchboard: folding a branch away behind its arrow ───
+
+  // What the collapsed arrows hide, and the canvas React Flow is handed: the
+  // same boxes and arrows with the folded ones marked hidden (it draws no arrow
+  // to or from a hidden box). The editor's own state never holds `hidden`; it
+  // is worked out from the arrows every time.
+  const fold = useMemo(() => foldOf(nodes, edges), [nodes, edges])
+  const shownNodes = useMemo(
+    () =>
+      fold.hidden.size === 0
+        ? nodes
+        : nodes.map((node) => (fold.hidden.has(node.id) ? { ...node, hidden: true } : node)),
+    [nodes, fold],
+  )
+  const shownEdges = useMemo(
+    () =>
+      edges.some(isCollapsed)
+        ? edges.map((edge) =>
+            isCollapsed(edge) || fold.hidden.has(edge.source) || fold.hidden.has(edge.target)
+              ? { ...edge, hidden: true }
+              : edge,
+          )
+        : edges,
+    [edges, fold],
+  )
+  // Each box's "+N": the boxes folded away behind its collapsed arrows. Keyed
+  // by its JSON so the context — and with it every box — only changes when a
+  // badge does, not on every frame of a drag.
+  const foldsJson = useMemo(() => {
+    const bySource = new Map<string, { boxes: Set<string>; arrows: number; side: FlowSide }>()
+    for (const [index, boxes] of fold.folded) {
+      const edge = edges[index]
+      if (!edge || fold.hidden.has(edge.source)) continue
+      const entry = bySource.get(edge.source) ?? {
+        boxes: new Set<string>(),
+        arrows: 0,
+        side: FLOW_SIDES.find((side) => side === edge.sourceHandle) ?? "right",
+      }
+      for (const id of boxes) entry.boxes.add(id)
+      entry.arrows += 1
+      bySource.set(edge.source, entry)
+    }
+    return JSON.stringify(
+      [...bySource].map(([id, entry]) => [id, { boxes: entry.boxes.size, arrows: entry.arrows, side: entry.side }]),
+    )
+  }, [fold, edges])
+  const folds = useMemo(
+    () => new Map(JSON.parse(foldsJson) as [string, FoldBadge][]),
+    [foldsJson],
+  )
+
+  // Collapse: what the arrow points at, and everything beyond it, folds away
+  // behind the box it leaves, and the tree closes up as if that branch weren't
+  // there. The box is selected, its "+N" beside it. One undo step.
+  const foldArrow = useCallback(
+    (edgeId: string) => {
+      const current = nodesRef.current
+      const edge = edgesRef.current.find((candidate) => candidate.id === edgeId)
+      if (!edge || isCollapsed(edge)) return
+      const collapse = (list: Edge[]) =>
+        list.map((candidate) =>
+          candidate.id === edgeId
+            ? {
+                ...editableEdge(candidate, { ...(candidate.data as FlowEdgeData), collapsed: true }),
+                selected: false,
+              }
+            : candidate,
+        )
+      const next = collapse(edgesRef.current)
+      const { hidden } = foldOf(current, next)
+      if (!hidden.has(edge.target)) {
+        toast({ title: "Nothing to collapse: something else still points at what this arrow does" })
+        return
+      }
+      record()
+      const shown = showing(current, next, hidden)
+      const moved = tidyFlowTree(shown.boxes, shown.edges, [edge.source])
+      for (const pending of tabMovesRef.current.values()) {
+        for (const id of moved.keys()) pending.delete(id)
+      }
+      changeEditing(null)
+      edgesRef.current = next
+      setEdges((now) => collapse(now))
+      setNodes((now) =>
+        now.map((node) => {
+          const to = moved.get(node.id)
+          const selected = node.id === edge.source
+          if (!to && Boolean(node.selected) === selected) return node
+          return { ...node, ...(to ? { position: to } : {}), selected }
+        }),
+      )
+      settleSelection()
+    },
+    [record, changeEditing, settleSelection],
+  )
+
+  // Expand: every branch folded away behind `id` comes back, and the tree
+  // makes room for it again. One undo step.
+  const unfold = useCallback(
+    (id: string) => {
+      const current = nodesRef.current
+      if (!edgesRef.current.some((edge) => edge.source === id && isCollapsed(edge))) return
+      const open = (list: Edge[]) =>
+        list.map((edge) =>
+          edge.source === id && isCollapsed(edge)
+            ? editableEdge(edge, { ...(edge.data as FlowEdgeData), collapsed: undefined })
+            : edge,
+        )
+      const was = foldOf(current, edgesRef.current).hidden
+      const next = open(edgesRef.current)
+      const { hidden } = foldOf(current, next)
+      record()
+      const shown = showing(current, next, hidden)
+      const moved = tidyFlowTree(
+        shown.boxes,
+        shown.edges,
+        [id],
+        [...was].filter((box) => !hidden.has(box)),
+      )
+      for (const pending of tabMovesRef.current.values()) {
+        for (const box of moved.keys()) pending.delete(box)
+      }
+      edgesRef.current = next
+      setEdges((now) => open(now))
+      setNodes((now) =>
+        now.map((node) => {
+          const to = moved.get(node.id)
+          return to ? { ...node, position: to } : node
+        }),
+      )
+    },
+    [record],
+  )
+
+  // How many boxes collapsing an arrow would fold away — 0 when something
+  // else still points at what it does.
+  const foldPreview = useCallback((edgeId: string) => {
+    const list = edgesRef.current
+    const index = list.findIndex((edge) => edge.id === edgeId)
+    if (index < 0) return 0
+    const next = list.map((edge, at) =>
+      at === index ? { ...edge, data: { ...(edge.data as FlowEdgeData), collapsed: true } } : edge,
+    )
+    return foldOf(nodesRef.current, next).folded.get(index)?.size ?? 0
+  }, [])
+
+  // The boxes folded away behind any of `going`, which go with them.
+  function foldedBehind(going: Node[]): Node[] {
+    const ids = new Set(going.map((node) => node.id))
+    const list = edgesRef.current
+    const { folded } = foldOf(nodesRef.current, list)
+    const behind = new Set<string>()
+    for (const [index, boxes] of folded) {
+      if (!ids.has(list[index].source)) continue
+      for (const box of boxes) if (!ids.has(box)) behind.add(box)
+    }
+    return nodesRef.current.filter((node) => behind.has(node.id))
+  }
+
   // Where each answer will land, while it is awaited: right of the question,
   // under any answers it already has — worked out from the canvas as it is
   // now, so it follows the question if moved. (Where the branch is re-centred
@@ -2298,12 +2488,15 @@ function FlowEditorCanvas({
           edge.source === parent.id && edge.sourceHandle === "right" && edge.targetHandle === "left",
       )
       .map((edge) => nodes.find((node) => node.id === edge.target))
-      .filter((node): node is Node => node !== undefined && node.position.x > parent.position.x)
+      .filter(
+        (node): node is Node =>
+          node !== undefined && !fold.hidden.has(node.id) && node.position.x > parent.position.x,
+      )
       .map(rectOf)
     const position = nextChildPosition(
       rectOf(parent),
       children,
-      nodes.map(rectOf),
+      nodes.filter((node) => !fold.hidden.has(node.id)).map(rectOf),
       ANSWER_GHOST_SIZE,
     )
     const from = rectOf(parent)
@@ -2316,7 +2509,7 @@ function FlowEditorCanvas({
       targetPosition: Position.Left,
     })
     return [{ serial: asking.serial, rect: { ...position, ...ANSWER_GHOST_SIZE }, path }]
-  }), [askings, nodes, edges])
+  }), [askings, nodes, edges, fold])
 
   // What the canvas accepts dropped on it: a box, note or text dragged off
   // the toolbar, or picture files from the desktop.
@@ -2392,11 +2585,12 @@ function FlowEditorCanvas({
   function closeUp(going: Node[], goingEdges: Edge[]) {
     if (going.length === 0) return
     const cut = new Set(goingEdges.map((edge) => edge.id))
+    const shown = showing(nodesRef.current, edgesRef.current)
     const moved = tidyAfterDelete(
-      nodesRef.current.map((node) => ({ id: node.id, ...rectOf(node) })),
-      edgesRef.current,
+      shown.boxes,
+      shown.edges,
       new Set(going.map((node) => node.id)),
-      edgesRef.current.filter((edge) => !cut.has(edge.id)),
+      shown.edges.filter((edge) => !cut.has(edge.id)),
     )
     if (moved.size === 0) return
     // A free text Tab added and still empty puts the boxes it moved back when
@@ -2695,6 +2889,10 @@ function FlowEditorCanvas({
       soleNodeId,
       interactive: tool !== "hand",
       answeringIds,
+      folds,
+      foldArrow,
+      unfold,
+      foldPreview,
     }),
     [
       editingId,
@@ -2711,6 +2909,10 @@ function FlowEditorCanvas({
       soleNodeId,
       tool,
       answeringIds,
+      folds,
+      foldArrow,
+      unfold,
+      foldPreview,
     ],
   )
 
@@ -2746,8 +2948,8 @@ function FlowEditorCanvas({
           </div>
         ) : null}
         <ReactFlow
-          nodes={nodes}
-          edges={edges}
+          nodes={shownNodes}
+          edges={shownEdges}
           nodeTypes={EDITOR_NODE_TYPES}
           edgeTypes={EDITOR_EDGE_TYPES}
           onNodesChange={onNodesChange}
@@ -2758,7 +2960,22 @@ function FlowEditorCanvas({
           onBeforeDelete={async ({ nodes: going, edges: goingEdges }) => {
             record()
             closeUp(going, goingEdges)
-            return true
+            // Switchboard: a box takes the branch folded away behind it with it,
+            // rather than leaving it to reappear somewhere with nothing pointing
+            // at it.
+            const behind = foldedBehind(going)
+            if (behind.length === 0) return true
+            const ids = new Set(behind.map((node) => node.id))
+            const cutting = new Set(goingEdges.map((edge) => edge.id))
+            return {
+              nodes: [...going, ...behind],
+              edges: [
+                ...goingEdges,
+                ...edgesRef.current.filter(
+                  (edge) => !cutting.has(edge.id) && (ids.has(edge.source) || ids.has(edge.target)),
+                ),
+              ],
+            }
           }}
           onNodeDoubleClick={(_, node) => {
             if (tool !== "hand" && hasText(node.data as FlowBoxNodeData)) changeEditing(node.id)
@@ -4138,10 +4355,68 @@ function EdgeBar({
       <BarButton label="Reverse direction" onClick={() => editor.reverseEdge(id)}>
         <RiArrowLeftRightLine className="size-4" aria-hidden="true" />
       </BarButton>
+      <CollapseButton id={id} editor={editor} />
       <BarButton label="Delete · ⌫" onClick={() => editor.deleteEdge(id)}>
         <RiDeleteBinLine className="size-4" aria-hidden="true" />
       </BarButton>
     </Bar>
+  )
+}
+
+// Switchboard: the arrow toolbar's Collapse — folds away what the arrow points
+// at and everything beyond it, saying how much. Off when something else still
+// points there, since nothing would fold.
+function CollapseButton({ id, editor }: { id: string; editor: EditorContextValue }) {
+  const count = editor.foldPreview(id)
+  return (
+    <BarButton
+      label={
+        count === 0
+          ? "Nothing to collapse: something else still points at what this arrow does"
+          : `Collapse · hides ${count === 1 ? "1 box" : `${count} boxes`}`
+      }
+      disabled={count === 0}
+      onClick={() => editor.foldArrow(id)}
+      className="disabled:opacity-40"
+    >
+      <RiContractRightLine className="size-4" aria-hidden="true" />
+    </BarButton>
+  )
+}
+
+// Where a box's "+N" sits: just off the side its folded arrows leave by.
+const FOLD_BADGE_PLACE: Record<FlowSide, string> = {
+  right: "left-full top-1/2 ml-2 -translate-y-1/2",
+  left: "right-full top-1/2 mr-2 -translate-y-1/2",
+  bottom: "top-full left-1/2 mt-2 -translate-x-1/2",
+  top: "bottom-full left-1/2 mb-2 -translate-x-1/2",
+}
+
+// Switchboard: the "+N" on a box with a branch folded away behind it — how
+// many boxes, and how many of its arrows, are folded. Clicking it brings them
+// all back.
+function FoldButton({ fold, onClick }: { fold: FoldBadge; onClick: () => void }) {
+  const boxes = fold.boxes === 1 ? "1 box" : `${fold.boxes} boxes`
+  const arrows = fold.arrows === 1 ? "1 arrow" : `${fold.arrows} arrows`
+  const label = `Show ${boxes} folded away behind ${arrows}`
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={(event) => {
+        event.stopPropagation()
+        onClick()
+      }}
+      onDoubleClick={(event) => event.stopPropagation()}
+      className={cx(
+        "nodrag nopan absolute z-10 flex h-5 min-w-5 items-center justify-center whitespace-nowrap rounded-full bg-gray-900 px-1.5 text-[11px] font-semibold tabular-nums text-white shadow-sm ring-2 ring-white hover:bg-brand dark:bg-gray-100 dark:text-gray-900 dark:ring-gray-950",
+        FOLD_BADGE_PLACE[fold.side],
+        focusRing,
+      )}
+    >
+      +{fold.boxes}
+    </button>
   )
 }
 

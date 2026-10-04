@@ -131,6 +131,7 @@ export function flowSpecFromCanvas(
     to: edge.target,
     label: clean(edge.data?.label),
     dashed: edge.data?.dashed === true ? true : undefined,
+    collapsed: edge.data?.collapsed === true ? true : undefined,
     fromSide: isSide(edge.sourceHandle) ? edge.sourceHandle : sides.from,
     toSide: isSide(edge.targetHandle) ? edge.targetHandle : sides.to,
   }))
@@ -610,6 +611,35 @@ export function tidyAfterDelete(
 }
 
 /**
+ * Switchboard: the tree each of `anchors` is in laid out again the way Tab lays it
+ * out, with room made for it as placeTabChild makes it — what folding and unfolding
+ * a branch do to the boxes left showing. `boxes` and `edges` are what is showing;
+ * `revealed` are boxes that have just come back into view, whose last positions
+ * (from before they were folded away) say nothing about what they may crowd.
+ * Returns where every box that moves goes.
+ */
+export function tidyFlowTree(
+  boxes: FlowTreeBox[],
+  edges: FlowTreeEdge[],
+  anchors: string[],
+  revealed: Iterable<string> = [],
+): Map<string, FlowPoint> {
+  const unknown = new Set(revealed)
+  const after = tidyTrees(
+    boxes,
+    edges,
+    anchors,
+    [],
+    new Map(boxes.filter((box) => !unknown.has(box.id)).map((box) => [box.id, box])),
+  )
+  return movesFrom(boxes, after)
+}
+
+// Switchboard: folding a branch away behind its arrow lives with the layout
+// (layout.ts foldFlow), which the read-only canvas draws through too.
+export { foldFlow, type FlowFoldEdge } from "./layout"
+
+/**
  * Keeps a hand-made arrangement across a republish. Claude writes flow specs
  * with no positions; when it rewrites a diagram someone has already arranged
  * in the editor, every box whose id survives keeps the position it was
@@ -629,7 +659,7 @@ export function carryOverFlowLayout(
   const sides = new Map(
     previous.edges.map((edge) => [
       edgeKey(edge.from, edge.to),
-      { fromSide: edge.fromSide, toSide: edge.toSide },
+      { fromSide: edge.fromSide, toSide: edge.toSide, collapsed: edge.collapsed },
     ]),
   )
 
@@ -665,6 +695,8 @@ export function carryOverFlowLayout(
       ...edge,
       fromSide: edge.fromSide ?? old.fromSide,
       toSide: edge.toSide ?? old.toSide,
+      // Switchboard: a branch folded away stays folded.
+      collapsed: edge.collapsed ?? old.collapsed,
     }
   })
 

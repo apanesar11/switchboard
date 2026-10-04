@@ -818,8 +818,17 @@ selection and the view alone. ⌘I answers as ⌘↵ does. Edit ▸ Copy, Cut an
 boxes: ⌘C keeps the selected boxes and the arrows between them for the bundle (any
 diagram) and puts their words on the clipboard; ⌘V puts new copies down centred on the
 pointer, but only while the clipboard still holds those words, so text copied since
-never pastes an older copy. `npm run test:diagrams` covers the layout
-(`scripts/test-flow-layout.js`).
+never pastes an older copy. An arrow can be **collapsed** (`collapsed: true` on the edge in
+the spec): `layout.ts foldFlow` hides what it points at and everything that can no longer
+be reached from the diagram's starting boxes without crossing a collapsed arrow (loops set
+aside, so a branch never folds away what leads to it); the editor hands React Flow those
+boxes marked hidden, lays out and pushes as if they weren't there, shows a "+N" on the box
+they are folded behind, carries them along when that box is dragged, and deletes them with
+it. Unfolding re-tidies the tree around them. A diagram has **no limit** on boxes, arrows
+or size (the admin's 60 / 120 / 512 KB, `types.ts` says why not here): the layout and save
+paths stay in single milliseconds into the thousands of boxes. **Actions ▸ Rename**
+(`RenameDiagramDialog.tsx`) writes a new name with the drawing as it stands. `npm run
+test:diagrams` covers the layout and folding (`scripts/test-flow-layout.js`).
 
 **A diagram belongs to a workspace and lives on this Mac.** One JSON file per diagram —
 the admin's row, `{ id, name, kind, createdAt, updatedAt, archivedAt, spec }` minus the
@@ -1494,7 +1503,7 @@ The Diagrams tab's files (§4.17): `list(id)`, `get(id, diagramId)`, `create`, `
 `rootDir()` / `dirFor()` / `keyFor()` for the tests. The admin's server actions as files:
 the same answers, the same name rule (unique within a workspace), the same "archiving
 does not touch updatedAt". It checks only what keeps the folder sane — an object of kind
-`flow` under 512 KB, a name of 1–120 characters, a UUID for an id — because the bundle has
+`flow` (of any size — §4.17), a name of 1–120 characters, a UUID for an id — because the bundle has
 run the admin's validator before it asks. Writes go through a temp file and a rename,
 serialised per workspace folder so two creates under one name cannot both pass the
 check. Nothing throws. `scripts/test-diagrams.js` (`npm run test:diagrams`) runs it

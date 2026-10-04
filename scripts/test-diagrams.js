@@ -141,12 +141,22 @@ test('what is refused before anything is written', async () => {
   assert.equal((await diagrams.create('bad-1', 'x'.repeat(121), BLANK)).ok, false);
   assert.equal((await diagrams.create('bad-1', 'Seq', { kind: 'sequence' })).ok, false);
   assert.equal((await diagrams.create('bad-1', 'Nothing', null)).ok, false);
-  const huge = { kind: 'flow', nodes: [{ id: 'a', label: 'x'.repeat(600000) }], edges: [] };
-  assert.equal((await diagrams.create('bad-1', 'Huge', huge)).ok, false);
   // Ids are UUIDs, so no id can name a path.
   assert.equal((await diagrams.get('bad-1', '../../config')).ok, false);
   assert.equal((await diagrams.update('bad-1', '../x', 'n', BLANK)).ok, false);
   assert.deepEqual((await diagrams.list('bad-1')).data, []);
+});
+
+test('a diagram has no size limit: thousands of boxes save and read back', async () => {
+  const nodes = Array.from({ length: 5000 }, (_, i) => ({ id: `n${i}`, label: 'Box '.repeat(20) + i }));
+  const edges = nodes.slice(1).map((node, i) => ({ from: `n${i}`, to: node.id }));
+  const big = { kind: 'flow', nodes, edges };
+  assert.ok(Buffer.byteLength(JSON.stringify(big)) > 512000, 'past the admin\'s 512 KB');
+  const made = await diagrams.create('big-1', 'Big', big);
+  assert.equal(made.ok, true);
+  const got = await diagrams.get('big-1', made.data.id);
+  assert.equal(got.data.spec.nodes.length, 5000);
+  assert.equal(got.data.spec.edges.length, 4999);
 });
 
 test('a file that is not a diagram is skipped by the list, and reported by get', async () => {

@@ -169,6 +169,11 @@ export type FlowEdgeSpec = {
   fromSide?: FlowSide
   /** The side of `to` the edge lands on. Editor-written; see FLOW_SIDES. */
   toSide?: FlowSide
+  /**
+   * Switchboard: folds away what the edge points at and everything beyond it
+   * (lib/diagrams/flow-editor.ts foldFlow). Editor-written.
+   */
+  collapsed?: boolean
 }
 
 export type FlowSpec = {
@@ -208,15 +213,13 @@ export type DiagramDetail = DiagramSummary & {
 
 export const DIAGRAM_NAME_MAX_LENGTH = 120
 
-// 512 KB of JSON. A diagram that is even close to this is one nobody can
-// read; the cap exists to keep a runaway paste out of the database and to
-// stay far inside the Server Action body limit.
-export const DIAGRAM_SPEC_MAX_BYTES = 512_000
-
-// Ceilings that keep a diagram legible rather than merely storable. Each is
-// enforced by parseDiagramSpec with a message naming the limit.
-export const FLOW_MAX_NODES = 60
-export const FLOW_MAX_EDGES = 120
+// Switchboard: no ceiling on how many boxes or arrows a diagram has, nor on its size.
+// The admin caps a flow at 60 boxes, 120 arrows and 512 KB of JSON — to keep its
+// database rows and Server Action bodies small, and the diagrams Claude writes without
+// coordinates legible once laid out. Here a diagram is a file on this Mac, grown by
+// hand and by ✦ Answer, and the user asked to be able to keep working on one
+// (2026-10-04). A diagram past those caps carried into the admin by hand is refused
+// there.
 /**
  * How far from the origin a dragged box may sit. Far beyond anything a person
  * drags to; it exists so a hand-edited 1e308 can't reach the canvas.

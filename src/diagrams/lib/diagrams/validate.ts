@@ -21,13 +21,10 @@
 import {
   DIAGRAM_KINDS,
   DIAGRAM_NAME_MAX_LENGTH,
-  DIAGRAM_SPEC_MAX_BYTES,
   DIAGRAM_SUMMARY_MAX_LENGTH,
   DIAGRAM_TEXT_MAX_LENGTH,
   FLOW_COORDINATE_LIMIT,
   FLOW_IMAGE_SRC_MAX_LENGTH,
-  FLOW_MAX_EDGES,
-  FLOW_MAX_NODES,
   FLOW_SHAPES,
   FLOW_SIDES,
   FLOW_SIZE_MAX,
@@ -269,13 +266,8 @@ function imageSrc(raw: unknown, where: string): string {
 // anything has been put on it, and what is left after deleting every box to
 // start over.
 function parseFlow(raw: Record<string, unknown>): FlowSpec {
+  // Switchboard: as many as you like — see types.ts.
   const rawNodes = array(raw.nodes, "", "nodes")
-  if (rawNodes.length > FLOW_MAX_NODES) {
-    fail(
-      "",
-      `A flow diagram can have at most ${FLOW_MAX_NODES} nodes (this one has ${rawNodes.length})`,
-    )
-  }
 
   const byKey = new Map<string, string>()
   const nodes: FlowNodeSpec[] = rawNodes.map((entry, index) => {
@@ -326,12 +318,6 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
   })
 
   const rawEdges = array(raw.edges, "", "edges")
-  if (rawEdges.length > FLOW_MAX_EDGES) {
-    fail(
-      "",
-      `A flow diagram can have at most ${FLOW_MAX_EDGES} edges (this one has ${rawEdges.length})`,
-    )
-  }
 
   const edges: FlowEdgeSpec[] = rawEdges.map((entry, index) => {
     const where = `Edge ${index + 1}`
@@ -351,6 +337,8 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       to: resolve(entry.to, "to"),
       label: optionalText(entry.label, where, "label"),
       dashed: entry.dashed === true ? true : undefined,
+      // Switchboard: a branch folded away behind this edge.
+      collapsed: entry.collapsed === true ? true : undefined,
       fromSide: optionalEnum<FlowSide>(entry.fromSide, FLOW_SIDES, where, "fromSide"),
       toSide: optionalEnum<FlowSide>(entry.toSide, FLOW_SIDES, where, "toSide"),
     }
@@ -394,20 +382,8 @@ export function parseDiagramSpec(raw: unknown): SpecResult {
       )
     }
 
-    const value = parseFlow(raw)
-
-    // Measured on the NORMALIZED spec, which is what actually gets stored.
-    const bytes = utf8Bytes(JSON.stringify(value))
-    if (bytes > DIAGRAM_SPEC_MAX_BYTES) {
-      fail(
-        "",
-        `the spec is ${(bytes / 1_000).toFixed(0)} KB, over the ${(
-          DIAGRAM_SPEC_MAX_BYTES / 1_000
-        ).toFixed(0)} KB limit`,
-      )
-    }
-
-    return { ok: true, value }
+    // Switchboard: no size limit either — see types.ts.
+    return { ok: true, value: parseFlow(raw) }
   } catch (err) {
     if (err instanceof SpecError) return { ok: false, error: err.message }
     // A non-SpecError here is a bug in this module, not bad input — surface it

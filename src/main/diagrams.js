@@ -33,10 +33,9 @@ const crypto = require('crypto');
 
 const config = require('./config.js');
 
-// The admin's limits (lib/diagrams/types.ts), so a diagram moves between the two
-// without either one refusing it.
+// The admin's name limit, so a diagram moves between the two without either refusing
+// its name. A diagram's size is not limited here (lib/diagrams/types.ts says why).
 const NAME_MAX = 120;
-const SPEC_MAX_BYTES = 512000;
 const IMAGE_MAX_BYTES = 25 * 1024 * 1024;
 const IMAGE_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
 const IMAGE_FILE_RE = /^[0-9a-f]{32}\.(png|jpg|webp)$/;
@@ -128,9 +127,6 @@ function cleanName(raw) {
 function checkSpec(spec) {
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return 'the diagram came without a spec';
   if (spec.kind !== 'flow') return 'only flow diagrams can be saved here';
-  if (Buffer.byteLength(JSON.stringify(spec), 'utf8') > SPEC_MAX_BYTES) {
-    return `the diagram is over ${Math.round(SPEC_MAX_BYTES / 1000)} KB — split it into two`;
-  }
   return null;
 }
 
