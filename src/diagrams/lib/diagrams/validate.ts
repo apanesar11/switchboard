@@ -46,6 +46,7 @@ import {
   type FlowTextSize,
   type FlowTone,
 } from "./types"
+import { parseFlowRichText } from "./rich-text"
 
 export type ValidationResult =
   | { ok: true; value: string }
@@ -280,14 +281,24 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
     byKey.set(key, id)
 
     const shape = optionalEnum<FlowShape>(entry.shape, FLOW_SHAPES, where, "shape")
+    const label = shape === "note"
+      ? (optionalText(entry.label, where, "label", undefined, normalizeFlowText) ?? "")
+      : text(entry.label, where, "label", undefined, normalizeFlowText)
+    const detail = optionalText(entry.detail, where, "detail", undefined, normalizeFlowText)
+    let labelRichText, detailRichText
+    try {
+      labelRichText = parseFlowRichText(entry.labelRichText, label)
+      detailRichText = parseFlowRichText(entry.detailRichText, detail ?? "")
+    } catch (error) {
+      fail(where, error instanceof Error ? error.message : "invalid rich text")
+    }
     return {
       id,
       // A sticky note can be left blank; everything else needs words.
-      label:
-        shape === "note"
-          ? (optionalText(entry.label, where, "label", undefined, normalizeFlowText) ?? "")
-          : text(entry.label, where, "label", undefined, normalizeFlowText),
-      detail: optionalText(entry.detail, where, "detail", undefined, normalizeFlowText),
+      label,
+      detail,
+      labelRichText,
+      detailRichText,
       shape,
       tone: optionalEnum<FlowTone>(entry.tone, FLOW_TONES, where, "tone"),
       // An explicit `false` is kept rather than dropped: it is how a

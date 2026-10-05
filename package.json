@@ -18,7 +18,8 @@
     "test:databases": "node --test scripts/test-databases.js",
     "build:diagrams": "node scripts/build-diagrams.js",
     "check:diagrams": "tsc -p src/diagrams/tsconfig.json",
-    "test:diagrams": "node --test scripts/test-diagrams.js scripts/test-answer.js scripts/test-flow-layout.js scripts/test-condense.js scripts/test-images.js scripts/test-image-search.js"
+    "test:diagrams": "node --test scripts/test-diagrams.js scripts/test-answer.js scripts/test-flow-layout.js scripts/test-condense.js scripts/test-images.js scripts/test-image-search.js scripts/test-rich-text.js",
+    "test:rich-text:browser": "node scripts/test-rich-text-browser.js"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",

@@ -15,6 +15,7 @@
 
 import { defaultFlowSides, foldFlow, type FlowBoxNodeData, type FlowEdgeData, type FlowFoldEdge } from "./layout"
 import { normalizeFlowText } from "./validate"
+import { parseFlowRichText } from "./rich-text"
 import {
   DEFAULT_FLOW_SHAPE,
   DEFAULT_FLOW_TEXT_ALIGN,
@@ -98,14 +99,18 @@ export function flowSpecFromCanvas(
   )
 
   const specNodes: FlowNodeSpec[] = nodes.filter((node) => !blank.has(node.id)).map((node) => {
-    const { label, detail, shape, tone, dashed, textSize, align, bold, italic, src, size, ai, detached } =
+    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, size, ai, detached } =
       node.data
+    const cleanLabel = cleanBoxText(label) ?? (shape === "note" ? "" : UNTITLED_FLOW_LABEL)
+    const cleanDetail = cleanBoxText(detail)
     return {
       id: node.id,
       // An empty sticky note is a thing in its own right; an empty box reads
       // as one still to be named.
-      label: cleanBoxText(label) ?? (shape === "note" ? "" : UNTITLED_FLOW_LABEL),
-      detail: cleanBoxText(detail),
+      label: cleanLabel,
+      detail: cleanDetail,
+      labelRichText: parseFlowRichText(labelRichText, cleanLabel),
+      detailRichText: parseFlowRichText(detailRichText, cleanDetail ?? ""),
       // Defaults are left out, so a box saved from the canvas reads like one
       // Claude wrote rather than restating every default.
       shape: shape === DEFAULT_FLOW_SHAPE ? undefined : shape,
@@ -884,6 +889,8 @@ export function carryOverFlowLayout(
       align: node.align ?? old.align,
       bold: node.bold ?? old.bold,
       italic: node.italic ?? old.italic,
+      labelRichText: node.labelRichText ?? (node.label === old.label ? old.labelRichText : undefined),
+      detailRichText: node.detailRichText ?? (node.detail === old.detail ? old.detailRichText : undefined),
       // The AI's mark survives only while the words are still the AI's.
       ai: node.ai ?? (old.ai && old.label === node.label && old.detail === node.detail ? true : undefined),
       detached: node.detached ?? old.detached,

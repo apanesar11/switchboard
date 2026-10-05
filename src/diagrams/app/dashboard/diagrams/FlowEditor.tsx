@@ -128,6 +128,7 @@ import {
   RiLinkM,
   RiLinkUnlinkM,
   RiLoader4Line,
+  RiListUnordered,
   RiSearchLine,
   RiShapesLine,
   RiSparkling2Fill,
@@ -234,6 +235,9 @@ import {
   TONE_STYLES,
 } from "./DiagramNodes"
 import { FLOW_EDGE_THEME } from "./DiagramEdges"
+import { RichTextField } from "./RichTextField"
+import { formatActiveFlowText, type FlowTextCommand } from "@/lib/diagrams/rich-text-dom"
+import { parseFlowRichText } from "@/lib/diagrams/rich-text"
 
 import "@xyflow/react/dist/style.css"
 
@@ -740,7 +744,7 @@ const EditorContext = createContext<EditorContextValue | null>(null)
 
 // The text fields that stand in for a box's label and second line while you
 // edit it. Enter or clicking away keeps the text, Escape puts the original
-// back, and Shift+Enter starts a new line in the field you're typing in (the
+// back, and Shift+Enter starts a new line. Enter continues a bullet list (the
 // second line itself is added from the text toolbar). Tab and Shift+Tab
 // belong to the editor — see its keyboard handler.
 function TextEditor({
@@ -754,17 +758,17 @@ function TextEditor({
 }) {
   // The AI's mark too: Escape puts the AI's words back, and with them the mark
   // that says they are the AI's.
-  const [original] = useState(() => ({ label: box.label, detail: box.detail, ai: box.ai }))
+  const [original] = useState(() => ({
+    label: box.label, detail: box.detail, ai: box.ai,
+    labelRichText: box.labelRichText, detailRichText: box.detailRichText,
+    bold: box.bold, italic: box.italic,
+  }))
   const containerRef = useRef<HTMLDivElement | null>(null)
   const selectedOnce = useRef(false)
 
   // Focus lands on the second line as it mounts, when it was asked for — a
   // field that has only just been added isn't there to focus until then.
-  const attachDetail = (element: HTMLTextAreaElement | null) => {
-    if (element && editor.takeDetailFocus(id)) element.focus()
-  }
-
-  function onKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+  function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     if (event.nativeEvent.isComposing) return
     // Shift+Enter is left to the field, which starts a new line; ⌘↵ to the
     // canvas, which finishes the edit and answers the box — and needs this
@@ -791,7 +795,7 @@ function TextEditor({
   // The box is the field — none of the forms plugin's border, padding or
   // focus ring.
   const field = cx(
-    "nodrag nopan nowheel w-full resize-none border-0 bg-transparent p-0 outline-none placeholder:text-current placeholder:opacity-40 [field-sizing:content] focus:[box-shadow:none]",
+    "nodrag nopan nowheel w-full border-0 bg-transparent p-0 outline-none focus:[box-shadow:none]",
     // Wrapped exactly as the box draws it, so nothing jumps when typing ends.
     FLOW_TEXT_WRAP,
   )
@@ -804,43 +808,43 @@ function TextEditor({
       // anywhere else ends it. (The toolbar's buttons never take focus.)
       onBlur={(event) => {
         const next = event.relatedTarget
-        if (next instanceof Node && containerRef.current?.contains(next)) return
+        if (next instanceof globalThis.Node && containerRef.current?.contains(next)) return
         editor.stopEditing(id)
       }}
     >
-      <textarea
+      <RichTextField
         autoFocus
-        rows={1}
-        value={box.label}
-        maxLength={DIAGRAM_TEXT_MAX_LENGTH}
+        text={box.label}
+        richText={box.labelRichText}
+        bold={box.bold}
+        italic={box.italic}
         placeholder={placeholderFor(box.shape)}
-        aria-label={isText(box) ? "Text" : box.shape === "note" ? "Note" : "Box label"}
-        data-flow-text="label"
+        label={isText(box) ? "Text" : box.shape === "note" ? "Note" : "Box label"}
+        field="label"
         // Selected once, on the way in, so typing replaces a starter label —
         // but not again when you come back up from the second line.
-        onFocus={(event) => {
-          if (selectedOnce.current) return
+        selectOnFocus={() => {
+          if (selectedOnce.current) return false
           selectedOnce.current = true
-          event.currentTarget.select()
+          return true
         }}
-        onChange={(event) =>
-          editor.updateNode(id, { label: event.target.value.replace(/\r\n?/g, "\n") }, true)
+        onChange={(label, labelRichText, typing) =>
+          editor.updateNode(id, { label, labelRichText, bold: false, italic: false }, typing)
         }
         onKeyDown={onKeyDown}
         className={cx(field, align, flowLabelClass(box))}
         style={flowLabelStyle(box)}
       />
       {box.detail !== undefined ? (
-        <textarea
-          ref={attachDetail}
-          rows={1}
-          value={box.detail}
-          maxLength={DIAGRAM_TEXT_MAX_LENGTH}
+        <RichTextField
+          focusOnMount={() => editor.takeDetailFocus(id)}
+          text={box.detail}
+          richText={box.detailRichText}
           placeholder={DETAIL_PLACEHOLDER}
-          aria-label="Second line"
-          data-flow-text="detail"
-          onChange={(event) =>
-            editor.updateNode(id, { detail: event.target.value.replace(/\r\n?/g, "\n") }, true)
+          label="Second line"
+          field="detail"
+          onChange={(detail, detailRichText, typing) =>
+            editor.updateNode(id, { detail, detailRichText }, typing)
           }
           onKeyDown={onKeyDown}
           className={cx(field, align, "mt-0.5 text-[11px] leading-4 opacity-60")}
@@ -1387,9 +1391,11 @@ function FlowEditorCanvas({
         const box = node.data as FlowBoxNodeData
         const label = normalizeFlowText(box.label)
         const detail = box.detail === undefined ? undefined : normalizeFlowText(box.detail) || undefined
-        return label === box.label && detail === box.detail
-          ? node
-          : withBox(node, { ...box, label, detail })
+        return withBox(node, {
+          ...box, label, detail,
+          labelRichText: parseFlowRichText(box.labelRichText, label),
+          detailRichText: parseFlowRichText(box.detailRichText, detail ?? ""),
+        })
       }),
     )
   }, [settleSelection])
@@ -2038,6 +2044,8 @@ function FlowEditorCanvas({
             ...from,
             label: "",
             detail: undefined,
+            labelRichText: undefined,
+            detailRichText: undefined,
             // No words yet, so none of them are the AI's.
             ai: undefined,
             // Switchboard: in the branch it is added to.
@@ -2333,9 +2341,9 @@ function FlowEditorCanvas({
       updateNode(id, { detail: "" })
     } else {
       wrapperRef.current
-        ?.querySelector<HTMLTextAreaElement>('[data-flow-text="label"]')
+        ?.querySelector<HTMLElement>('[data-flow-text="label"]')
         ?.focus()
-      updateNode(id, { detail: undefined })
+      updateNode(id, { detail: undefined, detailRichText: undefined })
     }
   }
 
@@ -4902,6 +4910,25 @@ function TextBar({
   onDone: () => void
 }) {
   const size = FLOW_TEXT_SIZES.indexOf(box.textSize)
+  const [marks, setMarks] = useState({ bold: false, italic: false, bullet: false })
+  useEffect(() => {
+    const refresh = () => {
+      if (!(document.activeElement instanceof HTMLElement) || !document.activeElement.dataset.flowText) return
+      setMarks({
+        bold: document.queryCommandState("bold"),
+        italic: document.queryCommandState("italic"),
+        bullet: document.queryCommandState("insertUnorderedList"),
+      })
+    }
+    refresh()
+    document.addEventListener("selectionchange", refresh)
+    document.addEventListener("input", refresh)
+    return () => {
+      document.removeEventListener("selectionchange", refresh)
+      document.removeEventListener("input", refresh)
+    }
+  }, [])
+  const format = (command: FlowTextCommand) => formatActiveFlowText(command)
   return (
     <Bar>
       <BarButton label="Done · Enter" onClick={onDone}>
@@ -4928,11 +4955,14 @@ function TextBar({
         </BarButton>
       </div>
       <BarDivider />
-      <BarButton label="Bold" active={box.bold} onClick={() => onChange({ bold: !box.bold })}>
+      <BarButton label="Bold · ⌘B" active={marks.bold} onClick={() => format("bold")}>
         <RiBold className="size-4" aria-hidden="true" />
       </BarButton>
-      <BarButton label="Italic" active={box.italic} onClick={() => onChange({ italic: !box.italic })}>
+      <BarButton label="Italic" active={marks.italic} onClick={() => format("italic")}>
         <RiItalic className="size-4" aria-hidden="true" />
+      </BarButton>
+      <BarButton label="Bullet list · ⌘⇧8" active={marks.bullet} onClick={() => format("insertUnorderedList")}>
+        <RiListUnordered className="size-4" aria-hidden="true" />
       </BarButton>
       <BarDivider />
       {FLOW_TEXT_ALIGNS.map((align) => {
@@ -5403,6 +5433,8 @@ const SHORTCUTS: [string, string][] = [
   ["Tab", "Next connected box"],
   ["⇧ Tab", "Back to the parent"],
   ["Enter", "Edit the text"],
+  ["⌘ B", "Bold selected text"],
+  ["⌘ ⇧ 8", "Bullet list"],
   ["↑ ↓ ← →", "Jump between boxes"],
   ["⇧ ↑ ↓ ← →", "Nudge the selection"],
   ["⌘ I", "Answer or condense with AI"],

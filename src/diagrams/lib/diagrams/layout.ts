@@ -28,7 +28,9 @@ import {
   type FlowTextAlign,
   type FlowTextSize,
   type FlowTone,
+  type FlowRichText,
 } from "./types"
+import { plainTextParagraphs, richTextVisualLines } from "./rich-text"
 
 // ─────────────────────────────────────────────────────────────────────
 // Geometry constants. All in canvas pixels at zoom 1. Exported so the tests
@@ -191,13 +193,6 @@ export function wrapText(
   return lines.length > 0 ? lines : [""]
 }
 
-function widestLine(lines: string[], fontSize: number, weight = 400): number {
-  return lines.reduce(
-    (max, line) => Math.max(max, measureText(line, fontSize, weight)),
-    0,
-  )
-}
-
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
@@ -210,6 +205,8 @@ function clamp(value: number, min: number, max: number): number {
 export type FlowBoxNodeData = {
   label: string
   detail?: string
+  labelRichText?: FlowRichText
+  detailRichText?: FlowRichText
   shape: FlowShape
   tone: FlowTone
   dashed: boolean
@@ -344,21 +341,55 @@ const FLOW_DIAMOND_LABEL_WIDTH = FLOW_NODE_WIDTH - 64
 
 type FlowSizing = Pick<
   FlowNodeSpec,
-  "label" | "detail" | "shape" | "textSize" | "bold" | "size"
+  "label" | "detail" | "labelRichText" | "detailRichText" | "shape" | "textSize" | "bold" | "size"
 >
 
 /**
  * The weight a label is drawn at: a box's at 500, a note's and free text's at
  * 400 — reading text rather than a name — and any of them at 700 when bold.
  */
-export function flowLabelWeight(node: Pick<FlowNodeSpec, "shape" | "bold">): number {
-  if (node.bold) return 700
+export function flowLabelWeight(node: Pick<FlowNodeSpec, "shape" | "bold" | "labelRichText">): number {
+  if (node.bold && !node.labelRichText) return 700
   return node.shape === "note" || node.shape === "text" ? 400 : 500
 }
 
 // The second line wrapped to `width`, and the height it adds under a label.
-function detailLines(detail: string | undefined, width: number): string[] {
-  return detail ? wrapText(detail, width, FLOW_DETAIL_FONT_SIZE, 400) : []
+function detailLines(detail: string | undefined, width: number, rich?: FlowRichText): string[] {
+  return detail ? richTextLines(detail, rich, width, FLOW_DETAIL_FONT_SIZE, 400).map((line) => line.text) : []
+}
+
+/** Measure mixed weights and the list's hanging indent, including wrapped items. */
+function richTextLines(text: string, rich: FlowRichText | undefined, width: number, fontSize: number, weight: number): { text: string; width: number }[] {
+  if (!rich) return wrapText(text, width, fontSize, weight).map((text) => ({ text, width: measureText(text, fontSize, weight) }))
+  return richTextVisualLines(rich.length ? rich : plainTextParagraphs(text)).flatMap((paragraph) => {
+    const text = paragraph.runs.map((run) => run.text).join("")
+    const indent = paragraph.bullet ? fontSize * 1.35 : 0
+    const available = Math.max(1, width - indent)
+    const measure = (start: number, end: number) => {
+      let offset = 0, measured = 0
+      for (const run of paragraph.runs) {
+        const part = run.text.slice(Math.max(0, start - offset), Math.max(0, end - offset))
+        if (part) measured += measureText(part, fontSize, run.bold ? 700 : weight)
+        offset += run.text.length
+      }
+      return measured
+    }
+    const lines: { text: string; width: number }[] = []
+    let start = 0
+    while (start < text.length) {
+      let end = start
+      while (end < text.length && (end === start || measure(start, end + 1) <= available)) end += 1
+      if (end < text.length) {
+        const prefix = text.slice(start, end)
+        const boundary = Math.max(prefix.lastIndexOf(" ") + 1, ...[...prefix.matchAll(/[-?!–—…]/g)].map((match) => match.index + 1))
+        if (boundary > 0) end = start + boundary
+      }
+      lines.push({ text: text.slice(start, end).trimEnd(), width: measure(start, end) + indent })
+      start = end
+      while (text[start] === " ") start += 1
+    }
+    return lines.length ? lines : [{ text: "", width: indent }]
+  })
 }
 
 function detailHeight(lines: string[]): number {
@@ -383,24 +414,24 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
   if (shape === "note") {
     const width = node.size?.width ?? FLOW_NOTE_SIZE
     const inner = width - FLOW_NOTE_PAD * 2
-    const lines = wrapText(node.label, inner, fontSize, weight)
+    const lines = richTextLines(node.label, node.labelRichText, inner, fontSize, weight)
     const needed =
       lines.length * lineHeight +
-      detailHeight(detailLines(node.detail, inner)) +
+      detailHeight(detailLines(node.detail, inner, node.detailRichText)) +
       FLOW_NOTE_PAD * 2
     return { width, height: Math.max(node.size?.height ?? FLOW_NOTE_SIZE, needed) }
   }
 
   if (shape === "text") {
     const wrapAt = (node.size?.width ?? FLOW_TEXT_AUTO_MAX_WIDTH) - FLOW_TEXT_PAD_X * 2
-    const lines = wrapText(node.label, wrapAt, fontSize, weight)
-    const details = detailLines(node.detail, wrapAt)
+    const lines = richTextLines(node.label, node.labelRichText, wrapAt, fontSize, weight)
+    const details = richTextLines(node.detail ?? "", node.detailRichText, wrapAt, FLOW_DETAIL_FONT_SIZE, 400)
     const width =
       node.size?.width ??
       clamp(
         Math.max(
-          widestLine(lines, fontSize, weight),
-          widestLine(details, FLOW_DETAIL_FONT_SIZE),
+          Math.max(0, ...lines.map((line) => line.width)),
+          node.detail ? Math.max(0, ...details.map((line) => line.width)) : 0,
         ) +
           FLOW_TEXT_PAD_X * 2 +
           // A caret's worth, so the last letter typed never wraps early.
@@ -410,12 +441,12 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
       )
     return {
       width,
-      height: lines.length * lineHeight + detailHeight(details) + FLOW_TEXT_PAD_Y * 2,
+      height: lines.length * lineHeight + detailHeight(node.detail ? details.map((line) => line.text) : []) + FLOW_TEXT_PAD_Y * 2,
     }
   }
 
   const labelWidth = shape === "diamond" ? FLOW_DIAMOND_LABEL_WIDTH : FLOW_LABEL_WIDTH
-  const lines = wrapText(node.label, labelWidth, fontSize, weight)
+  const lines = richTextLines(node.label, node.labelRichText, labelWidth, fontSize, weight)
   return {
     width: FLOW_NODE_WIDTH,
     height: Math.max(
@@ -423,7 +454,7 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
       // other node leaves a sliver with its label poking out of the points.
       shape === "diamond" ? FLOW_DIAMOND_HEIGHT : FLOW_NODE_MIN_HEIGHT,
       // Every line the second line wraps to, not just its first.
-      lines.length * lineHeight + detailHeight(detailLines(node.detail, labelWidth)) + 22,
+      lines.length * lineHeight + detailHeight(detailLines(node.detail, labelWidth, node.detailRichText)) + 22,
     ),
   }
 }
@@ -621,6 +652,8 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
     data: {
       label: node.label,
       detail: node.detail,
+      labelRichText: node.labelRichText,
+      detailRichText: node.detailRichText,
       shape: node.shape ?? DEFAULT_FLOW_SHAPE,
       tone: node.tone ?? DEFAULT_FLOW_TONE,
       dashed: node.dashed === true,

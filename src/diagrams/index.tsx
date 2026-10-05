@@ -9,6 +9,8 @@ import { Toaster } from "./components/Toast"
 import { PortalProvider } from "./lib/portal"
 import { refreshAnswerStatus } from "./lib/diagrams/ai-client"
 import { clipboardImageFile } from "./lib/diagrams/upload"
+import { editFlowText } from "./lib/diagrams/rich-text-dom"
+import { writeClipboard } from "./lib/bridge"
 
 type Props = {
   wsId: string
@@ -93,6 +95,10 @@ function create(element: HTMLElement, initial: Props) {
     editAction(action: string, image: boolean, text = ""): boolean | Promise<boolean> {
       const editor = instance.editor
       if (!editor || !instance.props.active) return false
+      const focused = document.activeElement
+      if (focused instanceof HTMLElement && focused.isContentEditable && focused.dataset.flowText && app.contains(focused)) {
+        return image ? true : editFlowText(focused, action, text, writeClipboard)
+      }
       if (isTextField(document.activeElement)) return false
       if (document.activeElement?.tagName === "WEBVIEW") return false
       if (action === "copy") return editor.copy()

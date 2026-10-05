@@ -27,7 +27,9 @@ import {
   type FlowSide,
   type FlowTextAlign,
   type FlowTone,
+  type FlowRichText,
 } from "@/lib/diagrams/types"
+import { plainTextParagraphs, richTextHtml } from "@/lib/diagrams/rich-text"
 
 // Every box is sized from its text; in the browser, measure that text for
 // real rather than estimate it, so a box is as tall as its text really wraps.
@@ -123,12 +125,12 @@ export function flowLabelStyle(box: Pick<FlowBoxNodeData, "textSize">): React.CS
 
 /** Weight and slant for a label — the weight flowLabelWeight measured. */
 export function flowLabelClass(
-  box: Pick<FlowBoxNodeData, "shape" | "bold" | "italic">,
+  box: Pick<FlowBoxNodeData, "shape" | "bold" | "italic" | "labelRichText">,
 ): string {
   const weight = flowLabelWeight(box)
   return cx(
     weight >= 700 ? "font-bold" : weight >= 500 ? "font-medium" : "font-normal",
-    box.italic && "italic",
+    box.italic && !box.labelRichText && "italic",
   )
 }
 
@@ -174,6 +176,19 @@ export const FLOW_SIDE_POSITIONS: Record<FlowSide, Position> = {
  * to run out of it. Exported for the editor's text fields.
  */
 export const FLOW_TEXT_WRAP = "whitespace-pre-line [overflow-wrap:anywhere]"
+
+export function FlowLabelText({ text, richText, className, style }: {
+  text: string
+  richText?: FlowRichText
+  className?: string
+  style?: React.CSSProperties
+}) {
+  return <div
+    className={cx("flow-rich-text w-full", FLOW_TEXT_WRAP, className)}
+    style={style}
+    dangerouslySetInnerHTML={{ __html: richTextHtml(richText ?? plainTextParagraphs(text)) }}
+  />
+}
 
 /**
  * The box itself, shared by the read-only node below and the editor's
@@ -227,13 +242,9 @@ export function FlowBox({
       >
         {labelOverride ?? (
           <>
-            <span className={cx(FLOW_TEXT_WRAP, flowLabelClass(box))} style={flowLabelStyle(box)}>
-              {label}
-            </span>
+            <FlowLabelText text={label} richText={box.labelRichText} className={flowLabelClass(box)} style={flowLabelStyle(box)} />
             {detail ? (
-              <span className={cx(FLOW_TEXT_WRAP, "mt-0.5 text-[11px] leading-4 opacity-60")}>
-                {detail}
-              </span>
+              <FlowLabelText text={detail} richText={box.detailRichText} className="mt-0.5 text-[11px] leading-4 opacity-60" />
             ) : null}
           </>
         )}

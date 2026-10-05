@@ -118,6 +118,12 @@ export type FlowPosition = { x: number; y: number }
 /** A node's width and height, in canvas pixels at zoom 1. */
 export type FlowSize = { width: number; height: number }
 
+/** Safe, structured text: paragraphs with optional bullets and inline marks. */
+/** A newline within a run is a soft break inside the same paragraph/list item. */
+export type FlowTextRun = { text: string; bold?: boolean; italic?: boolean }
+export type FlowTextParagraph = { runs: FlowTextRun[]; bullet?: boolean }
+export type FlowRichText = FlowTextParagraph[]
+
 // A box. `id` is what edges point at; it is the one place the format asks for a
 // key, and a short human word ("checkout") is the intended value.
 export type FlowNodeSpec = {
@@ -125,11 +131,14 @@ export type FlowNodeSpec = {
   /** Required — except on a "note", which may be blank (""). */
   label: string
   detail?: string
+  /** Formatting for the corresponding plain text, kept for AI and older specs. */
+  labelRichText?: FlowRichText
+  detailRichText?: FlowRichText
   shape?: FlowShape
   tone?: FlowTone
   /** Dashes the outline — the optional or not-built-yet box. */
   dashed?: boolean
-  // Text styling, from the editor's text toolbar. Whole-label, not per word.
+  // Label defaults for older diagrams. Rich text carries its own inline marks.
   textSize?: FlowTextSize
   align?: FlowTextAlign
   bold?: boolean
