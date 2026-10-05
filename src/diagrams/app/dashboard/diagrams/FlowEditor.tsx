@@ -30,7 +30,7 @@
 // Switchboard: any number of boxes can be waiting on an answer at once, one
 // answer per box; a drag-select takes every box it touches, not only the ones
 // wholly inside it; and deleting a box from a branch closes the gap it leaves.
-// A node's corner control folds all of its outgoing branches as one action;
+// A selected node's toolbar folds all of its outgoing branches as one action;
 // clicking it again brings them back. Individual arrow fold flags in the saved
 // spec remain readable, including partially folded older diagrams.
 // Switchboard: the image tool also offers Google Images (G), in a panel docked
@@ -110,6 +110,7 @@ import {
   RiArrowGoBackLine,
   RiArrowGoForwardLine,
   RiContractRightLine,
+  RiExpandRightLine,
   RiArrowLeftRightLine,
   RiArrowLeftSLine,
   RiBold,
@@ -674,8 +675,8 @@ function attached(node: Node): Node {
   return box.detached ? { ...node, data: { ...box, detached: undefined } } : node
 }
 
-/** What a node's outgoing arrows hide, for its fold control. */
-type FoldBadge = { boxes: number; arrows: number; total: number }
+/** Whether all of a node's foldable outgoing arrows are closed. */
+type FoldBadge = { arrows: number; total: number }
 
 function newEdgeId(): string {
   return `edge-${Math.random().toString(36).slice(2, 10)}`
@@ -730,10 +731,6 @@ type EditorContextValue = {
   interactive: boolean
   /** Switchboard: the boxes whose ✦ Answers are being waited for. */
   answeringIds: ReadonlySet<string>
-  /** Switchboard: each node's outgoing branches and folded box count. */
-  folds: ReadonlyMap<string, FoldBadge>
-  /** Switchboard: fold or unfold all direct branches of one node. */
-  toggleFold: (id: string) => void
 }
 
 // How the boxes and arrows reach the editor's state. A context rather than
@@ -971,15 +968,6 @@ function EditableFlowNode({ id, data, selected }: NodeProps) {
             : "border-brand/40 opacity-0 group-hover:opacity-100",
         )}
       />
-      {/* One control on the node folds or opens every branch leaving it. */}
-      {editor !== null && interactive && editor.folds.has(id) ? (
-        <FoldButton
-          fold={editor.folds.get(id)!}
-          selected={selected}
-          label={box.label}
-          onClick={() => editor.toggleFold(id)}
-        />
-      ) : null}
       {editor !== null && editor.answeringIds.has(id) ? (
         <div
           aria-hidden="true"
@@ -2787,33 +2775,25 @@ function FlowEditorCanvas({
         : edges,
     [edges, fold],
   )
-  // One control per node with foldable outgoing arrows. Use the same groups as
-  // the click action, so loop-closing arrows never leave a misleading control.
-  // Counts include old partial folds and shared targets, which can hide 0 boxes.
-  // Keyed by JSON so dragging does not rebuild every node's context.
-  const foldsJson = useMemo(() => {
+  // The selected-node toolbar uses the same groups as the click action, so
+  // loop-closing arrows never offer a misleading control. Old partial folds
+  // and shared targets remain in the group.
+  const folds = useMemo(() => {
     const groups = flowNodeFoldGroups(
       nodes.map((node) => node.id),
       edges.map((edge) => ({ source: edge.source, target: edge.target, collapsed: isCollapsed(edge) })),
     )
-    return JSON.stringify(
-      [...groups].flatMap(([id, indexes]) => {
-        if (fold.hidden.has(id)) return []
-        const boxes = new Set<string>()
-        let arrows = 0
-        for (const index of indexes) {
-          if (!isCollapsed(edges[index])) continue
-          arrows += 1
-          for (const box of fold.folded.get(index) ?? []) boxes.add(box)
-        }
-        return [[id, { boxes: boxes.size, arrows, total: indexes.length }]]
-      }),
-    )
+    const result = new Map<string, FoldBadge>()
+    for (const [id, indexes] of groups) {
+      if (fold.hidden.has(id)) continue
+      let arrows = 0
+      for (const index of indexes) {
+        if (isCollapsed(edges[index])) arrows += 1
+      }
+      result.set(id, { arrows, total: indexes.length })
+    }
+    return result
   }, [fold, edges, nodes])
-  const folds = useMemo(
-    () => new Map(JSON.parse(foldsJson) as [string, FoldBadge][]),
-    [foldsJson],
-  )
 
   // One node click closes every direct branch, or reopens them all. Fold flags
   // remain on the edges so older diagrams (including partial folds) load as
@@ -3375,8 +3355,6 @@ function FlowEditorCanvas({
       soleNodeId,
       interactive: tool !== "hand",
       answeringIds,
-      folds,
-      toggleFold,
     }),
     [
       editingId,
@@ -3393,8 +3371,6 @@ function FlowEditorCanvas({
       soleNodeId,
       tool,
       answeringIds,
-      folds,
-      toggleFold,
     ],
   )
 
@@ -3583,6 +3559,13 @@ function FlowEditorCanvas({
                         }
                       : undefined
                   }
+                  fold={soleNode && folds.has(soleNode.id)
+                    ? {
+                        state: folds.get(soleNode.id)!,
+                        nodeLabel: (soleNode.data as FlowBoxNodeData).label,
+                        onToggle: () => toggleFold(soleNode.id),
+                      }
+                    : undefined}
                   ai={
                     selectedNodes.length > 1
                       ? {
@@ -4098,6 +4081,7 @@ function BoxBar({
   onDelete,
   ai,
   branch,
+  fold,
 }: {
   boxes: FlowBoxNodeData[]
   /** Everything selected, arrows included — what Delete removes. */
@@ -4110,6 +4094,8 @@ function BoxBar({
   ai?: AiBar
   /** Switchboard: Attached / Detached, for one box in a branch (or detached from one). */
   branch?: { detached: boolean; onToggle: () => void }
+  /** Collapse or expand all outgoing branches of the one selected node. */
+  fold?: { state: FoldBadge; nodeLabel: string; onToggle: () => void }
 }) {
   const sharedShape = shared(boxes, "shape")
   const shape = sharedShape !== undefined && isFlowBoxShape(sharedShape) ? sharedShape : undefined
@@ -4121,6 +4107,10 @@ function BoxBar({
   const swatch: "box" | "note" | "text" =
     sharedShape === "note" ? "note" : sharedShape === "text" ? "text" : "box"
   const toneNames = swatch === "note" ? NOTE_TONE_NAMES : TONE_NAMES
+  const folded = fold !== undefined && fold.state.arrows === fold.state.total
+  const foldLabel = fold
+    ? `${folded ? "Expand" : "Collapse"} all ${fold.state.total} outgoing ${fold.state.total === 1 ? "branch" : "branches"} from ${fold.nodeLabel.trim().slice(0, 48) || "this node"}`
+    : ""
 
   return (
     <Bar>
@@ -4236,6 +4226,15 @@ function BoxBar({
             <RiLinkUnlinkM className="size-4" aria-hidden="true" />
           ) : (
             <RiLinkM className="size-4" aria-hidden="true" />
+          )}
+        </BarButton>
+      ) : null}
+      {fold ? (
+        <BarButton label={foldLabel} active={folded} onClick={fold.onToggle}>
+          {folded ? (
+            <RiExpandRightLine className="size-4" aria-hidden="true" />
+          ) : (
+            <RiContractRightLine className="size-4" aria-hidden="true" />
           )}
         </BarButton>
       ) : null}
@@ -5012,54 +5011,6 @@ function EdgeBar({
         <RiDeleteBinLine className="size-4" aria-hidden="true" />
       </BarButton>
     </Bar>
-  )
-}
-
-// The disclosure belongs to the node, clear of its four connection handles.
-// Open nodes show it on hover or selection; folded nodes keep it visible so a
-// saved diagram always offers a way back, even when a shared target hides 0.
-function FoldButton({
-  fold,
-  selected,
-  label: nodeLabel,
-  onClick,
-}: {
-  fold: FoldBadge
-  selected: boolean
-  label: string
-  onClick: () => void
-}) {
-  const closed = fold.arrows === fold.total
-  const name = nodeLabel.trim().slice(0, 48) || "this node"
-  const label = closed
-    ? `Expand all ${fold.total} outgoing ${fold.total === 1 ? "branch" : "branches"} from ${name}`
-    : `Collapse all ${fold.total} outgoing ${fold.total === 1 ? "branch" : "branches"} from ${name}`
-  return (
-    <button
-      type="button"
-      aria-expanded={!closed}
-      aria-label={label}
-      title={label}
-      onPointerDown={(event) => event.stopPropagation()}
-      onClick={(event) => {
-        event.stopPropagation()
-        onClick()
-      }}
-      onDoubleClick={(event) => event.stopPropagation()}
-      className={cx(
-        "nodrag nopan absolute -right-2.5 -top-2.5 z-10 flex h-6 min-w-6 items-center justify-center whitespace-nowrap rounded-full bg-gray-900 px-1.5 text-[11px] font-semibold tabular-nums text-white shadow-sm ring-2 ring-white transition-opacity hover:bg-brand dark:bg-gray-100 dark:text-gray-900 dark:ring-gray-950",
-        !closed && fold.arrows === 0 && !selected && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
-        focusRing,
-      )}
-    >
-      {closed && fold.boxes > 0 ? (
-        `+${fold.boxes}`
-      ) : closed ? (
-        <RiArrowDownSLine className="size-4" aria-hidden="true" />
-      ) : (
-        <RiContractRightLine className="size-3.5" aria-hidden="true" />
-      )}
-    </button>
   )
 }
 
