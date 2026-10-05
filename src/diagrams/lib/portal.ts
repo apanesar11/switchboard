@@ -1,14 +1,17 @@
-// Where Radix puts what it portals — the Dialogs, the Actions menu and the diagram
-// picker. Not document.body: the bundle's stylesheet is scoped to `.sbdg` so that it
-// can never restyle the rest of Switchboard, and anything outside that element would
-// render unstyled. index.tsx sets this to an element inside the root before rendering.
+// Radix content stays in the editor instance's own scoped CSS root. Grid may show
+// several React roots at once, so a module-global portal would send every picker
+// and dialog to whichever workspace was mounted most recently.
+import { createContext, createElement, useContext, type ReactNode } from "react"
 
-let container: HTMLElement | null = null
+const PortalContext = createContext<HTMLElement | null>(null)
 
-export function setPortalContainer(element: HTMLElement | null): void {
-  container = element
+export function PortalProvider({ container, children }: {
+  container: HTMLElement
+  children: ReactNode
+}) {
+  return createElement(PortalContext.Provider, { value: container }, children)
 }
 
-export function portalContainer(): HTMLElement | undefined {
-  return container ?? undefined
+export function usePortalContainer(): HTMLElement | undefined {
+  return useContext(PortalContext) ?? undefined
 }

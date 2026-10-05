@@ -45,7 +45,7 @@ SB.views = SB.views || {};
       .trim() || 'that did not work';
   }
 
-  // Feature-checked and settled as a value, the way views/notes.js calls the bridge.
+  // Feature-checked and settled as a value when the bridge is unavailable.
   function call(name) {
     var api = window.sb;
     var args = Array.prototype.slice.call(arguments, 1);

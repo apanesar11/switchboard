@@ -74,30 +74,6 @@ contextBridge.exposeInMainWorld('sb', {
   codeRename: (id, repoName, from, to) => ipcRenderer.invoke('sb:code:rename', id, repoName, from, to),
   codeDelete: (id, repoName, path) => ipcRenderer.invoke('sb:code:delete', id, repoName, path),
 
-  // Notes (§4.15) — one markdown scratch pad per workspace, kept outside every repo.
-  // `id` is a workspace id, or a Grid square's folder path. notesRead answers
-  // { ok, text, mtimeMs, missing } — a note never written is an empty one, not an error
-  // — or { ok, tooLarge } for a file past 2 MB, which is shown rather than opened.
-  notesRead: id => ipcRenderer.invoke('sb:notes:read', id),
-  // Save. `opts.mtimeMs` is what the renderer last read or wrote, so a note something
-  // else has touched since comes back { ok:false, conflict:true } instead of overwritten;
-  // `opts.force` is the user's Keep mine.
-  notesWrite: (id, text, opts) => ipcRenderer.invoke('sb:notes:write', id, text, opts || {}),
-  // The file in Finder, or the folder when there is none yet — the way out of a note
-  // too large to open.
-  notesReveal: id => ipcRenderer.invoke('sb:notes:reveal', id),
-  // How many notes hold text that could NOT be written, whenever that changes: main
-  // asks before a close or a quit would throw them away, as it does for the Editor's
-  // buffers. Normally 0 — a note saves itself.
-  notesDirty: count => ipcRenderer.invoke('sb:notes:dirty', count),
-  // The quit flush. Main asks on its way out and WAITS for notesFlushed, because a
-  // page's beforeunload is ignored and the last few hundred ms of typing would go with
-  // the window otherwise.
-  // `id` is the flush's generation; hand it straight back so main can tell a late
-  // answer to a flush it has given up on from an answer to the one it is waiting for.
-  onNotesFlush: cb => subscribe('sb:evt:notesFlush', cb),
-  notesFlushed: id => ipcRenderer.invoke('sb:notes:flushed', id),
-
   // Diagrams (§4.17) — the Diagrams tab's flow diagrams, one file each, kept per
   // workspace beside the config and never in a repo. Every answer is { ok, data } or
   // { ok:false, error }; a diagram is the admin's row: { id, name, kind, createdAt,
@@ -116,8 +92,11 @@ contextBridge.exposeInMainWorld('sb', {
   // which a menu item delivers instead of a paste event.
   diagramsClipboardImage: () => ipcRenderer.invoke('sb:diagrams:clipboardImage'),
   // How many diagrams hold edits not yet written (0 or 1), whenever that changes:
-  // main has the page write them before a close or a quit, as it does for notes.
+  // main has the page write them before a close or a quit.
   diagramsDirty: count => ipcRenderer.invoke('sb:diagrams:dirty', count),
+  // Flush the diagram editor's pending autosave while the page is still live.
+  onDiagramsFlush: cb => subscribe('sb:evt:diagramsFlush', cb),
+  diagramsFlushed: id => ipcRenderer.invoke('sb:diagrams:flushed', id),
   // Google Images beside the canvas. A picture dragged out of the panel's <webview>, or
   // added from its right-click menu, arrives as an address, never a File; main fetches
   // it through the panel's own session and answers { ok, bytes, type, name } — PNG, JPEG

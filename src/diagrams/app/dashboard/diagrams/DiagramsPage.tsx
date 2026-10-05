@@ -1,7 +1,8 @@
 "use client"
 
 // Switchboard's copy of the admin's app/dashboard/diagrams/DiagramsPage.tsx: the
-// Diagrams tab of ONE workspace. Mirrored by hand like FlowEditor.tsx; what differs:
+// Diagrams tab or Grid pane of ONE workspace. Mirrored by hand like FlowEditor.tsx;
+// what differs:
 //
 //   * A workspace, not a product. `wsId` is what the admin calls productId, and the
 //     diagrams are files on this Mac (lib/diagrams/actions.ts), not rows.
@@ -10,11 +11,10 @@
 //   * Full screen covers the window, below the macOS traffic lights — its bar is a
 //     window drag region with room left for them, as the Editor's full screen is.
 //   * Actions ▸ Rename (RenameDiagramDialog), which the admin doesn't have.
-//   * `active`: false while another tab or workspace is on screen. The tree stays
-//     mounted behind it (views/diagrams.js keeps it), and nothing here may answer a
-//     key meant for that screen — Backspace on the Terminal deleting the boxes
-//     selected here, say. The editor hears it too (`shown`), for the Google Images
-//     panel's sake: the tab being left takes that panel's page with it.
+//   * `active`: false while off screen or another Grid pane has the keyboard. Each
+//     workspace tree stays mounted (views/diagrams.js keeps it), but may not answer
+//     keys meant for a terminal or another canvas. The editor hears it too (`shown`)
+//     so its Google Images panel stops accepting input when inactive.
 //
 // The canvas IS the editor (FlowEditor.tsx), and changes save as you go.
 //
@@ -29,7 +29,7 @@
 // Mockups: a diagram is one canvas, so there is no second list for ← / → to
 // belong to.
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import {
   RiAddLine,
   RiArchiveLine,
@@ -153,7 +153,7 @@ export type DiagramsPageProps = {
   wsId: string
   /** Its name, for the empty state and for "Reads sample-api first". */
   wsName: string
-  /** False while the tab is not on screen: nothing here may take a key then. */
+  /** False while off screen or another Grid pane owns the keyboard. */
   active: boolean
   onOpenSettings?: () => void
   onOpenTerminal?: () => void
@@ -161,7 +161,12 @@ export type DiagramsPageProps = {
   onEditor?: (editor: FlowEditorHandle | null) => void
   /** Whether that editor holds anything not yet saved. */
   onDirtyChange?: (dirty: boolean) => void
+  /** The owning workspace's full-screen controls, also used from Grid. */
+  onFullscreen?: (handle: FullscreenHandle | null) => void
+  onFullscreenChange?: (open: boolean) => void
 }
+
+export type FullscreenHandle = { isFullscreen: () => boolean; leave: () => void }
 
 export function DiagramsPage({
   wsId,
@@ -171,6 +176,8 @@ export function DiagramsPage({
   onOpenTerminal,
   onEditor,
   onDirtyChange,
+  onFullscreen,
+  onFullscreenChange,
 }: DiagramsPageProps) {
   const productId = wsId
 
@@ -331,10 +338,23 @@ export function DiagramsPage({
     fullscreenNow.current = fullscreen
   }, [fullscreen])
 
-  // Leaving the tab leaves full screen: it covers the window, and must not outlive
-  // the screen it belongs to.
+  // The Grid's container query establishes a containing block for fixed
+  // descendants. The host moves to body while full screen, preserving this
+  // exact React Flow tree and all of its editor state.
+  useLayoutEffect(() => {
+    onFullscreenChange?.(fullscreen)
+  }, [fullscreen, onFullscreenChange])
+
+  // Body-level dialogs and menus cannot remain visible after this workspace loses
+  // the screen or another Grid pane takes the keyboard.
   useEffect(() => {
-    if (!active) setFullscreen(false)
+    if (!active) {
+      setFullscreen(false)
+      setActionsOpen(false)
+      setDeleteTarget(null)
+      setNewFlowOpen(false)
+      setRenameTarget(null)
+    }
   }, [active])
 
   // Entering full screen moves focus off the now-invisible toolbar and into the
@@ -471,13 +491,14 @@ export function DiagramsPage({
     setDeleteTarget({ id: selected.id, name: selected.name, archived: isArchived })
   }
 
-  // views/diagrams.js asks this before Switchboard's own Esc means "back".
+  // Each workspace owns its own canvas, including while several are on the Grid.
   useEffect(() => {
-    exposeFullscreen.current = {
+    onFullscreen?.({
       isFullscreen: () => fullscreenNow.current,
       leave: () => setFullscreen(false),
-    }
-  })
+    })
+    return () => onFullscreen?.(null)
+  }, [onFullscreen])
 
   return (
     <>
@@ -527,6 +548,7 @@ export function DiagramsPage({
                   search={search}
                   onSearchChange={setSearch}
                   formatRelative={formatRelative}
+                  active={active}
                 />
                 {nav.ordered.length > 1 ? (
                   <>
@@ -758,11 +780,3 @@ export function DiagramsPage({
     </>
   )
 }
-
-/**
- * views/diagrams.js's way in: is the diagram on screen full screen, and the way
- * out of it. Module-level because there is one Diagrams tab on screen at a time.
- */
-export const exposeFullscreen: {
-  current: { isFullscreen: () => boolean; leave: () => void } | null
-} = { current: null }

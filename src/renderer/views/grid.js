@@ -1,12 +1,8 @@
-// SB.views.grid — the Grid screen: four terminals side by side, in views the user
-// makes. "Sample" is sample-1 to sample-4 in the four squares; "Everything else"
-// is whatever is left. It is the two iTerm2 windows of four panes each that the
-// Terminal tab replaced one at a time, brought back as one screen.
+// SB.views.grid — four panes in user-defined views. A workspace pane can show its
+// Terminal, Changes or Diagrams; a folder pane is a Terminal only.
 //
-// A square IS that workspace's Terminal. views/terminal.js keeps one xterm and one
-// shell per workspace and mount() moves the same host here, so the pane you open
-// in a square is the pane that workspace's own Terminal tab shows, scrollback and
-// all — nothing is duplicated and nothing is restarted by looking at it from here.
+// views/terminal.js keeps one xterm and shell per workspace and moves that same
+// host here when Terminal is shown. Switching a pane never restarts its shell.
 //
 // The data (views, which one is showing) belongs to app.js — SB.grid — because
 // views never write state. What lives here is only what a rebuild would otherwise
@@ -22,76 +18,83 @@ window.SB = window.SB || {};
   var h = D.h;
 
   var CELLS = 4;
-  var NOTE_KEY = 'switchboard.grid.notes';     // the squares showing a note, by workspace id
+  var MODE_KEY = 'switchboard.grid.cellMode';  // each workspace's chosen grid content
 
   var editing = null;     // null | { text, fresh } — the view being made, its name as typed
   var picking = null;     // null | { viewId, index } — the square that is choosing
   var armed = null;       // the view whose Delete has been clicked once
   var menu = null;        // the view whose ⋯ menu is open
   var menuFresh = false;  // the menu was just opened: its first item gets focus, once
-  var wanted = null;      // the workspace just put in a square: its terminal gets focus
+  var wanted = null;      // the workspace just put in a square: its terminal may get focus
   var arranging = null;   // null | { id, text, fresh } — the view being edited, its name as typed
   var choosing = false;   // the folder sheet is up: a second click must not raise a second one
   var pressing = false;   // a mouse button is down: what it pressed has not been clicked yet
   var released = null;    // what is waiting for that click to land
-  // Which squares are showing their workspace's note instead of its terminal, by
-  // workspace id rather than by square: the same workspace can sit in two views, and a
-  // scratch pad is about the workspace, not about where it happens to be on screen.
-  // Remembered across launches the way the shown view is — it is a choice, not a mode.
-  var noted = readNoted();
+  // A workspace keeps its choice across Grid views and launches. Old saved note
+  // switches are deliberately ignored: Notes is gone, so those cells open Terminal.
+  var modes = readModes();
 
-  function readNoted() {
+  function readModes() {
     try {
-      var got = JSON.parse(window.localStorage.getItem(NOTE_KEY) || '{}');
+      var got = JSON.parse(window.localStorage.getItem(MODE_KEY) || '{}');
       return got && typeof got === 'object' && !Array.isArray(got) ? got : {};
     } catch (e) {
       return {};
     }
   }
 
-  function saveNoted() {
-    try { window.localStorage.setItem(NOTE_KEY, JSON.stringify(noted)); } catch (e) { /* storage off */ }
+  function saveModes() {
+    try { window.localStorage.setItem(MODE_KEY, JSON.stringify(modes)); } catch (e) { /* storage off */ }
   }
 
-  function showingNote(wsId) {
-    return !!noted[wsId];
+  function modeFor(wsId) {
+    if (isFolder(wsId)) return 'terminal';
+    return modes[wsId] === 'changes' || modes[wsId] === 'diagrams' ? modes[wsId] : 'terminal';
   }
 
-  // The switch in a square's top-right corner. A square is EITHER the terminal or the
-  // note, never both: four panes in a window is already the most it can hold, and the
-  // point of the note is somewhere to look while the terminal is busy, not beside it.
-  function noteToggle(wsId) {
-    var on = showingNote(wsId);
-    var has = SB.views.notes && typeof SB.views.notes.has === 'function' && SB.views.notes.has(wsId);
-    return h('button.ib.nbtn' + (on ? '.on' : '') + (!on && has ? '.has' : ''), {
+  function modeButton(ws, mode, title, content) {
+    var selected = modeFor(ws.id) === mode;
+    return h('button.gridmode.' + mode + (selected ? '.on' : ''), {
       type: 'button',
-      title: on ? 'Show the terminal' : 'Show the note for ' + folderOrWs(wsId),
-      'aria-label': on ? 'Show the terminal' : 'Show the note',
-      'aria-pressed': on ? 'true' : 'false',
-      onClick: function () { toggleNote(wsId); }
-    }, D.icon(on ? 'term' : 'note'));
+      title: title + ' for ' + ws.id,
+      'aria-label': title + ' for ' + ws.id,
+      'aria-pressed': selected ? 'true' : 'false',
+      'data-grid-mode': mode,
+      onClick: function () { setMode(ws.id, mode); }
+    }, content);
   }
 
-  function folderOrWs(wsId) {
-    return isFolder(wsId) ? folderName(wsId) : wsId;
+  function changesButton(ws) {
+    var count = Number(ws.files) || 0;
+    var add = Math.max(0, Number(ws.add) || 0);
+    var del = Math.max(0, Number(ws.del) || 0);
+    var label = count ? 'Show changes (' + count + ' files, +' + add + ' −' + del + ')' : 'Show changes';
+    return modeButton(ws, 'changes', label, [
+      D.icon('changes'),
+      count ? h('span.gridcounts', null, h('span.add', null, '+' + add), h('span.del', null, '−' + del)) : null
+    ]);
   }
 
-  function toggleNote(wsId) {
-    if (noted[wsId]) delete noted[wsId];
-    else noted[wsId] = true;
-    saveNoted();
-    // NOT `wanted`: that flag is consumed by landFocus, which bails — leaving it armed
-    // — whenever a name is being typed, a square is choosing or the view is being
-    // edited, and an arbitrary later render then pulls the keyboard into this square.
-    // The click was on the switch, so this focuses what came up itself.
+  function setMode(wsId, mode) {
+    if (isFolder(wsId) || (mode !== 'terminal' && mode !== 'changes' && mode !== 'diagrams')) return;
+    if (modeFor(wsId) === mode) return;
+    if (mode === 'terminal') delete modes[wsId];
+    else modes[wsId] = mode;
+    saveModes();
     SB.render();
     setTimeout(function () {
-      if (noted[wsId]) {
-        var notes = SB.views.notes;
-        if (notes && typeof notes.focus === 'function') notes.focus(wsId);
-      } else {
+      if (mode === 'terminal') {
         var term = SB.views.terminal;
         if (term && typeof term.focus === 'function') term.focus(wsId);
+      } else {
+        var cells = document.querySelectorAll('#main .cell[data-grid-ws]');
+        for (var i = 0; i < cells.length; i++) {
+          if (cells[i].getAttribute('data-grid-ws') !== wsId) continue;
+          var buttons = cells[i].querySelectorAll('[data-grid-mode]');
+          for (var j = 0; j < buttons.length; j++) {
+            if (buttons[j].getAttribute('data-grid-mode') === mode) { buttons[j].focus(); return; }
+          }
+        }
       }
     }, 0);
   }
@@ -506,8 +509,7 @@ window.SB = window.SB || {};
   function head(view, index, ws) {
     var dot = typeof SB.dotFor === 'function' ? SB.dotFor(ws) : '';
     return h('div.cellhd',
-      // The name is a way into this workspace's Terminal — the same tab as the
-      // square, on its own screen — not into whichever tab was looked at last.
+      // The name keeps its established shortcut to this workspace's Terminal.
       h('button.name', {
         type: 'button',
         title: 'Open the terminal for ' + ws.id,
@@ -515,7 +517,10 @@ window.SB = window.SB || {};
       }, ws.id),
       dot ? h('span.dot.' + dot) : null,
       h('span.sp'),
-      noteToggle(ws.id),
+      h('div.gridmodes', { role: 'group', 'aria-label': 'Show in ' + ws.id },
+        modeButton(ws, 'terminal', 'Show terminal', D.icon('term')),
+        changesButton(ws),
+        modeButton(ws, 'diagrams', 'Show diagrams', D.icon('diagram'))),
       // The × only while the view is being edited (see startArrange): a square
       // stays in the mode after losing its workspace, so several can go in one visit.
       editingView(view) ? h('button.x', {
@@ -638,7 +643,6 @@ window.SB = window.SB || {};
     return h('div.cellhd',
       h('span.name.folder', { title: dir }, name),
       h('span.sp'),
-      noteToggle(dir),
       editingView(view) ? h('button.x', {
         type: 'button',
         title: 'Take ' + name + ' out of this view',
@@ -655,15 +659,24 @@ window.SB = window.SB || {};
     // folder is not there any more") is what says so when the folder has gone.
     if (!ws && !isFolder(wsId)) return goneCell(view, index, wsId);
 
-    var el = h('div.cell.filled' + (editingView(view) ? '.arr' : ''));
+    var mode = ws ? modeFor(wsId) : 'terminal';
+    var el = h('div.cell.filled' + (editingView(view) ? '.arr' : '') + '.mode-' + mode,
+      { 'data-grid-ws': wsId });
     el.appendChild(ws ? head(view, index, ws) : folderHead(view, index, wsId));
-    if (showingNote(wsId)) {
-      var notes = SB.views.notes;
-      // The terminal is NOT disposed while its square shows a note: app.js's
-      // retirePanes() keeps every pane whose id is in a Grid square, whichever of the
-      // two the square is drawing, so the shell and its scrollback are untouched.
-      if (notes && typeof notes.mount === 'function') notes.mount(wsId, el);
-      else el.appendChild(h('div.note.blank', null, 'the note editor did not load'));
+    if (mode === 'changes') {
+      var workspace = SB.views.workspace;
+      if (workspace && typeof workspace.changesBody === 'function') {
+        var changes = workspace.changesBody(ws, state);
+        changes.classList.add('gridchanges');
+        changes.style.setProperty('--repo-name', '120px');
+        el.appendChild(changes);
+      } else el.appendChild(D.empty('the Changes view did not load'));
+      return el;
+    }
+    if (mode === 'diagrams') {
+      var diagrams = SB.views.diagrams;
+      if (diagrams && typeof diagrams.mountGrid === 'function') diagrams.mountGrid(wsId, el);
+      else el.appendChild(D.empty('the diagram editor did not load'));
       return el;
     }
     var term = SB.views.terminal;
@@ -675,19 +688,13 @@ window.SB = window.SB || {};
   function body(state, view) {
     var bd = h('div.bd.gridbd');
     if (!view) {
-      bd.appendChild(D.empty('Four terminals side by side. Make a view, then put a workspace in each square.', {
+      bd.appendChild(D.empty('Four panes side by side. Make a view, then put a workspace or folder in each square.', {
         title: 'no views yet',
         action: { label: 'New view', onClick: function () { startNew(); } }
       }));
       return bd;
     }
     var grid = h('div.grid');
-    // Read each square's note before drawing: the switch is marked when there is
-    // something written down, and the note is then already there when it is clicked.
-    var notes = SB.views.notes;
-    if (notes && typeof notes.preload === 'function') {
-      for (var c = 0; c < CELLS; c++) if (view.cells[c]) notes.preload(view.cells[c]);
-    }
     for (var i = 0; i < CELLS; i++) grid.appendChild(cell(state, view, i));
     bd.appendChild(grid);
     return bd;
@@ -695,8 +702,8 @@ window.SB = window.SB || {};
 
   // ── focus ─────────────────────────────────────────────────────────────────
 
-  // Landing here is landing on a terminal: the first filled square gets focus, the
-  // way the Terminal tab focuses itself. Only when nothing in the main column has it
+  // Landing here focuses the first visible terminal, if one exists. Only when
+  // nothing in the main column has focus
   // — a square that is being typed into, a button that was just clicked, the name
   // field — keeps it. views/terminal.js's own landing focus is off on this route.
   //
@@ -719,20 +726,18 @@ window.SB = window.SB || {};
     }
     setTimeout(function () {
       var term = SB.views.terminal;
-      var notes = SB.views.notes;
       function land(id) {
-        if (!id) return false;
-        if (showingNote(id)) return !!notes && typeof notes.focus === 'function' && notes.focus(id);
+        if (!id || modeFor(id) !== 'terminal') return false;
         return !!term && typeof term.focus === 'function' && term.focus(id);
       }
       if (just && view.cells.indexOf(just) !== -1 && land(just)) return;
       var main = document.getElementById('main');
       var active = document.activeElement;
       if (!main || (active && active !== document.body && main.contains(active))) return;
-      // A terminal first: a square showing a note is a place to read, and landing the
-      // keyboard in someone's scratch pad is not what arriving at the Grid means.
+      // Focus an actual terminal. Changes and Diagrams have their own controls and
+      // should not steal focus just because their workspace is first in the view.
       for (var i = 0; i < CELLS; i++) {
-        if (view.cells[i] && !showingNote(view.cells[i]) && land(view.cells[i])) return;
+        if (view.cells[i] && land(view.cells[i])) return;
       }
     }, 0);
   }
@@ -770,5 +775,8 @@ window.SB = window.SB || {};
   }
 
   SB.views = SB.views || {};
-  SB.views.grid = { render: render };
+  SB.views.grid = {
+    render: render,
+    showsTerminal: function (wsId) { return modeFor(wsId) === 'terminal'; }
+  };
 })(window.SB);

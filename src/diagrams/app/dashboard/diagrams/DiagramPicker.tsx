@@ -10,7 +10,7 @@
 // matches — see searchDiagrams. Rows are selection only; archive and delete
 // live in the Actions menu of the diagram you have actually selected.
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import * as PopoverPrimitives from "@radix-ui/react-popover"
 import {
   RiArchiveLine,
@@ -20,7 +20,7 @@ import {
 } from "@remixicon/react"
 import { cx, focusInput, focusRing } from "@/lib/utils"
 // Switchboard: portalled into the bundle's own root, where its styles reach.
-import { portalContainer } from "@/lib/portal"
+import { usePortalContainer } from "@/lib/portal"
 import { searchDiagrams } from "@/lib/diagrams/search"
 import type { DiagramSummary } from "@/lib/diagrams/types"
 
@@ -32,6 +32,7 @@ type Props = {
   search: string
   onSearchChange: (value: string) => void
   formatRelative: (iso: string) => string
+  active: boolean
 }
 
 export function DiagramPicker({
@@ -41,8 +42,14 @@ export function DiagramPicker({
   search,
   onSearchChange,
   formatRelative,
+  active,
 }: Props) {
   const [open, setOpen] = useState(false)
+
+  // The portal remains attached to body while its canvas is parked off screen.
+  useEffect(() => {
+    if (!active) setOpen(false)
+  }, [active])
 
   const results = useMemo(
     () => searchDiagrams(diagrams, search),
@@ -149,7 +156,7 @@ export function DiagramPicker({
         </button>
       </PopoverPrimitives.Trigger>
 
-      <PopoverPrimitives.Portal container={portalContainer()}>
+      <PopoverPrimitives.Portal container={usePortalContainer()}>
         <PopoverPrimitives.Content
           align="start"
           sideOffset={6}

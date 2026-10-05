@@ -6,8 +6,8 @@
 A local control panel for your development workspaces.
 
 One window for terminals, dev servers, repository changes, pull requests, a plain
-editor for your files and a scratch pad per workspace. Group your own projects in the
-sidebar and arrange up to four terminals per grid view. Switchboard ships with no
+editor for your files, and workspace diagrams. Group your own projects in the
+sidebar and arrange up to four workspace panes per grid view. Switchboard ships with no
 workspaces or personal configuration.
 
 ## Run it
@@ -121,23 +121,7 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   away from being undone — and if the Trash is not available it says so rather than
   pretending. Nothing here runs git: a file you make is untracked, exactly as it would
   be if you had made it in a shell.
-- **Notes** — the fifth tab: somewhere to write things down for a workspace, one note
-  each. It works the way Notion does rather than the way a markdown editor does — type
-  `### ` at the start of a line and the line becomes a heading and the `### ` goes,
-  `- ` makes a bullet, `1. ` a numbered one, `[] ` a checkbox you can tick, `> ` a
-  quote, three backticks a code block and `---` a divider. `**bold**`, `*italic*`,
-  `` `code` `` and `~~strike~~` apply as you finish typing them, ⌘B and ⌘I do the same
-  to a selection, ⇥ and ⇧⇥ indent a list, and a web address you type becomes a link.
-  There is no source view and no preview toggle, because what you see is the note. It
-  saves itself a moment after you stop typing, and again when you leave the window,
-  close it or quit — ⌘S if you want to be sure. If it ever cannot write the file, it
-  says so and asks before you quit rather than losing what you wrote. The note is an ordinary markdown file, so anything
-  can read it, but it lives in `~/.switchboard/notes/` rather than in your repo: it
-  will never show up in **Changes**, in the Editor's tree or in a commit. A line it has
-  no block for — a table, an image, a link definition, a line of HTML — is shown as the
-  source it is, in monospace, and saved back untouched; so is anything it cannot write
-  out exactly as you had it. Opening a note never rewrites it.
-- **Diagrams** — the sixth tab: flow diagrams for a workspace — boxes, arrows, sticky
+- **Diagrams** — flow diagrams for a workspace — boxes, arrows, sticky
   notes, free text and pictures, arranged by hand. Click a shape on the toolbar down the
   left and click the canvas to place it; with a box selected, Tab adds the next one joined
   to its right and starts you typing, ⇧Tab steps back, the arrow keys move between boxes
@@ -204,7 +188,7 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   on the workspace page, the workspace name in any breadcrumb, and the name on a Grid
   square. It is the tab you spend the most time in, so it is one click from wherever
   you are.
-- **Grid** — the row above the workspaces (⌘0): four terminals side by side, in views you
+- **Grid** — the row above the workspaces (⌘0): four panes side by side, in views you
   make. Press **+**, name it, then put a workspace in each square; "Sample" for
   sample-1 to sample-4, "Everything else" for the rest, and switch between them the way
   you switch tabs. The ⋯ at the right holds **Edit** and Delete. Edit is one mode for
@@ -212,14 +196,13 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   either side move it along the row, and the squares can lose a workspace (×) or gain
   one (Add workspace) — click another tab to edit that one too, and Done to finish. It
   is the only place a square's × shows, so a slip of the hand cannot empty one. The bar
-  beside the ⋯ is this session's Claude usage. A
-  square *is* that workspace's Terminal — the same shell, the same scrollback, whether
-  you look at it here or on its own tab — and taking it out of a square leaves the shell
-  running. The button at a square's top right swaps the terminal for that workspace's
-  **note** and back again — one or the other, never both — so a square can be a scratch
-  pad while you wait on the shell behind it, which keeps running either way. It carries
-  a small amber dot when there is already something written down. A square can also
-  hold **any folder** rather than a workspace: the picker's
+  beside the ⋯ is this session's Claude usage. Each workspace square switches between
+  **Terminal**, **Changes**, and **Diagrams** using the buttons in its header. Changes
+  shows the workspace's repository summary, with compact green `+` and red `−` counts
+  in its button. The diagram pane has its picker and full-screen control. The Terminal
+  is the same shell and scrollback as the workspace tab, and keeps running while
+  Changes or Diagrams is shown. A square can also hold **any folder** rather than a
+  workspace: the picker's
   first row, **Choose a folder…**, opens the Mac's folder chooser, and the square becomes
   a shell in that folder — the apps folder itself, a repo outside it, anything — on no
   rail and with no screen of its own. Views are remembered in the config; the window
@@ -294,8 +277,7 @@ run through `git`. Terminals use xterm.js and node-pty to run your login shell,
 optionally inside tmux. The Editor is Monaco, the editor inside VS Code, bundled with
 the app; it reads the files in your repos through `git` and the file system, and
 writes, moves or bins one only when you ask it to — a save, a new file or folder, a
-rename, a delete. Notes are plain markdown files of Switchboard's own, one per
-workspace, in `~/.switchboard/notes/`; nothing in a repo. Diagrams are JSON files of its
+rename, a delete. Diagrams are JSON files of its
 own too, in `~/.switchboard/diagrams/`, with the pictures on them kept once each in
 `~/.switchboard/diagrams/images/`. ✦ Answer runs `claude` or `codex` in the workspace's
 folder with read-only tools, or calls the Anthropic or OpenAI API directly with a key you
@@ -309,13 +291,14 @@ utilities, and ngrok discovery calls its local HTTP API.
 
 The source does not need account credentials. Each computer uses its own Git/GitHub
 and coding CLI sign-ins. Switchboard's configuration stays in
-`~/.switchboard/config.json`, your notes and diagrams beside it in `~/.switchboard/notes/`
-and `~/.switchboard/diagrams/`, and any API keys for ✦ Answer, encrypted with the
+`~/.switchboard/config.json`, your diagrams beside it in
+`~/.switchboard/diagrams/`, and any API keys for ✦ Answer, encrypted with the
 Keychain, in `~/.switchboard/keys.json`. Database connection URIs are also encrypted
 through Electron's OS credential storage, in `~/.switchboard/databases/`; saving a
 connection requires secure encryption support. An alternate `SWITCHBOARD_CONFIG`
-keeps this data beside that config file;
-window state, browser storage (the Google Images panel's cookies included) and publish
+keeps this data beside that config file. Older markdown files in
+`~/.switchboard/notes/` remain on disk but are no longer opened or changed by
+Switchboard. Window state, browser storage (the Google Images panel's cookies included), and publish
 logs live in Electron's Application Support folder. Terminal programs can save their own
 history and credentials outside this checkout. Pasted images are saved in a temporary
 Switchboard folder.

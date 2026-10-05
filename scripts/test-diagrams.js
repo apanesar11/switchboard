@@ -4,7 +4,7 @@
 // scoping that keeps the Diagrams bundle's stylesheet inside its own element
 // (scripts/build-diagrams.js). Plain node, no Electron: neither file requires it.
 //
-// SWITCHBOARD_CONFIG is set BEFORE the module is required, as test-notes.js does, so
+// SWITCHBOARD_CONFIG is set BEFORE the module is required, so
 // every file this writes lands in a temp directory and never in ~/.switchboard.
 
 const assert = require('node:assert/strict');

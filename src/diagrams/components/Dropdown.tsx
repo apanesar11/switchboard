@@ -13,7 +13,7 @@ import * as React from "react"
 
 import { cx } from "@/lib/utils"
 // Switchboard: portalled into the bundle's own root, where its styles reach.
-import { portalContainer } from "@/lib/portal"
+import { usePortalContainer } from "@/lib/portal"
 
 const DropdownMenu = DropdownMenuPrimitives.Root
 DropdownMenu.displayName = "DropdownMenu"
@@ -59,7 +59,7 @@ const DropdownMenuSubMenuContent = React.forwardRef<
   React.ElementRef<typeof DropdownMenuPrimitives.SubContent>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitives.SubContent>
 >(({ className, collisionPadding = 8, ...props }, forwardedRef) => (
-  <DropdownMenuPrimitives.Portal container={portalContainer()}>
+  <DropdownMenuPrimitives.Portal container={usePortalContainer()}>
     <DropdownMenuPrimitives.SubContent
       ref={forwardedRef}
       collisionPadding={collisionPadding}
@@ -96,7 +96,7 @@ const DropdownMenuContent = React.forwardRef<
     },
     forwardedRef,
   ) => (
-    <DropdownMenuPrimitives.Portal container={portalContainer()}>
+    <DropdownMenuPrimitives.Portal container={usePortalContainer()}>
       <DropdownMenuPrimitives.Content
         ref={forwardedRef}
         className={cx(

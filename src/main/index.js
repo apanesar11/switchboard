@@ -35,8 +35,6 @@ const usage = require('./usage.js');
 // The Editor tab's file access (§4.14) — the in-app editor. Not sb:editor, which is
 // "open this folder in Visual Studio Code" and predates it.
 const editor = require('./editor.js');
-// The Notes tab's one markdown file per workspace (§4.15) — outside every repo.
-const notes = require('./notes.js');
 // The Diagrams tab's files (§4.17) — one per diagram, per workspace, outside every repo —
 // and ✦ Answer (§4.18): who answers a box's question, a CLI in the workspace or an API.
 const diagrams = require('./diagrams.js');
@@ -65,25 +63,17 @@ let quitting = false;
 // cleared wherever a failed quit leaves the app running.
 let editorDirty = 0;
 let discardOk = false;
-// The Notes tab writes itself a moment after typing stops, so nothing has to be asked
-// about on the way out — but the last few hundred milliseconds would go with the
-// window. flushNotes() tells the renderer to write now and waits for it to say it has,
-// which a page's beforeunload cannot do (Electron ignores it).
-let noteFlush = null;
-let noteFlushId = 0;
-// How many notes the renderer holds that it could NOT write (sb:notes:dirty). Normally
-// 0 — a note saves itself a moment after typing stops — so the only one that ever gets
-// here is a note whose file will not take it: a read-only folder, a full disk, a
-// conflict waiting on an answer. It joins editorDirty in the one question the app asks
-// on the way out, because the alternative is losing what someone typed in silence.
-let noteDirty = 0;
-// Set once the renderer has been asked to write its notes for a close that is not a
-// quit, so the second pass through 'close' lets the window go.
-let noteClose = false;
+// A diagram's autosave can still be pending when the window closes. Ask the renderer
+// to flush it while the page is live, then wait for its acknowledgment.
+let diagramFlush = null;
+let diagramFlushId = 0;
+// Set once the renderer has been asked to flush for a close that is not a quit, so
+// the second pass through 'close' lets the window go.
+let diagramClose = false;
 // How many diagrams hold edits the renderer has not written yet (sb:diagrams:dirty) — 0
-// or 1, one being open at a time. Unlike noteDirty this is usually just the editor's
-// 700 ms autosave in flight, so it is FLUSHED before anything is asked: a close holds
-// for the renderer to write it (the same flush the notes use), and only a diagram that
+// or 1, one being open at a time. This is usually just the editor's 700 ms autosave in
+// flight, so it is FLUSHED before anything is asked: a close holds for the renderer
+// to write it, and only a diagram that
 // still could not be written by then joins the question.
 let diagramDirty = 0;
 
@@ -255,7 +245,7 @@ function openExternal(url) {
  * says what it would have asked and lets the close go ahead.
  */
 function confirmDiscard() {
-  const n = editorDirty + noteDirty + diagramDirty;
+  const n = editorDirty + diagramDirty;
   if (process.env.SB_SMOKE) {
     console.log(`SMOKE unsaved: ${n}`);
     return true;
@@ -314,24 +304,21 @@ function createWindow() {
       // itself; asking here as well would put the same question up twice.
       return;
     }
-    // Closing WITHOUT quitting — ⌘W, the red button — is the other way the renderer
-    // goes away, and notes are written on a 400 ms debounce: whatever sits inside it
-    // would die with the WebContents. So the close is held for one round trip while
-    // the renderer writes, and the second pass through here lets it go. Before the
-    // question below, so a note that saved fine is not asked about at all.
-    if (!quitting && !noteClose && (noteDirty + diagramDirty) > 0) {
+    // Closing WITHOUT quitting — ⌘W, the red button — can interrupt a diagram's
+    // autosave. Hold the close for one round trip while the renderer writes it.
+    if (!quitting && !diagramClose && diagramDirty > 0) {
       event.preventDefault();
-      noteClose = true;
-      flushNotes().then(() => {
+      diagramClose = true;
+      flushDiagrams().then(() => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
       }, () => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
       });
       return;
     }
-    if (!quitting && !discardOk && (editorDirty + noteDirty + diagramDirty) > 0 && !confirmDiscard()) {
+    if (!quitting && !discardOk && (editorDirty + diagramDirty) > 0 && !confirmDiscard()) {
       event.preventDefault();
-      noteClose = false;               // a cancelled close must flush again next time
+      diagramClose = false;             // a cancelled close must flush again next time
       return;
     }
   });
@@ -340,9 +327,8 @@ function createWindow() {
     // Nobody is left to read an answer still on its way.
     answer.stopAll();
     editorDirty = 0;                      // the renderer, and every buffer in it, is gone
-    noteDirty = 0;
     diagramDirty = 0;
-    noteClose = false;
+    diagramClose = false;
   });
   // Likewise when the page itself goes — a reload from DevTools, a crashed renderer: the
   // buffers are gone and the count main holds would ask about files nobody has any more.
@@ -540,11 +526,9 @@ function smokeTest(win) {
       // launchd, still holding its ports.  Not only the no-pty fallback: in pty mode any
       // dev script that ignores SIGHUP survives the same way.  Outside the try/catch on
       // purpose: teardown must run even when the capture failed.  stopEverything() never
-      // rejects, and app.exit(0) still guarantees a deterministic exit.  flushNotes()
-      // is here for the same reason, and BEFORE the teardown while the window is still
-      // live: a smoke that typed into a Notes tab would otherwise lose whatever sat
-      // inside the 400 ms save debounce, which is most of what a smoke types.
-      await flushNotes();
+      // rejects, and app.exit(0) still guarantees a deterministic exit. Flush the
+      // diagram before teardown while the window is still live.
+      await flushDiagrams();
       await stopEverything();
       app.exit(0);
     }, wait);
@@ -1317,46 +1301,10 @@ handle('sb:code:delete', (id, repoName, filePath) =>
   editor.remove(id, repoName, filePath, { trash: target => shell.trashItem(target) }));
 
 // ---------------------------------------------------------------------------
-// §4.15 Notes
-//
-// One markdown scratch pad per workspace, in <config dir>/notes/. notes.js resolves the
-// id to a file itself — a workspace id or a Grid square's folder path, always hashed —
-// so these handlers pass their arguments through untouched.
-// ---------------------------------------------------------------------------
-
-handle('sb:notes:read', id => notes.read(id));
-handle('sb:notes:write', (id, text, opts) => notes.write(id, text, opts));
-handle('sb:notes:reveal', async id => {
-  const file = notes.fileFor(id);
-  if (!file) return { ok: false, error: `no workspace called ${id}` };
-  // showItemInFolder on a file that is not there opens nothing at all; the folder is
-  // the honest answer for a note that has never been written.
-  try {
-    await fs.promises.stat(file);
-    shell.showItemInFolder(file);
-  } catch (_) {
-    await fs.promises.mkdir(notes.notesDir(), { recursive: true }).catch(() => {});
-    shell.openPath(notes.notesDir());
-  }
-  return { ok: true };
-});
-
-// How many notes the renderer could not write, whenever that number moves. Read by
-// confirmDiscard() alongside editorDirty; the Notes tab's own bar says the same thing
-// in the page, and this is only so the way OUT of the app cannot lose it in silence.
-handle('sb:notes:dirty', count => {
-  const n = Number(count);
-  const next = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
-  if (quitting && next > noteDirty) discardOk = false;
-  noteDirty = next;
-  return { ok: true };
-});
-
-// ---------------------------------------------------------------------------
 // Diagrams (§4.17)
 // The Diagrams tab's flow diagrams, in <config dir>/diagrams/<workspace>/. diagrams.js
-// hashes the workspace id into its folder name, as notes.js does, so these pass their
-// arguments through; the bundle has validated a spec before it asks for a write.
+// hashes the workspace id into its folder name, so these pass their arguments
+// through; the bundle has validated a spec before it asks for a write.
 // ---------------------------------------------------------------------------
 
 handle('sb:diagrams:list', id => diagrams.list(id));
@@ -1390,8 +1338,8 @@ handle('sb:diagrams:clipboardImage', async () => {
 // which the bundle then saves like a dropped file. images.js says what it accepts.
 handle('sb:diagrams:fetchImage', (url, referrer) => images.fetchImage(url, referrer));
 
-// 0 or 1 — see `diagramDirty`. Like sb:notes:dirty, a count that rises during a quit
-// takes back a Discard given for the smaller one.
+// 0 or 1 — see `diagramDirty`. A count that rises during a quit takes back a
+// Discard given for the smaller one.
 handle('sb:diagrams:dirty', count => {
   const n = Number(count);
   const next = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
@@ -1427,31 +1375,28 @@ handle('sb:answer:start', async (id, req) => {
 });
 handle('sb:answer:stop', id => answer.stop(id));
 
-// The renderer answering flushNotes(). Resolving a promise, not returning a value: the
-// quit is waiting on it. The generation matters: a quit can be CANCELLED (an unsaved
-// Editor buffer, a failed applyOnQuit) after this one has timed out, and without the id
-// the late answer to that flush would satisfy the next quit's flush instantly — which
-// would then not wait for any note at all.
-handle('sb:notes:flushed', id => {
-  if (noteFlush && Number(id) === noteFlushId) noteFlush();
+// The renderer answering flushDiagrams(). The generation prevents a late answer to a
+// timed-out flush from satisfying a later close or quit.
+handle('sb:diagrams:flushed', id => {
+  if (diagramFlush && Number(id) === diagramFlushId) diagramFlush();
   return { ok: true };
 });
 
-/** Ask the renderer to write every unsaved note, and wait — but never for long. */
-function flushNotes() {
+/** Ask the renderer to save its diagram, and wait — but never for long. */
+function flushDiagrams() {
   const win = mainWindow;
-  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return Promise.all([notes.settle(), diagrams.settle()]);
-  const id = ++noteFlushId;
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return diagrams.settle();
+  const id = ++diagramFlushId;
   return new Promise(resolve => {
-    const done = () => { noteFlush = null; clearTimeout(timer); resolve(); };
+    const done = () => { diagramFlush = null; clearTimeout(timer); resolve(); };
     const timer = setTimeout(done, 2000);
-    noteFlush = done;
+    diagramFlush = done;
     try {
-      win.webContents.send('sb:evt:notesFlush', id);
+      win.webContents.send('sb:evt:diagramsFlush', id);
     } catch (_) {
       done();
     }
-  }).then(() => Promise.all([notes.settle(), diagrams.settle()]));
+  }).then(() => diagrams.settle());
 }
 
 // ⌘W anywhere the Editor does not want it (File ▸ Close is an item now — buildMenu says
@@ -1726,7 +1671,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', event => {
     // First, before anything is torn down: a Cancel here must leave every dev server,
     // shell and pending publish exactly as it was.
-    if (!quitting && !discardOk && (editorDirty + noteDirty) > 0) {
+    if (!quitting && !discardOk && editorDirty > 0) {
       if (!confirmDiscard()) {
         event.preventDefault();
         return;
@@ -1741,11 +1686,9 @@ if (!app.requestSingleInstanceLock()) {
       // half-prepared update behind. Build failure keeps the installed app intact.
       await publisher.wait();
       await stopEverything();
-      // The notes last, not first: a publish build can take a minute and the window
-      // stays live through it, so a flush at the top would miss whatever was typed
-      // while it ran. The renderer is still there at this point; it is only after
-      // applyOnQuit() that it is not.
-      await flushNotes();
+      // A publish build can take a minute; flush after it completes while the
+      // renderer is still live so its last diagram edit is saved.
+      await flushDiagrams();
       // Again, now: that wait can be a whole publish build, and the window stayed live
       // through it — an edit made meanwhile was never asked about, and neither the second
       // before-quit (`quitting`) nor the window's close would ask. Before applyOnQuit(),
@@ -1753,7 +1696,7 @@ if (!app.requestSingleInstanceLock()) {
       // the dev servers and shells are already stopped, which a cancelled quit can live with.
       // A diagram counts only here, after the flush has written it: before it, its count
       // is the editor's autosave in flight, not something to ask about.
-      if (!discardOk && (editorDirty + noteDirty + diagramDirty) > 0 && !confirmDiscard()) {
+      if (!discardOk && (editorDirty + diagramDirty) > 0 && !confirmDiscard()) {
         quitting = false;
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
         return;

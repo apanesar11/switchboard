@@ -85,13 +85,15 @@ window.SB = window.SB || {};
   // the same 14x14 at 1.4 box, so the two read as one row of quiet controls.
   var eye = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.75 8S4 3.75 8 3.75 14.25 8 14.25 8 12 12.25 8 12.25 1.75 8 1.75 8z"/><circle cx="8" cy="8" r="2.1"/></svg>';
 
-  // A page with a couple of written lines on it: the Grid square's switch to that
-  // workspace's note, and the Editor tree's New file. 14x14 at 1.4, the weight of the
-  // rail's grid and gauge glyphs, so a square's two header buttons read as one pair.
+  // A page with a couple of written lines on it: the Editor tree's New file.
   var note = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.25 2.25h6L12.75 5.75v8h-9.5z"/><path d="M9.25 2.25v3.5h3.5"/><path d="M5.5 8.5h5M5.5 11h3.5"/></svg>';
 
-  // Its twin: a prompt in a rounded box, for switching a square back to the terminal.
+  // A prompt in a rounded box for the Grid's Terminal mode.
   var term = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.9" y="3" width="12.2" height="10" rx="2.2"/><path d="M4.6 6.6L6.9 8.8 4.6 11"/><path d="M8.6 11.2h3"/></svg>';
+
+  // Grid cell modes: a clean plus/minus mark and a small branching diagram.
+  var changes = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 4.5h5M4.5 2v5M9 11.5h5"/></svg>';
+  var diagram = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="6.25" width="3.5" height="3.5" rx=".7"/><rect x="11" y="2" width="3.5" height="3.5" rx=".7"/><rect x="11" y="10.5" width="3.5" height="3.5" rx=".7"/><path d="M5 8h3V3.75h3M8 8v4.25h3"/></svg>';
 
   // A folder with a + on it: the Editor tree's New folder. Same box and weight.
   var folderPlus = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.9 12.6V4.2a1 1 0 0 1 1-1h3.1l1.4 1.7h5.7a1 1 0 0 1 1 1v6.7a1 1 0 0 1-1 1H2.9a1 1 0 0 1-1-1z"/><path d="M8 7.4v4M6 9.4h4"/></svg>';
@@ -128,6 +130,8 @@ window.SB = window.SB || {};
     eye: eye,
     note: note,
     term: term,
+    changes: changes,
+    diagram: diagram,
     folderPlus: folderPlus,
     sliders: sliders,
     lock: lock

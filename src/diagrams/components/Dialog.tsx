@@ -3,7 +3,7 @@ import React from "react"
 import * as DialogPrimitives from "@radix-ui/react-dialog"
 import { cx, focusRing } from "@/lib/utils"
 // Switchboard: portalled into the bundle's own root, where its styles reach.
-import { portalContainer } from "@/lib/portal"
+import { usePortalContainer } from "@/lib/portal"
 
 const Dialog = (
   props: React.ComponentPropsWithoutRef<typeof DialogPrimitives.Root>,
@@ -49,7 +49,7 @@ const DialogContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DialogPrimitives.Content>
 >(({ className, ...props }, forwardedRef) => {
   return (
-    <DialogPortal container={portalContainer()}>
+    <DialogPortal container={usePortalContainer()}>
       <DialogOverlay>
         <DialogPrimitives.Content
           ref={forwardedRef}

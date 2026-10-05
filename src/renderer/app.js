@@ -59,7 +59,7 @@ window.SB = window.SB || {};
   // on the Diagrams tab and the API keys for it.
   var VIEWS = { workspace: 1, files: 1, diff: 1, pr: 1, grid: 1, usage: 1, prs: 1, settings: 1 };
   var TABS = {
-    workspace: ['changes', 'logs', 'terminal', 'editor', 'notes', 'diagrams', 'databases'],
+    workspace: ['changes', 'logs', 'terminal', 'editor', 'diagrams', 'databases'],
     files: ['files', 'all'], pr: ['overview', 'files', 'all'], diff: [], grid: [], usage: [], prs: [], settings: []
   };
   var FREE = { grid: 1, usage: 1, prs: 1, settings: 1 };
@@ -69,7 +69,7 @@ window.SB = window.SB || {};
   // and own everything below it; see buildView(). Anything not listed is
   // views/workspace.js. A new tab needs both lines: one missing from TABS.workspace
   // is rewritten by normalize() to the remembered tab before it is ever looked up.
-  var TAB_VIEWS = { logs: 'logs', terminal: 'terminal', editor: 'editor', notes: 'notes', diagrams: 'diagrams', databases: 'databases' };
+  var TAB_VIEWS = { logs: 'logs', terminal: 'terminal', editor: 'editor', diagrams: 'diagrams', databases: 'databases' };
 
   var PARENT = { diff: 'files', files: 'workspace', pr: 'workspace', workspace: null, grid: null, usage: null, prs: null, settings: null };
 
@@ -827,7 +827,8 @@ window.SB = window.SB || {};
     // turn — is the one thing the rail cannot tell you any other way, so it
     // outranks running, changed and failed until its Terminal is looked at. Still
     // ONE dot: the row does not grow a second one, the bell just takes the slot.
-    if (state.bell[ws.id] && ws.id !== state.route.wsId) return 'bell';
+    if (state.bell[ws.id] && !(state.route.view === 'workspace' &&
+        state.route.tab === 'terminal' && ws.id === state.route.wsId)) return 'bell';
     var run = state.run[ws.id];
     if (run) {
       if (run.status === 'running' || run.status === 'starting') return 'run';
@@ -844,9 +845,8 @@ window.SB = window.SB || {};
   function bell(wsId, on) {
     if (!wsId) return;
     var want = !!on;
-    // The Grid is the other place a terminal is on screen. A bell from a square you
-    // are looking at has already been read, exactly as on that workspace's own
-    // Terminal tab (renderMain clears the same set on every navigation).
+    // The Grid only reads a terminal's bell while that square shows Terminal.
+    // Changes and Diagrams leave its output hidden, so its bell stays unread.
     if (want && gridShows(wsId)) return;
     if (!!state.bell[wsId] === want) return;
     if (want) state.bell[wsId] = true;
@@ -886,8 +886,7 @@ window.SB = window.SB || {};
       return;
     }
 
-    // Above the groups, the way Notes keeps Quick Notes above the folders: the one
-    // screen that is not a workspace. No dot — its squares are on screen when it is.
+    // Above the groups: Grid is shared across workspaces, with no activity dot.
     var onGrid = state.route.view === 'grid';
     nav.appendChild(h('button.it.top' + (onGrid ? '.on' : ''), {
       type: 'button',
@@ -1096,7 +1095,9 @@ window.SB = window.SB || {};
   }
 
   function gridShows(wsId) {
-    return gridCells().indexOf(wsId) !== -1;
+    var grid = SB.views.grid;
+    return gridCells().indexOf(wsId) !== -1 &&
+      !!grid && typeof grid.showsTerminal === 'function' && grid.showsTerminal(wsId);
   }
 
   SB.grid = {
@@ -1530,7 +1531,7 @@ window.SB = window.SB || {};
     if (state.route.view === 'workspace' && state.route.tab === 'terminal' && state.route.wsId) {
       delete state.bell[state.route.wsId];
     }
-    gridCells().forEach(function (id) { if (id) delete state.bell[id]; });
+    gridCells().forEach(function (id) { if (id && gridShows(id)) delete state.bell[id]; });
     // Captured BEFORE buildView(): views/logs.js builds its body by moving the
     // LIVE terminal host — which owns the focused textarea — into the node it is
     // returning, so by the time buildView() comes back focus has already left
@@ -1603,11 +1604,9 @@ window.SB = window.SB || {};
   function retirePanes() {
     var logs = SB.views.logs;
     var term = SB.views.terminal;
-    var notes = SB.views.notes;
     var canLogs = !!logs && typeof logs.dispose === 'function';
     var canTerm = !!term && typeof term.dispose === 'function';
-    var canNotes = !!notes && typeof notes.dispose === 'function';
-    if (!canLogs && !canTerm && !canNotes) return;
+    if (!canLogs && !canTerm) return;
 
     var here = state.route.view === 'workspace' ? state.route.wsId : null;
     var onLogs = state.route.tab === 'logs' ? here : null;
@@ -1638,20 +1637,6 @@ window.SB = window.SB || {};
         var paneAlive = typeof term.hasLivePane === 'function' && term.hasLivePane(id);
         if (!paneAlive) term.dispose(id);
       }
-      // A note pane is cheap to rebuild — one read — but it holds a whole
-      // contenteditable block tree, it costs a read on every window focus while it
-      // exists, and it is one more editor for noteedit's selectionchange listener to
-      // walk on every caret move. The workspace on screen keeps its pane whatever tab
-      // is showing (switching tabs inside one workspace must not throw it away), and so
-      // does every Grid square; dispose() itself declines to drop an unsaved one.
-      if (canNotes && id !== here && onGrid.indexOf(id) === -1) notes.dispose(id);
-    }
-    // A folder square's note lives under an absolute-path id, which is on no rail and
-    // in state.shell only while its shell is alive: ask the view for the rest.
-    if (canNotes && typeof notes.ids === 'function') {
-      notes.ids().forEach(function (id) {
-        if (id !== here && onGrid.indexOf(id) === -1 && !seen[id]) notes.dispose(id);
-      });
     }
   }
 
@@ -1796,16 +1781,6 @@ window.SB = window.SB || {};
     // source file, the Editor's ⌘P / ⇧⌘F fields or the Grid's name field it is only junk,
     // so once the terminal has declined it nothing else gets the chance.
     if (e.action === 'paste' && e.image) return;
-    // The Notes tab and a Grid square showing a note are the app's only contenteditable,
-    // and the document fallback below cannot serve one: fieldIn() matches INPUT and
-    // TEXTAREA alone, so Cut and Paste would do nothing at all, and Undo would run
-    // Chromium's own history over a DOM the note's model owns.
-    var notes = SB.views.notes;
-    if (notes && typeof notes.editAction === 'function') {
-      try {
-        if (notes.editAction(e.action, e.text)) return;
-      } catch (err) { console.error('[switchboard] notes edit:', err); }
-    }
     // A throw is a refusal: the document fallback below still gets its turn, so a
     // broken Editor cannot take ⌘C and ⌘V away from the rest of the app.
     var ed = SB.views.editor;
@@ -1867,10 +1842,7 @@ window.SB = window.SB || {};
     return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? el : null;
   }
 
-  // A note is the app's one contenteditable, and two things have to step around it: the
-  // last line of the Edit-menu chain, whose commands are all the browser's own and know
-  // nothing of the note's block model, and the window shortcuts that would otherwise
-  // read a keystroke meant for the text.
+  // Rich text inputs take their own edit actions and keyboard shortcuts.
   function editableFocused() {
     var el = document.activeElement;
     return !!el && el.isContentEditable === true;
@@ -1922,13 +1894,6 @@ window.SB = window.SB || {};
     var ed = SB.views.editor;
     if (onEditor() && ed && typeof ed.refresh === 'function') {
       try { ed.refresh(wantFetch); } catch (err) { console.error('[switchboard] editor refresh:', err); }
-    }
-    // A note has no watcher either (§4.15). A clean one follows the file — it may have
-    // been edited in another app, or synced — and one with unsaved text is left alone;
-    // its next save finds the conflict and asks.
-    var notes = SB.views.notes;
-    if (notes && typeof notes.refresh === 'function') {
-      try { notes.refresh(); } catch (err) { console.error('[switchboard] notes refresh:', err); }
     }
     // A CLI installed or signed in to while the window was away changes who can answer.
     var dgv = SB.views.diagrams;
@@ -1986,14 +1951,6 @@ window.SB = window.SB || {};
         try { used = ed.onKey(e); } catch (err) { console.error('[switchboard] editor key:', err); }
         if (used) { e.preventDefault(); return; }
       }
-      // ⌘S in a note writes it now, the way ⌘S does in the Editor. Nothing else here
-      // is the note's; its own keys are bound on its root and never reach the window.
-      var nv = SB.views.notes;
-      if (nv && typeof nv.onKey === 'function') {
-        var took = false;
-        try { took = nv.onKey(e); } catch (err) { console.error('[switchboard] notes key:', err); }
-        if (took) { e.preventDefault(); return; }
-      }
       // The Diagrams tab: Esc leaves a full-screen diagram before it means back, and ⌘↵
       // over the canvas is ✦ Answer (the editor's own listener), never Start.
       var dv = SB.views.diagrams;
@@ -2020,12 +1977,9 @@ window.SB = window.SB || {};
         refresh(state.route.wsId, { fetch: e.shiftKey });
         return;
       }
-      // Start and Stop step aside for a NOTE and nothing else. Not typing(): xterm's
-      // helper textarea and Monaco's inputarea are both TEXTAREAs and hold the focus by
-      // default on their tabs, so guarding on that killed ⌘. and ⌘Enter exactly where
-      // §6 R2 says they keep their app-wide meaning. A note is prose — ⌘Enter there is
-      // a keystroke in the text, and no keyboard should be able to start a dev server
-      // by accident — and it is the app's one contenteditable.
+      // Start and Stop leave contenteditable surfaces alone. Not typing(): xterm's
+      // helper textarea and Monaco's inputarea are both TEXTAREAs and hold focus by
+      // default on their tabs, so guarding on that would disable these shortcuts.
       if (e.key === '.') {
         if (editableFocused()) return;
         e.preventDefault();

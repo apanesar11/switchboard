@@ -15,7 +15,6 @@
     "package": "node scripts/package.js",
     "test:config": "node --test scripts/test-config.js scripts/test-workspaces.js",
     "test:editor": "node --test scripts/test-editor.js",
-    "test:notes": "node --test scripts/test-notes.js scripts/test-noteedit.js",
     "test:databases": "node --test scripts/test-databases.js",
     "build:diagrams": "node scripts/build-diagrams.js",
     "check:diagrams": "tsc -p src/diagrams/tsconfig.json",

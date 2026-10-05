@@ -20,7 +20,7 @@
 // `diagrams/images/`, and a spec names one as `sbimg://image/<file>` — the scheme
 // index.js serves from that folder and nowhere else.
 //
-// Rules that hold for the whole file, as in notes.js:
+// Rules that hold for the whole file:
 //   * Nothing throws. Every export resolves to a value; a failure is
 //     `{ ok: false, error: '<human sentence>' }`.
 //   * Writes to one file are serialised, and go through a temp file and a rename, so
@@ -45,7 +45,7 @@ let seq = 0;
 const chains = new Map();          // file → the promise the next write waits on
 
 function rootDir() {
-  // Beside the config, for the reason notes.js gives: SWITCHBOARD_CONFIG has to move
+  // Beside the config: SWITCHBOARD_CONFIG has to move
   // these too, or a test would write into the user's real ~/.switchboard.
   return path.join(path.dirname(config.CONFIG_FILE), 'diagrams');
 }
@@ -57,7 +57,7 @@ function imagesDir() {
 /**
  * The folder's name for a workspace id: readable, and ending in a hash of the WHOLE id
  * so no id can name a path outside the diagrams folder and no two ids share one —
- * notes.js's keyFor(), for the same reasons.
+ * workspace ids are never used directly as folder names.
  */
 function keyFor(id) {
   const want = typeof id === 'string' ? id.trim() : '';

@@ -37,6 +37,10 @@ const EXTRA = `
   font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;
   line-height:1.5;color:#111827;-webkit-font-smoothing:antialiased}
 .sbdg>.sbdg-app{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0}
+/* Radix and toasts live here, outside Grid's clipped cells. Zero-sized so the
+   host itself never covers the app; its positioned children remain interactive. */
+.sbdg.sbdg-portal-root{position:fixed;top:0;left:0;z-index:1500;display:block;
+  width:0;height:0;min-width:0;min-height:0;flex:none;overflow:visible}
 [data-term-theme="dark"] .sbdg{color:#f9fafb;color-scheme:dark}
 `;
 
