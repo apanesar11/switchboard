@@ -30,9 +30,9 @@
 // Switchboard: any number of boxes can be waiting on an answer at once, one
 // answer per box; a drag-select takes every box it touches, not only the ones
 // wholly inside it; and deleting a box from a branch closes the gap it leaves.
-// An arrow's toolbar collapses it: what it points at, and everything beyond,
-// folds away behind a "+N" on the box it leaves, and the tree closes up as if
-// that branch weren't there. Clicking the "+N" brings the branch back.
+// A node's corner control folds all of its outgoing branches as one action;
+// clicking it again brings them back. Individual arrow fold flags in the saved
+// spec remain readable, including partially folded older diagrams.
 // Switchboard: the image tool also offers Google Images (G), in a panel docked
 // on the canvas's right (ImageSearchPanel.tsx). A picture dragged out of it, or
 // right-clicked ▸ Add Image to Diagram, is fetched by main and goes on exactly
@@ -164,6 +164,8 @@ import {
   tidyFlowTree,
   flowBranches,
   foldFlow,
+  flowNodeFoldGroups,
+  toggleFlowNodeFold,
   carryFoldedPositions as carryFolded,
   UNTITLED_FLOW_LABEL,
   type FlowCanvasEdge,
@@ -672,8 +674,8 @@ function attached(node: Node): Node {
   return box.detached ? { ...node, data: { ...box, detached: undefined } } : node
 }
 
-/** What a box's folded arrows hide, for its "+N". */
-type FoldBadge = { boxes: number; arrows: number; side: FlowSide }
+/** What a node's outgoing arrows hide, for its fold control. */
+type FoldBadge = { boxes: number; arrows: number; total: number }
 
 function newEdgeId(): string {
   return `edge-${Math.random().toString(36).slice(2, 10)}`
@@ -728,14 +730,10 @@ type EditorContextValue = {
   interactive: boolean
   /** Switchboard: the boxes whose ✦ Answers are being waited for. */
   answeringIds: ReadonlySet<string>
-  /** Switchboard: the boxes with a branch folded away behind them, and how much. */
+  /** Switchboard: each node's outgoing branches and folded box count. */
   folds: ReadonlyMap<string, FoldBadge>
-  /** Switchboard: folds away what an arrow points at, and everything beyond it. */
-  foldArrow: (edgeId: string) => void
-  /** Switchboard: brings back every branch folded away behind a box. */
-  unfold: (id: string) => void
-  /** Switchboard: how many boxes collapsing an arrow would fold away. */
-  foldPreview: (edgeId: string) => number
+  /** Switchboard: fold or unfold all direct branches of one node. */
+  toggleFold: (id: string) => void
 }
 
 // How the boxes and arrows reach the editor's state. A context rather than
@@ -973,9 +971,14 @@ function EditableFlowNode({ id, data, selected }: NodeProps) {
             : "border-brand/40 opacity-0 group-hover:opacity-100",
         )}
       />
-      {/* Switchboard: a branch folded away behind this box — click to bring it back. */}
-      {editor !== null && editor.folds.has(id) ? (
-        <FoldButton fold={editor.folds.get(id)!} onClick={() => editor.unfold(id)} />
+      {/* One control on the node folds or opens every branch leaving it. */}
+      {editor !== null && interactive && editor.folds.has(id) ? (
+        <FoldButton
+          fold={editor.folds.get(id)!}
+          selected={selected}
+          label={box.label}
+          onClick={() => editor.toggleFold(id)}
+        />
       ) : null}
       {editor !== null && editor.answeringIds.has(id) ? (
         <div
@@ -2759,7 +2762,7 @@ function FlowEditorCanvas({
     })
   }
 
-  // ─── Switchboard: folding a branch away behind its arrow ───
+  // ─── Switchboard: folding a node's outgoing branches ───
 
   // What the collapsed arrows hide, and the canvas React Flow is handed: the
   // same boxes and arrows with the folded ones marked hidden (it draws no arrow
@@ -2784,70 +2787,77 @@ function FlowEditorCanvas({
         : edges,
     [edges, fold],
   )
-  // Each box's "+N": the boxes folded away behind its collapsed arrows. Keyed
-  // by its JSON so the context — and with it every box — only changes when a
-  // badge does, not on every frame of a drag.
+  // One control per node with foldable outgoing arrows. Use the same groups as
+  // the click action, so loop-closing arrows never leave a misleading control.
+  // Counts include old partial folds and shared targets, which can hide 0 boxes.
+  // Keyed by JSON so dragging does not rebuild every node's context.
   const foldsJson = useMemo(() => {
-    const bySource = new Map<string, { boxes: Set<string>; arrows: number; side: FlowSide }>()
-    for (const [index, boxes] of fold.folded) {
-      const edge = edges[index]
-      if (!edge || fold.hidden.has(edge.source)) continue
-      const entry = bySource.get(edge.source) ?? {
-        boxes: new Set<string>(),
-        arrows: 0,
-        side: FLOW_SIDES.find((side) => side === edge.sourceHandle) ?? "right",
-      }
-      for (const id of boxes) entry.boxes.add(id)
-      entry.arrows += 1
-      bySource.set(edge.source, entry)
-    }
-    return JSON.stringify(
-      [...bySource].map(([id, entry]) => [id, { boxes: entry.boxes.size, arrows: entry.arrows, side: entry.side }]),
+    const groups = flowNodeFoldGroups(
+      nodes.map((node) => node.id),
+      edges.map((edge) => ({ source: edge.source, target: edge.target, collapsed: isCollapsed(edge) })),
     )
-  }, [fold, edges])
+    return JSON.stringify(
+      [...groups].flatMap(([id, indexes]) => {
+        if (fold.hidden.has(id)) return []
+        const boxes = new Set<string>()
+        let arrows = 0
+        for (const index of indexes) {
+          if (!isCollapsed(edges[index])) continue
+          arrows += 1
+          for (const box of fold.folded.get(index) ?? []) boxes.add(box)
+        }
+        return [[id, { boxes: boxes.size, arrows, total: indexes.length }]]
+      }),
+    )
+  }, [fold, edges, nodes])
   const folds = useMemo(
     () => new Map(JSON.parse(foldsJson) as [string, FoldBadge][]),
     [foldsJson],
   )
 
-  // Collapse: what the arrow points at, and everything beyond it, folds away
-  // behind the box it leaves, and the tree closes up as if that branch weren't
-  // there. The box is selected, its "+N" beside it. One undo step.
-  const foldArrow = useCallback(
-    (edgeId: string) => {
+  // One node click closes every direct branch, or reopens them all. Fold flags
+  // remain on the edges so older diagrams (including partial folds) load as
+  // they were. The whole action is one undo step and one layout pass.
+  const toggleFold = useCallback(
+    (id: string) => {
       const current = nodesRef.current
-      const edge = edgesRef.current.find((candidate) => candidate.id === edgeId)
-      if (!edge || isCollapsed(edge)) return
-      const collapse = (list: Edge[]) =>
-        list.map((candidate) =>
-          candidate.id === edgeId
-            ? {
-                ...editableEdge(candidate, { ...(candidate.data as FlowEdgeData), collapsed: true }),
-                selected: false,
-              }
-            : candidate,
-        )
-      const next = collapse(edgesRef.current)
-      const { hidden } = foldOf(current, next)
-      if (!hidden.has(edge.target)) {
-        toast({ title: "Nothing to collapse: something else still points at what this arrow does" })
-        return
-      }
+      const before = edgesRef.current
+      const action = toggleFlowNodeFold(
+        current.map((node) => node.id),
+        before.map((edge) => ({ source: edge.source, target: edge.target, collapsed: isCollapsed(edge) })),
+        id,
+      )
+      if (!action.changed) return
+      const toggled = new Set(action.edgeIndexes)
+      const next = before.map((edge, index) => {
+        const folded = toggled.has(index)
+          ? editableEdge(edge, { ...(edge.data as FlowEdgeData), collapsed: action.collapsed || undefined })
+          : edge
+        return toggled.has(index) || action.hiddenAfter.has(edge.source) || action.hiddenAfter.has(edge.target)
+          ? { ...folded, selected: false }
+          : folded
+      })
       record()
-      const shown = showing(current, next, hidden)
-      const moved = tidyFlowTree(shown.boxes, shown.edges, [edge.source], [], { pinImages: true })
+      const shown = showing(current, next, action.hiddenAfter)
+      const moved = tidyFlowTree(
+        shown.boxes,
+        shown.edges,
+        [id],
+        action.newlyShown,
+        { pinImages: true },
+      )
       for (const pending of tabMovesRef.current.values()) {
-        for (const id of moved.keys()) pending.delete(id)
+        for (const box of moved.keys()) pending.delete(box)
       }
       changeEditing(null)
       edgesRef.current = next
-      setEdges((now) => collapse(now))
+      setEdges(next)
       setNodes((now) =>
         carryFolded(
           now,
           now.map((node) => {
             const to = moved.get(node.id)
-            const selected = node.id === edge.source
+            const selected = Boolean(node.selected) && !action.hiddenAfter.has(node.id)
             if (!to && Boolean(node.selected) === selected) return node
             return { ...node, ...(to ? { position: to } : {}), selected }
           }),
@@ -2858,61 +2868,6 @@ function FlowEditorCanvas({
     },
     [record, changeEditing, settleSelection],
   )
-
-  // Expand: every branch folded away behind `id` comes back, and the tree
-  // makes room for it again. One undo step.
-  const unfold = useCallback(
-    (id: string) => {
-      const current = nodesRef.current
-      if (!edgesRef.current.some((edge) => edge.source === id && isCollapsed(edge))) return
-      const open = (list: Edge[]) =>
-        list.map((edge) =>
-          edge.source === id && isCollapsed(edge)
-            ? editableEdge(edge, { ...(edge.data as FlowEdgeData), collapsed: undefined })
-            : edge,
-        )
-      const was = foldOf(current, edgesRef.current).hidden
-      const next = open(edgesRef.current)
-      const { hidden } = foldOf(current, next)
-      record()
-      const shown = showing(current, next, hidden)
-      const moved = tidyFlowTree(
-        shown.boxes,
-        shown.edges,
-        [id],
-        [...was].filter((box) => !hidden.has(box)),
-        { pinImages: true },
-      )
-      for (const pending of tabMovesRef.current.values()) {
-        for (const box of moved.keys()) pending.delete(box)
-      }
-      edgesRef.current = next
-      setEdges((now) => open(now))
-      setNodes((now) =>
-        carryFolded(
-          now,
-          now.map((node) => {
-            const to = moved.get(node.id)
-            return to ? { ...node, position: to } : node
-          }),
-          next,
-        ),
-      )
-    },
-    [record],
-  )
-
-  // How many boxes collapsing an arrow would fold away — 0 when something
-  // else still points at what it does.
-  const foldPreview = useCallback((edgeId: string) => {
-    const list = edgesRef.current
-    const index = list.findIndex((edge) => edge.id === edgeId)
-    if (index < 0) return 0
-    const next = list.map((edge, at) =>
-      at === index ? { ...edge, data: { ...(edge.data as FlowEdgeData), collapsed: true } } : edge,
-    )
-    return foldOf(nodesRef.current, next).folded.get(index)?.size ?? 0
-  }, [])
 
   // The boxes folded away behind any of `going`, which go with them.
   function foldedBehind(going: Node[]): Node[] {
@@ -3277,30 +3232,30 @@ function FlowEditorCanvas({
     function onKeyDown(event: KeyboardEvent) {
       const shortcuts = shortcutsRef.current
       const inField = isTextField(event.target)
+      const inControl =
+        event.target instanceof Element &&
+        Boolean(event.target.closest("button, a, [role=button], [role=radio], [role=menuitem]"))
       const plain = !event.metaKey && !event.ctrlKey && !event.altKey
 
       if (event.key === "Tab" && plain && !event.isComposing) {
         // A box's own text fields hand Tab to the canvas; other fields keep it.
         const boxText =
           event.target instanceof HTMLElement && event.target.dataset.flowText !== undefined
-        if ((inField && !boxText) || !onCanvas(event.target)) return
+        if (inControl || (inField && !boxText) || !onCanvas(event.target)) return
         if (shortcuts.tab(event.shiftKey)) event.preventDefault()
         return
       }
 
       if (event.key === "Enter" && plain && !event.shiftKey && !inField) {
         // A focused button, menu item or option keeps its own Enter.
-        const control =
-          event.target instanceof Element &&
-          event.target.closest("button, a, [role=button], [role=radio], [role=menuitem]")
-        if (!control && onCanvas(event.target) && shortcuts.editSelection()) {
+        if (!inControl && onCanvas(event.target) && shortcuts.editSelection()) {
           event.preventDefault()
         }
         return
       }
 
       if (plain && !event.shiftKey && !inField && event.key.length === 1) {
-        if (onCanvas(event.target) && shortcuts.tool(event.key.toLowerCase())) {
+        if (!inControl && onCanvas(event.target) && shortcuts.tool(event.key.toLowerCase())) {
           event.preventDefault()
         }
         return
@@ -3344,9 +3299,13 @@ function FlowEditorCanvas({
     function onSelectionKey(event: KeyboardEvent) {
       if (event.metaKey || event.ctrlKey || event.altKey) return
       if (isTextField(event.target) || !onCanvas(event.target)) return
+      const inControl =
+        event.target instanceof Element &&
+        Boolean(event.target.closest("button, a, [role=button], [role=radio], [role=menuitem]"))
       const shortcuts = shortcutsRef.current
       const direction = ARROW_DIRECTIONS[event.key]
       if (direction) {
+        if (inControl) return
         const handled = event.shiftKey ? shortcuts.nudge(direction) : shortcuts.go(direction)
         if (handled) event.preventDefault()
       } else if (
@@ -3417,9 +3376,7 @@ function FlowEditorCanvas({
       interactive: tool !== "hand",
       answeringIds,
       folds,
-      foldArrow,
-      unfold,
-      foldPreview,
+      toggleFold,
     }),
     [
       editingId,
@@ -3437,9 +3394,7 @@ function FlowEditorCanvas({
       tool,
       answeringIds,
       folds,
-      foldArrow,
-      unfold,
-      foldPreview,
+      toggleFold,
     ],
   )
 
@@ -5053,7 +5008,6 @@ function EdgeBar({
       <BarButton label="Reverse direction" onClick={() => editor.reverseEdge(id)}>
         <RiArrowLeftRightLine className="size-4" aria-hidden="true" />
       </BarButton>
-      <CollapseButton id={id} editor={editor} />
       <BarButton label="Delete · ⌫" onClick={() => editor.deleteEdge(id)}>
         <RiDeleteBinLine className="size-4" aria-hidden="true" />
       </BarButton>
@@ -5061,59 +5015,50 @@ function EdgeBar({
   )
 }
 
-// Switchboard: the arrow toolbar's Collapse — folds away what the arrow points
-// at and everything beyond it, saying how much. Off when something else still
-// points there, since nothing would fold.
-function CollapseButton({ id, editor }: { id: string; editor: EditorContextValue }) {
-  const count = editor.foldPreview(id)
-  return (
-    <BarButton
-      label={
-        count === 0
-          ? "Nothing to collapse: something else still points at what this arrow does"
-          : `Collapse · hides ${count === 1 ? "1 box" : `${count} boxes`}`
-      }
-      disabled={count === 0}
-      onClick={() => editor.foldArrow(id)}
-      className="disabled:opacity-40"
-    >
-      <RiContractRightLine className="size-4" aria-hidden="true" />
-    </BarButton>
-  )
-}
-
-// Where a box's "+N" sits: just off the side its folded arrows leave by.
-const FOLD_BADGE_PLACE: Record<FlowSide, string> = {
-  right: "left-full top-1/2 ml-2 -translate-y-1/2",
-  left: "right-full top-1/2 mr-2 -translate-y-1/2",
-  bottom: "top-full left-1/2 mt-2 -translate-x-1/2",
-  top: "bottom-full left-1/2 mb-2 -translate-x-1/2",
-}
-
-// Switchboard: the "+N" on a box with a branch folded away behind it — how
-// many boxes, and how many of its arrows, are folded. Clicking it brings them
-// all back.
-function FoldButton({ fold, onClick }: { fold: FoldBadge; onClick: () => void }) {
-  const boxes = fold.boxes === 1 ? "1 box" : `${fold.boxes} boxes`
-  const arrows = fold.arrows === 1 ? "1 arrow" : `${fold.arrows} arrows`
-  const label = `Show ${boxes} folded away behind ${arrows}`
+// The disclosure belongs to the node, clear of its four connection handles.
+// Open nodes show it on hover or selection; folded nodes keep it visible so a
+// saved diagram always offers a way back, even when a shared target hides 0.
+function FoldButton({
+  fold,
+  selected,
+  label: nodeLabel,
+  onClick,
+}: {
+  fold: FoldBadge
+  selected: boolean
+  label: string
+  onClick: () => void
+}) {
+  const closed = fold.arrows === fold.total
+  const name = nodeLabel.trim().slice(0, 48) || "this node"
+  const label = closed
+    ? `Expand all ${fold.total} outgoing ${fold.total === 1 ? "branch" : "branches"} from ${name}`
+    : `Collapse all ${fold.total} outgoing ${fold.total === 1 ? "branch" : "branches"} from ${name}`
   return (
     <button
       type="button"
+      aria-expanded={!closed}
       aria-label={label}
       title={label}
+      onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => {
         event.stopPropagation()
         onClick()
       }}
       onDoubleClick={(event) => event.stopPropagation()}
       className={cx(
-        "nodrag nopan absolute z-10 flex h-5 min-w-5 items-center justify-center whitespace-nowrap rounded-full bg-gray-900 px-1.5 text-[11px] font-semibold tabular-nums text-white shadow-sm ring-2 ring-white hover:bg-brand dark:bg-gray-100 dark:text-gray-900 dark:ring-gray-950",
-        FOLD_BADGE_PLACE[fold.side],
+        "nodrag nopan absolute -right-2.5 -top-2.5 z-10 flex h-6 min-w-6 items-center justify-center whitespace-nowrap rounded-full bg-gray-900 px-1.5 text-[11px] font-semibold tabular-nums text-white shadow-sm ring-2 ring-white transition-opacity hover:bg-brand dark:bg-gray-100 dark:text-gray-900 dark:ring-gray-950",
+        !closed && fold.arrows === 0 && !selected && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
         focusRing,
       )}
     >
-      +{fold.boxes}
+      {closed && fold.boxes > 0 ? (
+        `+${fold.boxes}`
+      ) : closed ? (
+        <RiArrowDownSLine className="size-4" aria-hidden="true" />
+      ) : (
+        <RiContractRightLine className="size-3.5" aria-hidden="true" />
+      )}
     </button>
   )
 }

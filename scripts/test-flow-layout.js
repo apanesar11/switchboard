@@ -32,6 +32,9 @@ const {
   flowBranches,
   flowSpecFromCanvas,
   foldFlow,
+  flowNodeFoldEdges,
+  flowNodeFoldGroups,
+  toggleFlowNodeFold,
   carryFoldedPositions,
   FLOW_TAB_GAP_X,
   FLOW_TAB_GAP_Y,
@@ -208,6 +211,104 @@ test('folds nest: unfolding the outer one leaves the inner one folded', () => {
   assert.deepEqual(sorted(foldFlow(ids, edges).hidden), ['a', 'b', 'c']);
   edges[0].collapsed = false;
   assert.deepEqual(sorted(foldFlow(ids, edges).hidden), ['b', 'c']);
+});
+
+test('one node click folds all ten direct children and the next reopens them', () => {
+  const children = Array.from({ length: 10 }, (_, index) => `child-${index}`);
+  const ids = ['root', ...children, 'grandchild', 'elsewhere'];
+  const edges = [
+    ...children.map(child => arrow('root', child)),
+    arrow('child-0', 'grandchild'),
+    arrow('elsewhere', 'elsewhere'),
+  ];
+  const closed = toggleFlowNodeFold(ids, edges, 'root');
+  assert.equal(closed.changed, true);
+  assert.equal(closed.collapsed, true);
+  assert.deepEqual(closed.edgeIndexes, Array.from({ length: 10 }, (_, index) => index));
+  assert.deepEqual(sorted(closed.newlyHidden), [...children, 'grandchild'].sort());
+  assert.deepEqual(sorted(closed.hiddenAfter), [...children, 'grandchild'].sort());
+  assert.equal(closed.edges.slice(0, 10).every(edge => edge.collapsed), true);
+  assert.equal(closed.edges[10], edges[10], 'nested fold state is untouched');
+  assert.equal(closed.edges[11], edges[11], 'unrelated arrows are untouched');
+  assert.equal(edges[0].collapsed, undefined, 'the previous snapshot is not mutated');
+
+  const opened = toggleFlowNodeFold(ids, closed.edges, 'root');
+  assert.equal(opened.collapsed, false);
+  assert.deepEqual(sorted(opened.newlyShown), [...children, 'grandchild'].sort());
+  assert.equal(opened.hiddenAfter.size, 0);
+  assert.equal(opened.edges.slice(0, 10).every(edge => edge.collapsed === undefined), true);
+});
+
+test('a partially folded older node closes all open siblings before it reopens them', () => {
+  const ids = ['root', 'a', 'b', 'c', 'leaf'];
+  const edges = [
+    arrow('root', 'a', true),
+    arrow('root', 'b'),
+    arrow('root', 'c', true),
+    arrow('b', 'leaf', true),
+  ];
+  assert.deepEqual(flowNodeFoldEdges(ids, edges, 'root'), [0, 1, 2]);
+  const closed = toggleFlowNodeFold(ids, edges, 'root');
+  assert.equal(closed.collapsed, true);
+  assert.deepEqual(sorted(closed.hiddenBefore), ['a', 'c', 'leaf']);
+  assert.deepEqual(sorted(closed.newlyHidden), ['b']);
+  assert.equal(closed.edges[3].collapsed, true, 'a nested fold is preserved');
+
+  const opened = toggleFlowNodeFold(ids, closed.edges, 'root');
+  assert.equal(opened.collapsed, false);
+  assert.deepEqual(sorted(opened.newlyShown), ['a', 'b', 'c']);
+  assert.deepEqual(sorted(opened.hiddenAfter), ['leaf'], 'the nested fold stays closed');
+});
+
+test('a shared target stays visible through another parent when one node folds', () => {
+  const ids = ['root', 'left', 'right', 'shared', 'left-only'];
+  const edges = [
+    arrow('root', 'left'), arrow('root', 'right'),
+    arrow('left', 'shared'), arrow('left', 'left-only'),
+    arrow('right', 'shared'),
+  ];
+  const left = toggleFlowNodeFold(ids, edges, 'left');
+  assert.deepEqual(left.edgeIndexes, [2, 3]);
+  assert.deepEqual(sorted(left.newlyHidden), ['left-only']);
+  assert.equal(left.hiddenAfter.has('shared'), false);
+  const right = toggleFlowNodeFold(ids, left.edges, 'right');
+  assert.deepEqual(sorted(right.newlyHidden), ['shared']);
+  assert.deepEqual(sorted(right.hiddenAfter), ['left-only', 'shared']);
+});
+
+test('new node folds leave cycle-closing arrows open; old collapsed ones can reopen', () => {
+  const ids = ['root', 'child', 'leaf'];
+  const edges = [arrow('root', 'child'), arrow('child', 'leaf'), arrow('child', 'root')];
+  assert.deepEqual([...flowNodeFoldGroups(ids, edges)], [['root', [0]], ['child', [1]]]);
+  assert.deepEqual(flowNodeFoldEdges(ids, edges, 'child'), [1]);
+  const closed = toggleFlowNodeFold(ids, edges, 'child');
+  assert.deepEqual(sorted(closed.newlyHidden), ['leaf']);
+  assert.equal(closed.edges[2].collapsed, undefined, 'the return arrow stays visible');
+
+  const legacy = [edges[0], edges[1], { ...edges[2], collapsed: true }];
+  assert.deepEqual(flowNodeFoldEdges(ids, legacy, 'child'), [1, 2]);
+  const closedLegacy = toggleFlowNodeFold(ids, legacy, 'child');
+  assert.equal(closedLegacy.edges[2].collapsed, true, 'the first click finishes closing the group');
+  const openedLegacy = toggleFlowNodeFold(ids, closedLegacy.edges, 'child');
+  assert.equal(openedLegacy.edges[2].collapsed, undefined, 'the next click reopens the old back arrow');
+  assert.equal(openedLegacy.hiddenAfter.size, 0);
+
+  const collapsedBackOnly = [edges[0], { ...edges[2], collapsed: true }];
+  assert.deepEqual([...flowNodeFoldGroups(ids, collapsedBackOnly)], [['root', [0]], ['child', [1]]]);
+  assert.deepEqual(flowNodeFoldEdges(ids, collapsedBackOnly, 'child'), [1]);
+  const reopenedBackOnly = toggleFlowNodeFold(ids, collapsedBackOnly, 'child');
+  assert.equal(reopenedBackOnly.changed, true);
+  assert.equal(reopenedBackOnly.collapsed, false);
+  assert.equal(reopenedBackOnly.edges[1].collapsed, undefined);
+  assert.equal(reopenedBackOnly.newlyShown.size, 0, 'reopening a legacy back arrow changes no box visibility');
+
+  const openBackOnly = [edges[0], edges[2]];
+  assert.deepEqual([...flowNodeFoldGroups(ids, openBackOnly)], [['root', [0]]],
+    'a new fold affordance is absent when only an open loop arrow leaves the node');
+  assert.equal(toggleFlowNodeFold(ids, openBackOnly, 'child').changed, false);
+
+  const onlyBack = toggleFlowNodeFold(ids, [edges[0], edges[1], { ...edges[2], collapsed: true }], 'missing');
+  assert.equal(onlyBack.changed, false, 'a node without outgoing arrows has no fold action');
 });
 
 test('folding a branch closes the tree up as if it had no children there; unfolding opens it again', () => {

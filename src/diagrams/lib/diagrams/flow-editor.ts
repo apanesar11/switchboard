@@ -794,9 +794,9 @@ export function tidyAfterMove(
   return movesFrom(boxes, after)
 }
 
-// Switchboard: folding a branch away behind its arrow lives with the layout
-// (layout.ts foldFlow), which the read-only canvas draws through too.
-export { foldFlow, type FlowFoldEdge }
+// Switchboard: nodes fold their outgoing branches by setting the existing edge
+// flags; layout.ts foldFlow also serves the read-only canvas.
+export { foldFlow, flowNodeFoldEdges, flowNodeFoldGroups, toggleFlowNodeFold, type FlowFoldEdge } from "./layout"
 
 /**
  * Carry an already folded branch by the same distance as its visible source.

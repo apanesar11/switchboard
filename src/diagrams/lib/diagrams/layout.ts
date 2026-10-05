@@ -700,28 +700,8 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
 /** An arrow as folding sees it: where it goes, and whether it is collapsed. */
 export type FlowFoldEdge = { source: string; target: string; collapsed?: boolean }
 
-/**
- * What the collapsed arrows fold away: the box each one points at and
- * everything beyond it — every box that can no longer be reached from the
- * diagram's starting boxes without crossing a collapsed arrow. A box something
- * still showing points at stays, and so does everything upstream of the fold.
- *
- * "Starting boxes" are the ones nothing points at, once the arrows that close a
- * loop are set aside (found as the layout finds them, by a walk in the boxes'
- * order) — so an arrow from deep in a branch back to an earlier box never drags
- * that box, or what leads to the fold, in with the branch.
- *
- * `folded` is, for each collapsed arrow (by its index in `edges`), the boxes
- * it hides; `hidden` is all of them.
- */
-export function foldFlow(
-  ids: Iterable<string>,
-  edges: FlowFoldEdge[],
-): { hidden: Set<string>; folded: Map<number, Set<string>> } {
-  const hidden = new Set<string>()
-  const folded = new Map<number, Set<string>>()
-  if (!edges.some((edge) => edge.collapsed)) return { hidden, folded }
-
+/** The same loop-closing arrows and outgoing order used by `foldFlow`. */
+function flowFoldGraph(ids: Iterable<string>, edges: ReadonlyArray<FlowFoldEdge>) {
   const order = [...ids]
   const known = new Set(order)
   const out = new Map<string, number[]>()
@@ -732,7 +712,8 @@ export function foldFlow(
     else out.set(edge.source, [index])
   })
 
-  // The arrows that close a loop: one landing on a box still open on the walk.
+  // An arrow landing on a box still open on the walk closes a loop. Folding
+  // that arrow cannot hide the box, so a new node-level fold leaves it alone.
   const back = new Set<number>()
   const state = new Map<string, number>() // 1 open, 2 done
   for (const start of order) {
@@ -756,6 +737,114 @@ export function foldFlow(
       }
     }
   }
+  return { order, out, back }
+}
+
+/**
+ * Every node's outgoing foldable arrows, by index in `edges`, in one graph walk.
+ * A new fold skips arrows that close a loop, because their target stays visible.
+ * Already-collapsed loop arrows from older diagrams remain in the group so a
+ * node click can reopen them.
+ */
+export function flowNodeFoldGroups(
+  ids: Iterable<string>,
+  edges: ReadonlyArray<FlowFoldEdge>,
+): Map<string, number[]> {
+  const { out, back } = flowFoldGraph(ids, edges)
+  const groups = new Map<string, number[]>()
+  for (const [source, outgoing] of out) {
+    const foldable = outgoing.filter((index) => !back.has(index) || edges[index].collapsed === true)
+    if (foldable.length > 0) groups.set(source, foldable)
+  }
+  return groups
+}
+
+/** One node's outgoing foldable arrows, by index in `edges`. */
+export function flowNodeFoldEdges(
+  ids: Iterable<string>,
+  edges: ReadonlyArray<FlowFoldEdge>,
+  source: string,
+): number[] {
+  return flowNodeFoldGroups(ids, edges).get(source) ?? []
+}
+
+/**
+ * Close every outgoing branch if any is open; otherwise reopen them all. The
+ * fold still lives on its edges in saved diagrams, so partially folded older
+ * drawings and nested folds need no migration. Reachability before and after
+ * tells the editor which boxes actually disappeared or came back; a shared
+ * target may stay visible through another open route.
+ */
+export function toggleFlowNodeFold(
+  ids: Iterable<string>,
+  edges: FlowFoldEdge[],
+  source: string,
+): {
+  edges: FlowFoldEdge[]
+  changed: boolean
+  collapsed: boolean
+  edgeIndexes: number[]
+  hiddenBefore: Set<string>
+  hiddenAfter: Set<string>
+  newlyHidden: Set<string>
+  newlyShown: Set<string>
+} {
+  const order = [...ids]
+  const edgeIndexes = flowNodeFoldEdges(order, edges, source)
+  const hiddenBefore = foldFlow(order, edges).hidden
+  const collapsed = edgeIndexes.length > 0 && edgeIndexes.some((index) => edges[index].collapsed !== true)
+  if (edgeIndexes.length === 0) {
+    return {
+      edges,
+      changed: false,
+      collapsed: false,
+      edgeIndexes,
+      hiddenBefore,
+      hiddenAfter: hiddenBefore,
+      newlyHidden: new Set(),
+      newlyShown: new Set(),
+    }
+  }
+  const selected = new Set(edgeIndexes)
+  const next = edges.map((edge, index) =>
+    selected.has(index) ? { ...edge, collapsed: collapsed || undefined } : edge,
+  )
+  const hiddenAfter = foldFlow(order, next).hidden
+  return {
+    edges: next,
+    changed: true,
+    collapsed,
+    edgeIndexes,
+    hiddenBefore,
+    hiddenAfter,
+    newlyHidden: new Set([...hiddenAfter].filter((id) => !hiddenBefore.has(id))),
+    newlyShown: new Set([...hiddenBefore].filter((id) => !hiddenAfter.has(id))),
+  }
+}
+
+/**
+ * What the collapsed arrows fold away: the box each one points at and
+ * everything beyond it — every box that can no longer be reached from the
+ * diagram's starting boxes without crossing a collapsed arrow. A box something
+ * still showing points at stays, and so does everything upstream of the fold.
+ *
+ * "Starting boxes" are the ones nothing points at, once the arrows that close a
+ * loop are set aside (found as the layout finds them, by a walk in the boxes'
+ * order) — so an arrow from deep in a branch back to an earlier box never drags
+ * that box, or what leads to the fold, in with the branch.
+ *
+ * `folded` is, for each collapsed arrow (by its index in `edges`), the boxes
+ * it hides; `hidden` is all of them.
+ */
+export function foldFlow(
+  ids: Iterable<string>,
+  edges: FlowFoldEdge[],
+): { hidden: Set<string>; folded: Map<number, Set<string>> } {
+  const hidden = new Set<string>()
+  const folded = new Map<number, Set<string>>()
+  if (!edges.some((edge) => edge.collapsed)) return { hidden, folded }
+
+  const { order, out, back } = flowFoldGraph(ids, edges)
 
   // Showing: the starting boxes, and whatever they reach along arrows that
   // neither close a loop nor are collapsed.
