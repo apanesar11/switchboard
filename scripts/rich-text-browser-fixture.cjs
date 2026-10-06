@@ -117,10 +117,66 @@ app.whenReady().then(async () => {
     assert.equal((await node('text')).label, '<img src=x onerror=alert(1)>');
     assert.equal(await run('document.querySelector("[data-flow-text] img")'), null);
     await run('document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))'); await tick();
+    await run(`window.mount({ kind: 'flow', nodes: [
+      { id: 'check-box', label: 'Prepare release\\nWrite notes\\nVerify build', align: 'left', position: { x: 20, y: 100 } },
+      { id: 'check-text', label: 'Testing\\nTesting', shape: 'text', textSize: 'large', align: 'left', position: { x: 300, y: 100 } }
+    ], edges: [] })`); await tick();
+    await edit('check-box');
+    assert.equal(await run('String(getSelection())'), 'Prepare release\nWrite notes\nVerify build');
+    await click('Checkbox list');
+    let tasks = await node('check-box');
+    assert.deepEqual(tasks.labelRichText.map(paragraph => paragraph.checked), [false, false, false]);
+    assert.equal(await run('document.querySelector(\'button[aria-label="Checkbox list"]\').getAttribute("aria-pressed")'), 'true');
+    await run('window.selectFlowText(0, 7)'); await click('Bold · ⌘B');
+    assert.equal((await node('check-box')).labelRichText[0].runs[0].bold, true);
+    await run('document.querySelector(\'[data-flow-checkbox="0"]\').click()'); await tick();
+    assert.equal((await node('check-box')).labelRichText[0].checked, true);
+    await run('window.editText("undo")'); await tick();
+    assert.equal((await node('check-box')).labelRichText[0].checked, false);
+    await run('window.editText("redo")'); await tick();
+    assert.equal((await node('check-box')).labelRichText[0].checked, true);
+    await run('document.querySelector(\'[data-flow-checkbox="2"]\').click(); window.selectFlowText(40, 40)'); await tick();
+    await enter();
+    assert.equal(await run('window.readRichText(document.querySelector("[data-flow-text]")).at(-1).checked'), false);
+    await run('document.execCommand("insertText", false, "Next task")'); await tick();
+    tasks = await node('check-box');
+    assert.equal(tasks.label, 'Prepare release\nWrite notes\nVerify build\nNext task');
+    assert.deepEqual(tasks.labelRichText.map(paragraph => paragraph.checked), [true, false, true, false]);
+    await enter(true); await run('document.execCommand("insertText", false, "Continuation")'); await tick();
+    assert.equal((await node('check-box')).labelRichText.length, 4);
+    await enter(); await enter();
+    await run('document.execCommand("insertText", false, "After checklist")'); await tick();
+    tasks = await node('check-box');
+    assert.equal(tasks.labelRichText.at(-1).checked, undefined, 'Enter on an empty item exits the checklist');
+    await run('window.selectFlowText(16, 27)'); await click('Bullet list · ⌘⇧8');
+    assert.equal((await node('check-box')).labelRichText[1].bullet, true);
+    await click('Checkbox list');
+    assert.equal((await node('check-box')).labelRichText[1].checked, false);
+    await click('Done · Enter');
+    await run('document.querySelector(\'[data-id=check-box] [data-flow-checkbox="1"]\').click()'); await tick();
+    assert.equal((await node('check-box')).labelRichText[1].checked, true, 'checkboxes can toggle without entering text editing');
+    assert.equal(await run('document.querySelector("[data-flow-text]")'), null);
+    await run('window.editor.current.undo()'); await tick();
+    assert.equal((await node('check-box')).labelRichText[1].checked, false);
+    await run('window.editor.current.redo()'); await tick();
+    assert.equal((await node('check-box')).labelRichText[1].checked, true);
+    await run('window.editor.current.flush(); window.snapshot = JSON.parse(JSON.stringify(window.editor.current.currentSpec())); window.mount(window.snapshot)'); await tick();
+    assert.deepEqual((await node('check-box')).labelRichText, (await run('window.snapshot.nodes[0].labelRichText')));
+    await edit('check-text'); await click('Checkbox list');
+    assert.deepEqual((await node('check-text')).labelRichText.map(paragraph => paragraph.checked), [false, false]);
+    await run('document.querySelector(\'[data-flow-text] [data-flow-checkbox="1"]\').focus(); document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }))'); await tick();
+    assert.equal((await node('check-text')).labelRichText[1].checked, true, 'keyboard Space toggles a checkbox');
+    assert.equal(await run('document.activeElement.getAttribute("role")'), 'checkbox', 'keyboard focus stays on the toggled checkbox');
+    await run('document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }))'); await tick();
+    assert.equal((await node('check-text')).labelRichText[1].checked, false);
+    await click('Done · Enter');
+    await run('document.querySelector(\'[data-id=check-text] [data-flow-checkbox="1"]\').focus(); document.activeElement.click()'); await tick();
+    assert.equal((await node('check-text')).labelRichText[1].checked, true);
+    assert.equal(await run('document.activeElement.getAttribute("role")'), 'checkbox', 'canvas checkbox retains keyboard focus after re-render');
     if (process.env.SWITCHBOARD_RICH_TEXT_SCREENSHOT) {
       require('node:fs').writeFileSync(process.env.SWITCHBOARD_RICH_TEXT_SCREENSHOT, (await window.webContents.capturePage()).toPNG());
     }
-    console.log('PASS — Chromium: partial bold/italic, bullets and soft breaks, undo/redo, save/reload, legacy formatting, and native Edit menu actions');
+    console.log('PASS — Chromium: rich text, checkbox lists, click/keyboard toggles, list continuation, undo/redo, save/reload, and native Edit menu actions');
     app.exit(0);
   } catch (error) {
     console.error(error);

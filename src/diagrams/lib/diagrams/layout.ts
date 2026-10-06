@@ -30,7 +30,7 @@ import {
   type FlowTone,
   type FlowRichText,
 } from "./types"
-import { plainTextParagraphs, richTextVisualLines } from "./rich-text"
+import { FLOW_BULLET_INDENT, FLOW_CHECKLIST_INDENT, plainTextParagraphs, richTextVisualLines } from "./rich-text"
 
 // ─────────────────────────────────────────────────────────────────────
 // Geometry constants. All in canvas pixels at zoom 1. Exported so the tests
@@ -363,7 +363,7 @@ function richTextLines(text: string, rich: FlowRichText | undefined, width: numb
   if (!rich) return wrapText(text, width, fontSize, weight).map((text) => ({ text, width: measureText(text, fontSize, weight) }))
   return richTextVisualLines(rich.length ? rich : plainTextParagraphs(text)).flatMap((paragraph) => {
     const text = paragraph.runs.map((run) => run.text).join("")
-    const indent = paragraph.bullet ? fontSize * 1.35 : 0
+    const indent = fontSize * (paragraph.checked !== undefined ? FLOW_CHECKLIST_INDENT : paragraph.bullet ? FLOW_BULLET_INDENT : 0)
     const available = Math.max(1, width - indent)
     const measure = (start: number, end: number) => {
       let offset = 0, measured = 0

@@ -10,7 +10,7 @@
 // routes a diagram's edges between them. (Diagrams are arranged by hand in
 // FlowEditor.tsx, which reuses FlowBox from here.)
 
-import { useState } from "react"
+import { useLayoutEffect, useRef, useState } from "react"
 import { Handle, Position, type NodeProps } from "@xyflow/react"
 import { RiImageLine, RiSparkling2Fill } from "@remixicon/react"
 import { cx } from "@/lib/utils"
@@ -30,6 +30,7 @@ import {
   type FlowRichText,
 } from "@/lib/diagrams/types"
 import { plainTextParagraphs, richTextHtml } from "@/lib/diagrams/rich-text"
+import { flowCheckbox } from "@/lib/diagrams/rich-text-dom"
 
 // Every box is sized from its text; in the browser, measure that text for
 // real rather than estimate it, so a box is as tall as its text really wraps.
@@ -177,16 +178,39 @@ export const FLOW_SIDE_POSITIONS: Record<FlowSide, Position> = {
  */
 export const FLOW_TEXT_WRAP = "whitespace-pre-line [overflow-wrap:anywhere]"
 
-export function FlowLabelText({ text, richText, className, style }: {
+export function FlowLabelText({ text, richText, className, style, onToggleCheck }: {
   text: string
   richText?: FlowRichText
   className?: string
   style?: React.CSSProperties
+  onToggleCheck?: (paragraph: number) => void
 }) {
+  const container = useRef<HTMLDivElement>(null)
+  const focusCheck = useRef<number | null>(null)
+  useLayoutEffect(() => {
+    if (focusCheck.current === null) return
+    container.current?.querySelector<HTMLElement>(`[data-flow-checkbox="${focusCheck.current}"]`)?.focus()
+    focusCheck.current = null
+  }, [richText])
   return <div
+    ref={container}
     className={cx("flow-rich-text w-full", FLOW_TEXT_WRAP, className)}
     style={style}
-    dangerouslySetInnerHTML={{ __html: richTextHtml(richText ?? plainTextParagraphs(text)) }}
+    onPointerDown={(event) => {
+      if (flowCheckbox(event.target)) { event.preventDefault(); event.stopPropagation() }
+    }}
+    onDoubleClick={(event) => {
+      if (flowCheckbox(event.target)) event.stopPropagation()
+    }}
+    onClick={(event) => {
+      const checkbox = flowCheckbox(event.target)
+      if (!checkbox || !onToggleCheck) return
+      event.stopPropagation()
+      const index = Number(checkbox.dataset.flowCheckbox)
+      if (document.activeElement === checkbox) focusCheck.current = index
+      onToggleCheck(index)
+    }}
+    dangerouslySetInnerHTML={{ __html: richTextHtml(richText ?? plainTextParagraphs(text), Boolean(onToggleCheck)) }}
   />
 }
 
@@ -197,12 +221,14 @@ export function FlowLabelText({ text, richText, className, style }: {
  */
 export function FlowBox({
   labelOverride,
+  onToggleCheck,
   className,
   children,
   ...box
 }: FlowBoxNodeData & {
   /** Drawn in place of the label and detail — the editor's text fields. */
   labelOverride?: React.ReactNode
+  onToggleCheck?: (field: "label" | "detail", paragraph: number) => void
   className?: string
   children?: React.ReactNode
 }) {
@@ -242,9 +268,9 @@ export function FlowBox({
       >
         {labelOverride ?? (
           <>
-            <FlowLabelText text={label} richText={box.labelRichText} className={flowLabelClass(box)} style={flowLabelStyle(box)} />
+            <FlowLabelText text={label} richText={box.labelRichText} className={flowLabelClass(box)} style={flowLabelStyle(box)} onToggleCheck={onToggleCheck ? (index) => onToggleCheck("label", index) : undefined} />
             {detail ? (
-              <FlowLabelText text={detail} richText={box.detailRichText} className="mt-0.5 text-[11px] leading-4 opacity-60" />
+              <FlowLabelText text={detail} richText={box.detailRichText} className="mt-0.5 text-[11px] leading-4 opacity-60" onToggleCheck={onToggleCheck ? (index) => onToggleCheck("detail", index) : undefined} />
             ) : null}
           </>
         )}

@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef } from "react"
 import { DIAGRAM_TEXT_MAX_LENGTH, type FlowRichText } from "@/lib/diagrams/types"
-import { plainTextParagraphs, richTextHtml, richTextPlainText, truncateRichText } from "@/lib/diagrams/rich-text"
-import { FLOW_FORMAT_EVENT, FLOW_PASTE_EVENT, readRichText, richTextSelectionLength, selectRichText, type FlowTextCommand } from "@/lib/diagrams/rich-text-dom"
+import { checklistToBullets, continueChecklist, plainTextParagraphs, richTextHtml, richTextPlainText, richTextSelectedParagraphs, toggleChecklist, truncateRichText } from "@/lib/diagrams/rich-text"
+import { FLOW_FORMAT_EVENT, FLOW_PASTE_EVENT, flowCheckbox, flowTextSelection, readRichText, replaceFlowRichText, restoreFlowTextSelection, richTextSelectionLength, selectRichText, toggleFlowCheckbox, type FlowTextCommand } from "@/lib/diagrams/rich-text-dom"
 
 /** Let Chromium own the editing DOM and its undo history; React owns saved data. */
 export function RichTextField({
@@ -55,6 +55,26 @@ export function RichTextField({
     commit()
   }
 
+  function format(command: FlowTextCommand) {
+    const element = elementRef.current!
+    const rich = readRichText(element)
+    const selection = flowTextSelection(element)
+    const selected = richTextSelectedParagraphs(rich, selection)
+    if (command === "checklist") {
+      replaceFlowRichText(element, toggleChecklist(rich, selection), selection)
+    } else if (command === "insertUnorderedList" && selected.some((index) => rich[index].checked !== undefined)) {
+      replaceFlowRichText(element, checklistToBullets(rich, selection), selection)
+    } else {
+      if (document.activeElement !== element) {
+        element.focus()
+        // A focused checkbox selects its own item for inline formatting.
+        restoreFlowTextSelection(element, selection)
+      }
+      document.execCommand(command)
+    }
+    commit(false)
+  }
+
   // Only replace DOM for an external change (for example diagram undo). Typing
   // and toolbar commands keep the browser's selection and native undo stack.
   useLayoutEffect(() => {
@@ -69,19 +89,15 @@ export function RichTextField({
 
   useLayoutEffect(() => {
     const element = elementRef.current!
-    const format = (event: Event) => {
-      element.focus()
-      // Chromium's editing commands preserve selection, continue list items,
-      // and participate in native Edit > Undo, just like ordinary typing.
-      document.execCommand((event as CustomEvent<FlowTextCommand>).detail)
-      commit(false)
-    }
+    const formatText = (event: Event) => format((event as CustomEvent<FlowTextCommand>).detail)
     const pasteText = (event: Event) => paste((event as CustomEvent<string>).detail)
-    element.addEventListener(FLOW_FORMAT_EVENT, format)
+    element.addEventListener(FLOW_FORMAT_EVENT, formatText)
     element.addEventListener(FLOW_PASTE_EVENT, pasteText)
     if (autoFocus || focusOnMount?.()) element.focus()
+    // Select after focus has placed the caret, once per editing session.
+    if (autoFocus && selectOnFocus?.()) selectRichText(element)
     return () => {
-      element.removeEventListener(FLOW_FORMAT_EVENT, format)
+      element.removeEventListener(FLOW_FORMAT_EVENT, formatText)
       element.removeEventListener(FLOW_PASTE_EVENT, pasteText)
     }
   }, [])
@@ -99,10 +115,24 @@ export function RichTextField({
       data-empty={!text ? "true" : undefined}
       className={`flow-rich-text ${className ?? ""}`}
       style={style}
-      onFocus={(event) => {
-        if (selectOnFocus?.()) selectRichText(event.currentTarget)
-      }}
       onInput={() => commit()}
+      onPointerDown={(event) => {
+        if (flowCheckbox(event.target)) { event.preventDefault(); event.stopPropagation() }
+      }}
+      onMouseDown={(event) => {
+        if (flowCheckbox(event.target)) event.preventDefault()
+      }}
+      onClick={(event) => {
+        const checkbox = flowCheckbox(event.target)
+        if (!checkbox) return
+        event.preventDefault()
+        event.stopPropagation()
+        toggleFlowCheckbox(event.currentTarget, checkbox)
+        commit(false)
+      }}
+      onDoubleClick={(event) => {
+        if (flowCheckbox(event.target)) event.stopPropagation()
+      }}
       onBeforeInput={(event) => {
         const input = event.nativeEvent as InputEvent
         if (input.isComposing || !input.data || !input.inputType?.startsWith("insert")) return
@@ -116,17 +146,41 @@ export function RichTextField({
       onDrop={(event) => event.preventDefault()}
       onKeyDown={(event) => {
         if (event.nativeEvent.isComposing) return
+        const checkbox = flowCheckbox(event.target)
+        if (checkbox) {
+          if (event.key === " " || event.key === "Enter") {
+            event.preventDefault()
+            toggleFlowCheckbox(event.currentTarget, checkbox)
+            commit(false)
+          }
+          event.stopPropagation()
+          return
+        }
         const command = event.metaKey || event.ctrlKey
         if (command && !event.altKey && ((!event.shiftKey && event.key.toLowerCase() === "b") || (event.shiftKey && event.code === "Digit8"))) {
           event.preventDefault()
           event.stopPropagation()
-          document.execCommand(event.shiftKey ? "insertUnorderedList" : "bold")
-          commit(false)
+          format(event.shiftKey ? "insertUnorderedList" : "bold")
           return
         }
         // Enter in a list creates the next item (an empty item exits the list).
         // Elsewhere the canvas retains Enter to finish and Shift+Enter for a line.
         const inList = document.queryCommandState("insertUnorderedList")
+        if (event.key === "Enter" && !command && !event.shiftKey) {
+          const rich = readRichText(event.currentTarget)
+          const selection = flowTextSelection(event.currentTarget)
+          const selected = richTextSelectedParagraphs(rich, selection)
+          if (selected.length && rich[selected[0]].checked !== undefined) {
+            event.preventDefault()
+            event.stopPropagation()
+            const next = continueChecklist(rich, selection)
+            if (richTextPlainText(next.richText).length <= DIAGRAM_TEXT_MAX_LENGTH) {
+              replaceFlowRichText(event.currentTarget, next.richText, next.selection)
+              commit()
+            }
+            return
+          }
+        }
         if (event.key === "Enter" && !command && event.shiftKey && !inList) {
           // Separate paragraphs let an introduction be followed by a list.
           event.preventDefault()

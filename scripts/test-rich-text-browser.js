@@ -18,10 +18,14 @@ try {
     import { createRoot } from ${JSON.stringify(require.resolve('react-dom/client'))};
     import { createRef } from ${JSON.stringify(require.resolve('react'))};
     import { FlowEditor } from ${JSON.stringify(path.join(source, 'app/dashboard/diagrams/FlowEditor'))};
-    import { readRichText, editFlowText } from ${JSON.stringify(path.join(source, 'lib/diagrams/rich-text-dom'))};
+    import { readRichText, editFlowText, restoreFlowTextSelection } from ${JSON.stringify(path.join(source, 'lib/diagrams/rich-text-dom'))};
     window.readRichText = readRichText;
     window.copied = [];
-    window.editText = (action, text = '') => editFlowText(document.activeElement, action, text, text => window.copied.push(text));
+    window.editText = (action, text = '') => editFlowText(document.activeElement.closest('[data-flow-text]'), action, text, text => window.copied.push(text));
+    window.selectFlowText = (start, end, field = 'label') => {
+      const element = document.querySelector('[data-flow-text=' + field + ']');
+      element.focus(); restoreFlowTextSelection(element, { start, end });
+    };
     window.editor = createRef();
     window.saved = [];
     window.initial = { kind: 'flow', nodes: [

@@ -96,8 +96,9 @@ function create(element: HTMLElement, initial: Props) {
       const editor = instance.editor
       if (!editor || !instance.props.active) return false
       const focused = document.activeElement
-      if (focused instanceof HTMLElement && focused.isContentEditable && focused.dataset.flowText && app.contains(focused)) {
-        return image ? true : editFlowText(focused, action, text, writeClipboard)
+      const field = focused instanceof HTMLElement ? focused.closest<HTMLElement>("[data-flow-text]") : null
+      if (field?.isContentEditable && app.contains(field)) {
+        return image ? true : editFlowText(field, action, text, writeClipboard)
       }
       if (isTextField(document.activeElement)) return false
       if (document.activeElement?.tagName === "WEBVIEW") return false

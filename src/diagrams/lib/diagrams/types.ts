@@ -121,7 +121,12 @@ export type FlowSize = { width: number; height: number }
 /** Safe, structured text: paragraphs with optional bullets and inline marks. */
 /** A newline within a run is a soft break inside the same paragraph/list item. */
 export type FlowTextRun = { text: string; bold?: boolean; italic?: boolean }
-export type FlowTextParagraph = { runs: FlowTextRun[]; bullet?: boolean }
+export type FlowTextParagraph = {
+  runs: FlowTextRun[]
+  bullet?: boolean
+  /** Defined for a checklist item, including an unchecked item (false). */
+  checked?: boolean
+}
 export type FlowRichText = FlowTextParagraph[]
 
 // A box. `id` is what edges point at; it is the one place the format asks for a

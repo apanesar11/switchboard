@@ -115,6 +115,7 @@ import {
   RiArrowLeftSLine,
   RiBold,
   RiCheckLine,
+  RiCheckboxLine,
   RiCloseLine,
   RiCursorLine,
   RiDeleteBinLine,
@@ -236,7 +237,7 @@ import {
 } from "./DiagramNodes"
 import { FLOW_EDGE_THEME } from "./DiagramEdges"
 import { RichTextField } from "./RichTextField"
-import { formatActiveFlowText, type FlowTextCommand } from "@/lib/diagrams/rich-text-dom"
+import { flowChecklistActive, formatActiveFlowText, type FlowTextCommand } from "@/lib/diagrams/rich-text-dom"
 import { parseFlowRichText } from "@/lib/diagrams/rich-text"
 
 import "@xyflow/react/dist/style.css"
@@ -958,6 +959,12 @@ function EditableFlowNode({ id, data, selected }: NodeProps) {
         labelOverride={
           editing ? <TextEditor id={id} box={box} editor={editor} /> : undefined
         }
+        onToggleCheck={editor && interactive ? (field, index) => {
+          const key = field === "label" ? "labelRichText" : "detailRichText"
+          const rich = box[key]
+          if (!rich || rich[index]?.checked === undefined) return
+          editor.updateNode(id, { [key]: rich.map((paragraph, position) => position === index ? { ...paragraph, checked: !paragraph.checked } : paragraph) })
+        } : undefined}
       />
       {resizable ? <Resizer id={id} box={box} editor={editor} /> : null}
       {/* The selection outline sits OUTSIDE the box rather than being a ring
@@ -4910,22 +4917,28 @@ function TextBar({
   onDone: () => void
 }) {
   const size = FLOW_TEXT_SIZES.indexOf(box.textSize)
-  const [marks, setMarks] = useState({ bold: false, italic: false, bullet: false })
+  const [marks, setMarks] = useState({ bold: false, italic: false, bullet: false, checklist: false })
   useEffect(() => {
     const refresh = () => {
-      if (!(document.activeElement instanceof HTMLElement) || !document.activeElement.dataset.flowText) return
+      const focused = document.activeElement
+      const element = focused instanceof HTMLElement ? focused.closest<HTMLElement>("[data-flow-text]") : null
+      if (!element?.isContentEditable) return
+      const checklist = flowChecklistActive(element)
       setMarks({
         bold: document.queryCommandState("bold"),
         italic: document.queryCommandState("italic"),
-        bullet: document.queryCommandState("insertUnorderedList"),
+        bullet: !checklist && document.queryCommandState("insertUnorderedList"),
+        checklist,
       })
     }
     refresh()
     document.addEventListener("selectionchange", refresh)
     document.addEventListener("input", refresh)
+    document.addEventListener("focusin", refresh)
     return () => {
       document.removeEventListener("selectionchange", refresh)
       document.removeEventListener("input", refresh)
+      document.removeEventListener("focusin", refresh)
     }
   }, [])
   const format = (command: FlowTextCommand) => formatActiveFlowText(command)
@@ -4963,6 +4976,9 @@ function TextBar({
       </BarButton>
       <BarButton label="Bullet list · ⌘⇧8" active={marks.bullet} onClick={() => format("insertUnorderedList")}>
         <RiListUnordered className="size-4" aria-hidden="true" />
+      </BarButton>
+      <BarButton label="Checkbox list" active={marks.checklist} onClick={() => format("checklist")}>
+        <RiCheckboxLine className="size-4" aria-hidden="true" />
       </BarButton>
       <BarDivider />
       {FLOW_TEXT_ALIGNS.map((align) => {

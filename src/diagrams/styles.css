@@ -21,6 +21,20 @@
 .flow-rich-text { min-height: 1lh; white-space: pre-wrap; overflow-wrap: anywhere; }
 .flow-rich-text div, .flow-rich-text p, .flow-rich-text li { min-height: 1lh; margin: 0; }
 .flow-rich-text ul, .flow-rich-text ol { margin: 0; padding-left: 1.35em; list-style-type: disc; text-align: left; }
+.flow-rich-text ul[data-flow-checklist] { padding-left: 1.65em; list-style-type: none; }
+.flow-rich-text li[data-flow-checked] { position: relative; }
+.flow-checkbox {
+  position: absolute; left: -1.65em; top: .15em; width: 1em; height: 1em;
+  border: .12em solid var(--color-brand); border-radius: .15em; padding: 0;
+  background: transparent; cursor: pointer; font-size: inherit; line-height: inherit;
+}
+.flow-checkbox[aria-checked="true"] { background: var(--color-brand); }
+.flow-checkbox[aria-checked="true"]::after {
+  content: ""; position: absolute; left: .2em; top: .05em; width: .25em; height: .5em;
+  border: solid white; border-width: 0 .1em .1em 0; transform: rotate(45deg);
+}
+.flow-checkbox:focus-visible { outline: 2px solid var(--color-brand); outline-offset: 2px; }
+.flow-checkbox:disabled { cursor: default; }
 .flow-rich-text b, .flow-rich-text strong { font-weight: 700; }
 .flow-rich-text i, .flow-rich-text em { font-style: italic; }
 .flow-rich-text[data-empty="true"]::before { content: attr(data-placeholder); opacity: .4; pointer-events: none; position: absolute; }
