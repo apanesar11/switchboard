@@ -809,12 +809,14 @@ export function flowNodeFoldEdges(
  * fold still lives on its edges in saved diagrams, so partially folded older
  * drawings and nested folds need no migration. Reachability before and after
  * tells the editor which boxes actually disappeared or came back; a shared
- * target may stay visible through another open route.
+ * target may stay visible through another open route. The hidden-count badge
+ * passes expand to reopen partial folds without closing their open siblings.
  */
 export function toggleFlowNodeFold(
   ids: Iterable<string>,
   edges: FlowFoldEdge[],
   source: string,
+  options: { expand?: boolean } = {},
 ): {
   edges: FlowFoldEdge[]
   changed: boolean
@@ -828,7 +830,7 @@ export function toggleFlowNodeFold(
   const order = [...ids]
   const edgeIndexes = flowNodeFoldEdges(order, edges, source)
   const hiddenBefore = foldFlow(order, edges).hidden
-  const collapsed = edgeIndexes.length > 0 && edgeIndexes.some((index) => edges[index].collapsed !== true)
+  const collapsed = !options.expand && edgeIndexes.length > 0 && edgeIndexes.some((index) => edges[index].collapsed !== true)
   if (edgeIndexes.length === 0) {
     return {
       edges,

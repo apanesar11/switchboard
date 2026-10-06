@@ -15,6 +15,12 @@ app.whenReady().then(async () => {
     await run(`document.querySelector('[data-id="${id}"]').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
     await tick();
   };
+  const selectNode = async id => {
+    const point = await run(`(() => { const rect = document.querySelector('[data-id="${id}"]').getBoundingClientRect(); return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) }; })()`);
+    window.webContents.sendInputEvent({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 });
+    window.webContents.sendInputEvent({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 });
+    await tick();
+  };
   const node = async id => run(`window.editor.current.currentSpec().nodes.find(node => node.id === '${id}')`);
   const select = async (start, end) => run(`(() => {
     const field = document.querySelector('[data-flow-text="label"]'); field.focus();
@@ -268,6 +274,51 @@ app.whenReady().then(async () => {
     await run('window.selectFlowText(7, 7)');
     assert.deepEqual(await run('window.flowTextSelection(document.querySelector("[data-flow-text]"))'), { start: 7, end: 7 }, 'an empty parent caret stays before its children');
     await run('window.mount(window.snapshot)'); await tick();
+    await run(`window.foldSpec = { kind: 'flow', nodes: [
+      { id: 'fold-root', label: 'Fold root', position: { x: 20, y: 100 } },
+      { id: 'fold-a', label: 'Branch A', position: { x: 300, y: 50 } },
+      { id: 'fold-b', label: 'Branch B', position: { x: 300, y: 200 } },
+      { id: 'fold-shared', label: 'Shared child', position: { x: 580, y: 100 } },
+      { id: 'fold-leaf', label: 'Nested leaf', position: { x: 580, y: 250 } }
+    ], edges: [
+      { from: 'fold-root', to: 'fold-a' }, { from: 'fold-root', to: 'fold-b' },
+      { from: 'fold-a', to: 'fold-shared' }, { from: 'fold-b', to: 'fold-shared' },
+      { from: 'fold-a', to: 'fold-leaf', collapsed: true }
+    ] }; window.mount(window.foldSpec)`); await tick();
+    assert.equal(await run('document.querySelector("[data-id=fold-root] [data-flow-fold-badge]")'), null);
+    assert.equal(await run('document.querySelector("[data-id=fold-a] [data-flow-fold-badge]").textContent'), '+1');
+    await selectNode('fold-root');
+    await click('Collapse all 2 outgoing branches from Fold root');
+    assert.equal(await run('document.querySelector("[data-id=fold-root] [data-flow-fold-badge]").textContent'), '+4', 'hidden descendants include nested folds and count shared nodes once');
+    assert.equal(await run('document.querySelectorAll(".react-flow__node").length'), 1);
+    await run('document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))'); await tick();
+    assert.equal(await run('document.querySelector(".react-flow__node.selected")'), null);
+    assert.equal(await run('getComputedStyle(document.querySelector("[data-flow-fold-badge]")).opacity'), '1', 'the collapsed indicator stays visible without selection or hover');
+    await run('window.editor.current.flush(); window.foldSnapshot = JSON.parse(JSON.stringify(window.editor.current.currentSpec())); window.mount(window.foldSnapshot)'); await tick();
+    assert.equal(await run('document.querySelector("[data-id=fold-root] [data-flow-fold-badge]").textContent'), '+4', 'collapsed counts survive reload');
+    await click('Show 4 hidden nodes from Fold root');
+    assert.equal(await run('document.querySelector("[data-id=fold-root] [data-flow-fold-badge]")'), null);
+    assert.equal(await run('document.querySelectorAll(".react-flow__node").length'), 4);
+    assert.equal(await run('document.querySelector("[data-id=fold-a] [data-flow-fold-badge]").textContent'), '+1', 'expanding a parent preserves its nested folds');
+    await run('window.editor.current.undo()'); await tick();
+    assert.equal(await run('document.querySelector("[data-id=fold-root] [data-flow-fold-badge]").textContent'), '+4');
+    await run('window.editor.current.redo()'); await tick();
+    assert.equal(await run('document.querySelectorAll(".react-flow__node").length'), 4);
+    await click('Show 1 hidden node from Branch A');
+    assert.equal(await run('document.querySelectorAll(".react-flow__node").length'), 5);
+    assert.equal(await run('document.querySelector("[data-flow-fold-badge]")'), null);
+    await run('window.mount({ ...window.foldSpec, edges: window.foldSpec.edges.map((edge, index) => index === 0 ? { ...edge, collapsed: true } : edge) })'); await tick();
+    assert.equal(await run('document.querySelector("[data-id=fold-root] [data-flow-fold-badge]").textContent'), '+2', 'partial folds report only descendants actually hidden');
+    await click('Show 2 hidden nodes from Fold root');
+    assert.equal(await run('document.querySelectorAll(".react-flow__node").length'), 4, 'expanding a partial fold keeps open siblings visible');
+    assert.equal(await run('document.querySelector("[data-id=fold-root] [data-flow-fold-badge]")'), null);
+    await run(`window.mount({ kind: 'flow', nodes: [
+      { id: 'shared-left', label: 'Left parent' }, { id: 'shared-right', label: 'Right parent' }, { id: 'shared-only', label: 'Shared' }
+    ], edges: [{ from: 'shared-left', to: 'shared-only', collapsed: true }, { from: 'shared-right', to: 'shared-only' }] })`); await tick();
+    assert.equal(await run('document.querySelector("[data-id=shared-left] [data-flow-fold-badge]").textContent'), '+0', 'a collapsed connection remains clear when a shared node stays visible');
+    await click('Show 0 hidden nodes from Left parent');
+    assert.equal(await run('document.querySelector("[data-flow-fold-badge]")'), null);
+    await run('window.mount(window.foldSnapshot)'); await tick();
     await run(`window.mount({ kind: 'flow', nodes: [
       { id: 'priority-parent', label: 'Original parent', position: { x: 20, y: 100 } },
       { id: 'priority-child', label: 'One\\nTwo', align: 'left', position: { x: 300, y: 100 },
@@ -302,11 +353,11 @@ app.whenReady().then(async () => {
     await tab(true);
     assert.equal(await run('document.querySelector(".react-flow__node.selected").dataset.id'), 'priority-child', 'ordinary Shift+Tab still selects the canvas parent');
     assert.equal(await run('document.querySelector("[data-flow-text]")'), null, 'canvas Shift+Tab finishes text editing');
-    await run('window.mount(window.snapshot)'); await tick();
+    await run('window.mount(window.foldSnapshot)'); await tick();
     if (process.env.SWITCHBOARD_RICH_TEXT_SCREENSHOT) {
       require('node:fs').writeFileSync(process.env.SWITCHBOARD_RICH_TEXT_SCREENSHOT, (await window.webContents.capturePage()).toPNG());
     }
-    console.log('PASS — Chromium: rich text, nested lists, list Tab precedence and canvas fallback, undo/redo, save/reload, and native Edit menu actions');
+    console.log('PASS — Chromium: rich text, nested lists, Tab precedence, collapsed-node counts, expand/undo/redo, save/reload, and native Edit menu actions');
     app.exit(0);
   } catch (error) {
     console.error(error);

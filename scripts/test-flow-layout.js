@@ -276,6 +276,19 @@ test('a shared target stays visible through another parent when one node folds',
   assert.deepEqual(sorted(right.hiddenAfter), ['left-only', 'shared']);
 });
 
+test('expanding a partial fold reveals its hidden branches without closing open siblings', () => {
+  const ids = ['root', 'a', 'b', 'leaf'];
+  const edges = [arrow('root', 'a', true), arrow('root', 'b'), arrow('a', 'leaf', true)];
+  const opened = toggleFlowNodeFold(ids, edges, 'root', { expand: true });
+  assert.equal(opened.collapsed, false);
+  assert.deepEqual(sorted(opened.newlyShown), ['a']);
+  assert.deepEqual(sorted(opened.hiddenAfter), ['leaf']);
+  assert.equal(opened.edges[0].collapsed, undefined);
+  assert.equal(opened.edges[1].collapsed, undefined, 'the open sibling stays open');
+  assert.equal(opened.edges[2].collapsed, true, 'the nested fold stays closed');
+  assert.equal(edges[0].collapsed, true, 'the saved input is not mutated');
+});
+
 test('new node folds leave cycle-closing arrows open; old collapsed ones can reopen', () => {
   const ids = ['root', 'child', 'leaf'];
   const edges = [arrow('root', 'child'), arrow('child', 'leaf'), arrow('child', 'root')];

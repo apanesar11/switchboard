@@ -31,8 +31,9 @@
 // answer per box; a drag-select takes every box it touches, not only the ones
 // wholly inside it; and deleting a box from a branch closes the gap it leaves.
 // A selected node's toolbar folds all of its outgoing branches as one action;
-// clicking it again brings them back. Individual arrow fold flags in the saved
-// spec remain readable, including partially folded older diagrams.
+// clicking it again brings them back. A collapsed node keeps its +N count
+// visible, and clicking it expands the branches. Individual arrow fold flags
+// in the saved spec remain readable, including partially folded older diagrams.
 // Switchboard: the image tool also offers Google Images (G), in a panel docked
 // on the canvas's right (ImageSearchPanel.tsx). A picture dragged out of it, or
 // right-clicked ▸ Add Image to Diagram, is fetched by main and goes on exactly
@@ -682,8 +683,8 @@ function attached(node: Node): Node {
   return box.detached ? { ...node, data: { ...box, detached: undefined } } : node
 }
 
-/** Whether all of a node's foldable outgoing arrows are closed. */
-type FoldBadge = { arrows: number; total: number }
+/** A node's folded branches and the unique nodes hidden behind them. */
+type FoldBadge = { boxes: number; arrows: number; total: number }
 
 function newEdgeId(): string {
   return `edge-${Math.random().toString(36).slice(2, 10)}`
@@ -738,6 +739,9 @@ type EditorContextValue = {
   interactive: boolean
   /** Switchboard: the boxes whose ✦ Answers are being waited for. */
   answeringIds: ReadonlySet<string>
+  /** Collapsed nodes keep their hidden-node count visible on the canvas. */
+  folds: ReadonlyMap<string, FoldBadge>
+  expandFold: (id: string) => void
 }
 
 // How the boxes and arrows reach the editor's state. A context rather than
@@ -981,6 +985,14 @@ function EditableFlowNode({ id, data, selected }: NodeProps) {
             : "border-brand/40 opacity-0 group-hover:opacity-100",
         )}
       />
+      {editor !== null && (editor.folds.get(id)?.arrows ?? 0) > 0 ? (
+        <FoldButton
+          fold={editor.folds.get(id)!}
+          label={box.label}
+          disabled={!interactive}
+          onClick={() => editor.expandFold(id)}
+        />
+      ) : null}
       {editor !== null && editor.answeringIds.has(id) ? (
         <div
           aria-hidden="true"
@@ -2792,37 +2804,42 @@ function FlowEditorCanvas({
         : edges,
     [edges, fold],
   )
-  // The selected-node toolbar uses the same groups as the click action, so
-  // loop-closing arrows never offer a misleading control. Old partial folds
-  // and shared targets remain in the group.
-  const folds = useMemo(() => {
+  // The toolbar and visible +N badges use the same groups as the fold action.
+  // Deduplicate shared descendants, including nested and older partial folds.
+  // Keep the context stable while nodes are dragged without changing counts.
+  const foldsJson = useMemo(() => {
     const groups = flowNodeFoldGroups(
       nodes.map((node) => node.id),
       edges.map((edge) => ({ source: edge.source, target: edge.target, collapsed: isCollapsed(edge) })),
     )
-    const result = new Map<string, FoldBadge>()
+    const result: [string, FoldBadge][] = []
     for (const [id, indexes] of groups) {
       if (fold.hidden.has(id)) continue
       let arrows = 0
+      const boxes = new Set<string>()
       for (const index of indexes) {
-        if (isCollapsed(edges[index])) arrows += 1
+        if (!isCollapsed(edges[index])) continue
+        arrows += 1
+        for (const box of fold.folded.get(index) ?? []) boxes.add(box)
       }
-      result.set(id, { arrows, total: indexes.length })
+      result.push([id, { boxes: boxes.size, arrows, total: indexes.length }])
     }
-    return result
+    return JSON.stringify(result)
   }, [fold, edges, nodes])
+  const folds = useMemo(() => new Map(JSON.parse(foldsJson) as [string, FoldBadge][]), [foldsJson])
 
   // One node click closes every direct branch, or reopens them all. Fold flags
   // remain on the edges so older diagrams (including partial folds) load as
   // they were. The whole action is one undo step and one layout pass.
   const toggleFold = useCallback(
-    (id: string) => {
+    (id: string, expand = false) => {
       const current = nodesRef.current
       const before = edgesRef.current
       const action = toggleFlowNodeFold(
         current.map((node) => node.id),
         before.map((edge) => ({ source: edge.source, target: edge.target, collapsed: isCollapsed(edge) })),
         id,
+        { expand },
       )
       if (!action.changed) return
       const toggled = new Set(action.edgeIndexes)
@@ -2865,6 +2882,7 @@ function FlowEditorCanvas({
     },
     [record, changeEditing, settleSelection],
   )
+  const expandFold = useCallback((id: string) => toggleFold(id, true), [toggleFold])
 
   // The boxes folded away behind any of `going`, which go with them.
   function foldedBehind(going: Node[]): Node[] {
@@ -3374,6 +3392,8 @@ function FlowEditorCanvas({
       soleNodeId,
       interactive: tool !== "hand",
       answeringIds,
+      folds,
+      expandFold,
     }),
     [
       editingId,
@@ -3390,6 +3410,8 @@ function FlowEditorCanvas({
       soleNodeId,
       tool,
       answeringIds,
+      folds,
+      expandFold,
     ],
   )
 
@@ -5065,6 +5087,37 @@ function EdgeBar({
         <RiDeleteBinLine className="size-4" aria-hidden="true" />
       </BarButton>
     </Bar>
+  )
+}
+
+// The original +N remains visible on collapsed nodes, independent of selection.
+// Clicking it reveals the hidden branches, including an older partial fold.
+function FoldButton({ fold, label: nodeLabel, disabled, onClick }: {
+  fold: FoldBadge
+  label: string
+  disabled: boolean
+  onClick: () => void
+}) {
+  const name = nodeLabel.trim().slice(0, 48) || "this node"
+  const label = `Show ${fold.boxes} hidden ${fold.boxes === 1 ? "node" : "nodes"} from ${name}`
+  return (
+    <button
+      type="button"
+      data-flow-fold-badge
+      aria-expanded={false}
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => { event.stopPropagation(); onClick() }}
+      onDoubleClick={(event) => event.stopPropagation()}
+      className={cx(
+        "nodrag nopan absolute -right-2.5 -top-2.5 z-10 flex h-6 min-w-6 items-center justify-center whitespace-nowrap rounded-full bg-gray-900 px-1.5 text-[11px] font-semibold tabular-nums text-white shadow-sm ring-2 ring-white hover:bg-brand dark:bg-gray-100 dark:text-gray-900 dark:ring-gray-950",
+        focusRing,
+      )}
+    >
+      +{fold.boxes}
+    </button>
   )
 }
 
