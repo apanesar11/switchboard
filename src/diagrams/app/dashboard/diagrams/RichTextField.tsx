@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from "react"
 import { DIAGRAM_TEXT_MAX_LENGTH, type FlowRichText } from "@/lib/diagrams/types"
-import { checklistToBullets, continueChecklist, plainTextParagraphs, richTextHtml, richTextPlainText, richTextSelectedParagraphs, toggleChecklist, truncateRichText } from "@/lib/diagrams/rich-text"
+import { continueList, plainTextParagraphs, richTextHtml, richTextPlainText, richTextSelectedParagraphs, shiftListIndent, toggleBullets, toggleChecklist, truncateRichText } from "@/lib/diagrams/rich-text"
 import { FLOW_FORMAT_EVENT, FLOW_PASTE_EVENT, flowCheckbox, flowTextSelection, readRichText, replaceFlowRichText, restoreFlowTextSelection, richTextSelectionLength, selectRichText, toggleFlowCheckbox, type FlowTextCommand } from "@/lib/diagrams/rich-text-dom"
 
 /** Let Chromium own the editing DOM and its undo history; React owns saved data. */
@@ -59,11 +59,14 @@ export function RichTextField({
     const element = elementRef.current!
     const rich = readRichText(element)
     const selection = flowTextSelection(element)
-    const selected = richTextSelectedParagraphs(rich, selection)
     if (command === "checklist") {
       replaceFlowRichText(element, toggleChecklist(rich, selection), selection)
-    } else if (command === "insertUnorderedList" && selected.some((index) => rich[index].checked !== undefined)) {
-      replaceFlowRichText(element, checklistToBullets(rich, selection), selection)
+    } else if (command === "insertUnorderedList") {
+      replaceFlowRichText(element, toggleBullets(rich, selection), selection)
+    } else if (command === "indent" || command === "outdent") {
+      const next = shiftListIndent(rich, selection, command === "indent" ? 1 : -1)
+      if (next === rich) return
+      replaceFlowRichText(element, next, selection)
     } else {
       if (document.activeElement !== element) {
         element.focus()
@@ -163,17 +166,28 @@ export function RichTextField({
           format(event.shiftKey ? "insertUnorderedList" : "bold")
           return
         }
-        // Enter in a list creates the next item (an empty item exits the list).
+        // List indentation consumes Tab before it reaches the canvas shortcuts.
+        if (event.key === "Tab" && !command && !event.altKey) {
+          const rich = readRichText(event.currentTarget)
+          const selected = richTextSelectedParagraphs(rich, flowTextSelection(event.currentTarget))
+          if (selected.some((index) => rich[index].bullet || rich[index].checked !== undefined)) {
+            event.preventDefault()
+            event.stopPropagation()
+            format(event.shiftKey ? "outdent" : "indent")
+            return
+          }
+        }
+        // Enter keeps list depth; an empty nested item outdents before exiting.
         // Elsewhere the canvas retains Enter to finish and Shift+Enter for a line.
         const inList = document.queryCommandState("insertUnorderedList")
         if (event.key === "Enter" && !command && !event.shiftKey) {
           const rich = readRichText(event.currentTarget)
           const selection = flowTextSelection(event.currentTarget)
           const selected = richTextSelectedParagraphs(rich, selection)
-          if (selected.length && rich[selected[0]].checked !== undefined) {
+          if (selected.length && (rich[selected[0]].bullet || rich[selected[0]].checked !== undefined)) {
             event.preventDefault()
             event.stopPropagation()
-            const next = continueChecklist(rich, selection)
+            const next = continueList(rich, selection)
             if (richTextPlainText(next.richText).length <= DIAGRAM_TEXT_MAX_LENGTH) {
               replaceFlowRichText(event.currentTarget, next.richText, next.selection)
               commit()

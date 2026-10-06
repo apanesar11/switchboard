@@ -126,6 +126,8 @@ export type FlowTextParagraph = {
   bullet?: boolean
   /** Defined for a checklist item, including an unchecked item (false). */
   checked?: boolean
+  /** List nesting depth; omitted for top-level items and ordinary paragraphs. */
+  level?: number
 }
 export type FlowRichText = FlowTextParagraph[]
 

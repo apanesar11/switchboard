@@ -18,8 +18,9 @@ try {
     import { createRoot } from ${JSON.stringify(require.resolve('react-dom/client'))};
     import { createRef } from ${JSON.stringify(require.resolve('react'))};
     import { FlowEditor } from ${JSON.stringify(path.join(source, 'app/dashboard/diagrams/FlowEditor'))};
-    import { readRichText, editFlowText, restoreFlowTextSelection } from ${JSON.stringify(path.join(source, 'lib/diagrams/rich-text-dom'))};
+    import { readRichText, editFlowText, flowTextSelection, restoreFlowTextSelection } from ${JSON.stringify(path.join(source, 'lib/diagrams/rich-text-dom'))};
     window.readRichText = readRichText;
+    window.flowTextSelection = flowTextSelection;
     window.copied = [];
     window.editText = (action, text = '') => editFlowText(document.activeElement.closest('[data-flow-text]'), action, text, text => window.copied.push(text));
     window.selectFlowText = (start, end, field = 'label') => {

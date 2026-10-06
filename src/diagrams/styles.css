@@ -21,6 +21,8 @@
 .flow-rich-text { min-height: 1lh; white-space: pre-wrap; overflow-wrap: anywhere; }
 .flow-rich-text div, .flow-rich-text p, .flow-rich-text li { min-height: 1lh; margin: 0; }
 .flow-rich-text ul, .flow-rich-text ol { margin: 0; padding-left: 1.35em; list-style-type: disc; text-align: left; }
+.flow-rich-text ul ul:not([data-flow-checklist]) { list-style-type: circle; }
+.flow-rich-text ul ul ul:not([data-flow-checklist]) { list-style-type: square; }
 .flow-rich-text ul[data-flow-checklist] { padding-left: 1.65em; list-style-type: none; }
 .flow-rich-text li[data-flow-checked] { position: relative; }
 .flow-checkbox {

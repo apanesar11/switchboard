@@ -1,9 +1,14 @@
-import { appendTextRun, richTextHtml, richTextPlainText, richTextSelectedParagraphs, type FlowTextSelection } from "./rich-text"
+import { appendTextRun, richTextHtml, richTextPlainText, richTextSelectedParagraphs, shiftListIndent, type FlowTextSelection } from "./rich-text"
 import type { FlowRichText, FlowTextRun } from "./types"
 
-export type FlowTextCommand = "bold" | "italic" | "insertUnorderedList" | "checklist"
+export type FlowTextCommand = "bold" | "italic" | "insertUnorderedList" | "checklist" | "indent" | "outdent"
 export const FLOW_FORMAT_EVENT = "flow-text-format"
 export const FLOW_PASTE_EVENT = "flow-text-paste"
+
+function isSoftBreak(node: Node): boolean {
+  const next = node.nextSibling
+  return Boolean(next) && !(next instanceof HTMLElement && (next.tagName === "UL" || next.tagName === "OL"))
+}
 
 /** Read the browser's editing DOM into the small, HTML-free saved vocabulary. */
 export function readRichText(element: HTMLElement, paragraphElements?: HTMLElement[]): FlowRichText {
@@ -11,10 +16,15 @@ export function readRichText(element: HTMLElement, paragraphElements?: HTMLEleme
   let runs: FlowTextRun[] = []
   let bullet = false
   let checked: boolean | undefined
+  let level = 0
+  let listDepth = 0
   let owner = element
+  const owners: HTMLElement[] = []
   const flush = (force = false) => {
     if (runs.length || force) {
-      paragraphs.push({ runs, ...(checked !== undefined ? { checked } : bullet ? { bullet: true } : {}) })
+      paragraphs.push({ runs, ...(checked !== undefined ? { checked } : bullet ? { bullet: true } : {}),
+        ...((bullet || checked !== undefined) && level > 0 ? { level } : {}) })
+      owners.push(owner)
       paragraphElements?.push(owner)
     }
     runs = []
@@ -28,19 +38,24 @@ export function readRichText(element: HTMLElement, paragraphElements?: HTMLEleme
     const tag = node.tagName
     if (tag === "BR") {
       // A sole final <br> is the caret's placeholder, not an extra paragraph.
-      if (node.nextSibling) appendTextRun(runs, { text: "\n", bold, italic })
+      if (isSoftBreak(node)) appendTextRun(runs, { text: "\n", bold, italic })
       return
     }
     const block = ["DIV", "P", "LI", "UL", "OL"].includes(tag)
-    if (block) flush()
+    const list = tag === "UL" || tag === "OL"
+    if (block) flush(list && owner.tagName === "LI" && !owners.includes(owner))
     const previousBullet = bullet
     const previousChecked = checked
     const previousOwner = owner
-    if (block && tag !== "UL" && tag !== "OL" && checked === undefined) owner = node
+    const previousLevel = level
+    const previousDepth = listDepth
+    if (list) listDepth += 1
+    if (block && !list && !bullet && checked === undefined) owner = node
     if (tag === "LI") {
       bullet = true
       checked = node.hasAttribute("data-flow-checked") ? node.dataset.flowChecked === "true" : undefined
       owner = node
+      level = Math.max(0, listDepth - 1)
     }
     const style = getComputedStyle(node)
     const nextBold = tag === "B" || tag === "STRONG" || Number.parseInt(style.fontWeight, 10) >= 600
@@ -51,6 +66,8 @@ export function readRichText(element: HTMLElement, paragraphElements?: HTMLEleme
     bullet = previousBullet
     checked = previousChecked
     owner = previousOwner
+    level = previousLevel
+    listDepth = previousDepth
   }
   const style = getComputedStyle(element)
   for (const child of element.childNodes) walk(child, Number.parseInt(style.fontWeight, 10) >= 600, style.fontStyle === "italic")
@@ -92,16 +109,29 @@ export function restoreFlowTextSelection(element: HTMLElement, selection: FlowTe
       const length = richTextPlainText([rich[index]]).length
       if (position > length && index < rich.length - 1) { position -= length + 1; continue }
       const paragraph = elements[index] ?? element
-      const walker = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT, {
-        acceptNode: (node) => node.parentElement?.closest("[data-flow-checkbox]") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+      const walker = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+        acceptNode: (node) => {
+          const parent = node instanceof Element ? node : node.parentElement
+          if (parent?.closest("[data-flow-checkbox]") || (paragraph.tagName === "LI" && parent?.closest("li") !== paragraph)) return NodeFilter.FILTER_REJECT
+          return node.nodeType === Node.TEXT_NODE || (node instanceof HTMLElement && node.tagName === "BR" && isSoftBreak(node))
+            ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP
+        },
       })
       while (walker.nextNode()) {
         const node = walker.currentNode
+        if (node instanceof HTMLElement) {
+          if (position === 0) return [node.parentNode!, Array.from(node.parentNode!.childNodes).indexOf(node)]
+          position -= 1
+          continue
+        }
         const length = node.textContent?.length ?? 0
         if (position <= length) return [node, Math.max(0, position)]
         position -= length
       }
-      return [paragraph, paragraph.childNodes.length]
+      // An empty parent's caret belongs before its nested list.
+      const children = Array.from(paragraph.childNodes)
+      const nested = children.findIndex((node) => node instanceof HTMLElement && (node.tagName === "UL" || node.tagName === "OL"))
+      return [paragraph, nested >= 0 ? nested : children.length]
     }
     return [element, element.childNodes.length]
   }
@@ -115,8 +145,20 @@ export function restoreFlowTextSelection(element: HTMLElement, selection: FlowTe
 /** A native HTML edit records checkbox attributes and state in browser undo. */
 export function replaceFlowRichText(element: HTMLElement, value: FlowRichText, selection: FlowTextSelection): void {
   element.focus()
+  // Chromium retains empty list ancestors when replacing a selection ending
+  // inside a nested item. An inline object makes the old contents one edit.
+  const previous = document.createElement("span")
+  previous.contentEditable = "false"
+  previous.append(...element.childNodes)
+  element.append(previous)
   selectRichText(element)
-  document.execCommand("insertHTML", false, richTextHtml(value))
+  try {
+    document.execCommand("insertHTML", false, richTextHtml(value))
+  } finally {
+    // Native undo restores these same nodes; their text must remain editable.
+    previous.removeAttribute("contenteditable")
+    if (previous.parentNode === element) previous.replaceWith(...previous.childNodes)
+  }
   restoreFlowTextSelection(element, selection)
 }
 
@@ -124,10 +166,16 @@ export function flowCheckbox(target: EventTarget | null): HTMLElement | null {
   return target instanceof Element ? target.closest<HTMLElement>("[data-flow-checkbox]") : null
 }
 
-export function flowChecklistActive(element: HTMLElement): boolean {
+export function flowListState(element: HTMLElement): { bullet: boolean; checklist: boolean; indent: boolean; outdent: boolean } {
   const rich = readRichText(element)
-  const selected = richTextSelectedParagraphs(rich, flowTextSelection(element))
-  return selected.length > 0 && selected.every((index) => rich[index].checked !== undefined)
+  const selection = flowTextSelection(element)
+  const selected = richTextSelectedParagraphs(rich, selection)
+  return {
+    bullet: selected.length > 0 && selected.every((index) => rich[index].bullet && rich[index].checked === undefined),
+    checklist: selected.length > 0 && selected.every((index) => rich[index].checked !== undefined),
+    indent: shiftListIndent(rich, selection, 1) !== rich,
+    outdent: shiftListIndent(rich, selection, -1) !== rich,
+  }
 }
 
 export function toggleFlowCheckbox(element: HTMLElement, checkbox: HTMLElement): void {

@@ -18,7 +18,7 @@ for (const name of ['rich-text', 'layout', 'validate', 'flow-editor']) {
 after(() => fs.rmSync(temp, { recursive: true, force: true }));
 
 const { parseFlowRichText, richTextPlainText, richTextHtml, truncateRichText, richTextVisualLines,
-  richTextSelectedParagraphs, toggleChecklist, checklistToBullets, continueChecklist } = modules['rich-text'];
+  richTextSelectedParagraphs, toggleChecklist, checklistToBullets, toggleBullets, continueList, shiftListIndent, FLOW_LIST_MAX_LEVEL } = modules['rich-text'];
 const { layoutDiagram, flowNodeSize, setFlowTextMeasure } = modules.layout;
 const { parseDiagramSpec } = modules.validate;
 const { flowSpecFromCanvas, carryOverFlowLayout } = modules['flow-editor'];
@@ -154,14 +154,94 @@ test('checkbox formatting applies only to selected paragraphs and converts betwe
 
 test('Enter splits checked tasks into an unchecked next task and exits an empty task', () => {
   const paragraphs = [{ checked: true, runs: [{ text: 'First second', bold: true }] }];
-  const next = continueChecklist(paragraphs, { start: 6, end: 6 });
+  const next = continueList(paragraphs, { start: 6, end: 6 });
   assert.deepEqual(next.richText, [{ checked: true, runs: [{ text: 'First ', bold: true }] },
     { checked: false, runs: [{ text: 'second', bold: true }] }]);
   assert.deepEqual(next.selection, { start: 7, end: 7 });
-  const empty = continueChecklist([{ checked: false, runs: [] }], { start: 0, end: 0 });
+  const empty = continueList([{ checked: false, runs: [] }], { start: 0, end: 0 });
   assert.deepEqual(empty.richText, [{ runs: [] }]);
-  const across = continueChecklist([{ checked: true, runs: [{ text: 'First' }] },
+  const across = continueList([{ checked: true, runs: [{ text: 'First' }] },
     { checked: true, runs: [{ text: 'Second' }] }], { start: 2, end: 6 });
   assert.equal(richTextPlainText(across.richText), 'Fi\nSecond');
   assert.equal(across.richText[1].checked, false);
+});
+
+test('nested bullets and checklists survive diagram save and reload with inline marks', () => {
+  const nested = [{ bullet: true, runs: [{ text: 'Plan' }] },
+    { bullet: true, level: 1, runs: [{ text: 'Write notes', bold: true }] },
+    { checked: true, level: 2, runs: [{ text: 'Check details', italic: true }] },
+    { checked: false, level: 1, runs: [{ text: 'Verify build' }] },
+    { bullet: true, runs: [{ text: 'Release' }] }];
+  const label = richTextPlainText(nested);
+  for (const shape of ['rounded', 'box', 'pill', 'diamond', 'text', 'note']) {
+    const parsed = parseDiagramSpec(spec({ label, labelRichText: nested, detail: label, detailRichText: nested, shape }));
+    assert.equal(parsed.ok, true);
+    const canvas = layoutDiagram(parsed.value);
+    const saved = flowSpecFromCanvas({}, canvas.nodes, canvas.edges);
+    const reloaded = parseDiagramSpec(JSON.parse(JSON.stringify(saved)));
+    assert.deepEqual(reloaded.value.nodes[0].labelRichText, nested);
+    assert.deepEqual(reloaded.value.nodes[0].detailRichText, nested);
+  }
+  const html = richTextHtml(nested);
+  assert.match(html, /<li data-flow-paragraph="0">Plan<ul><li data-flow-paragraph="1"><b>Write notes<\/b><ul data-flow-checklist="true">/);
+  assert.match(html, /Check details<\/i><\/li><\/ul><\/li><\/ul><ul data-flow-checklist="true">/);
+  assert.match(html, /Verify build<\/li><\/ul><\/li><li data-flow-paragraph="4">Release<\/li><\/ul>$/);
+  for (const level of [-1, 1.5, '1', null, FLOW_LIST_MAX_LEVEL + 1]) {
+    assert.equal(parseDiagramSpec(spec({ label: 'Bad', labelRichText: [{ bullet: true, level, runs: [{ text: 'Bad' }] }] })).ok, false);
+  }
+  assert.deepEqual(parseFlowRichText([{ bullet: true, level: 2, runs: [{ text: 'First' }] },
+    { bullet: true, level: 3, runs: [{ text: 'Child' }] }], 'First\nChild').map(p => p.level ?? 0), [0, 1]);
+});
+
+test('indent and outdent preserve selected subtrees, marks, and list kinds without orphan levels', () => {
+  const list = [{ bullet: true, runs: [{ text: 'One' }] },
+    { bullet: true, runs: [{ text: 'Two', bold: true }] },
+    { checked: true, level: 1, runs: [{ text: 'Child' }] },
+    { bullet: true, level: 1, runs: [{ text: 'Sibling' }] },
+    { bullet: true, runs: [{ text: 'Three' }] }];
+  const selection = { start: 4, end: 10 };
+  const nested = shiftListIndent(list, selection, 1);
+  assert.deepEqual(nested.map(p => p.level ?? 0), [0, 1, 2, 2, 0]);
+  assert.equal(nested[1].runs[0].bold, true);
+  assert.equal(nested[2].checked, true);
+  assert.deepEqual(shiftListIndent(nested, selection, -1), list);
+  assert.equal(shiftListIndent(list, { start: 0, end: 3 }, 1), list, 'the first item cannot indent without a preceding sibling');
+  assert.equal(shiftListIndent(list, { start: 0, end: 3 }, -1), list, 'top-level items cannot outdent below zero');
+  assert.equal(shiftListIndent(list, { start: 8, end: 8 }, 1), list, 'a first child cannot indent under its parent again');
+  const checks = toggleChecklist(nested, { start: 4, end: 7 });
+  assert.equal(checks[1].level, 1);
+  assert.equal(checks[1].checked, false);
+  assert.deepEqual(toggleBullets(checks, { start: 4, end: 7 }), nested);
+  const removed = toggleBullets(nested, { start: 4, end: 7 });
+  assert.equal(removed[1].bullet, undefined);
+  assert.equal(removed[1].level, undefined);
+  assert.deepEqual(removed.slice(2).map(p => p.level ?? 0), [0, 0, 0]);
+  const deep = Array.from({ length: FLOW_LIST_MAX_LEVEL + 2 }, (_, index) => ({ bullet: true,
+    ...(index ? { level: Math.min(index, FLOW_LIST_MAX_LEVEL) } : {}), runs: [{ text: 'x' }] }));
+  const end = richTextPlainText(deep).length;
+  assert.equal(shiftListIndent(deep, { start: end, end }, 1), deep, 'depth is bounded');
+});
+
+test('Enter and soft lines retain nesting; empty nested items outdent before leaving the list', () => {
+  const list = [{ bullet: true, runs: [{ text: 'Parent' }] },
+    { bullet: true, level: 1, runs: [{ text: 'Child', bold: true }] }];
+  const split = continueList(list, { start: 9, end: 9 });
+  assert.deepEqual(split.richText.map(p => p.level ?? 0), [0, 1, 1]);
+  assert.equal(split.richText[2].bullet, true);
+  assert.equal(split.richText[2].runs[0].bold, true);
+  const empty = [...list, { checked: false, level: 1, runs: [] }];
+  const caret = { start: 13, end: 13 };
+  const outdent = continueList(empty, caret);
+  assert.equal(outdent.richText.at(-1).level, undefined);
+  assert.equal(outdent.richText.at(-1).checked, false);
+  assert.equal(continueList(outdent.richText, caret).richText.at(-1).checked, undefined);
+  const soft = [{ bullet: true, runs: [{ text: 'Parent' }] },
+    { checked: false, level: 1, runs: [{ text: ' Child \n continuation ' }] }];
+  const normalized = parseFlowRichText(soft, 'Parent\nChild\ncontinuation');
+  assert.deepEqual(richTextVisualLines(normalized).map(p => p.level ?? 0), [0, 1, 1]);
+  assert.equal(truncateRichText(normalized, 10)[1].level, 1);
+  const nested = { label: 'Parent\naaaa aaaa aaaa', shape: 'text', labelRichText: [list[0], { bullet: true, level: 1, runs: [{ text: 'aaaa aaaa aaaa' }] }] };
+  const flat = { ...nested, labelRichText: [list[0], { ...nested.labelRichText[1], level: undefined }] };
+  assert.ok(flowNodeSize(nested).width > flowNodeSize(flat).width);
+  assert.ok(flowNodeSize({ ...nested, size: { width: 100, height: 16 } }).height > flowNodeSize({ ...flat, size: { width: 100, height: 16 } }).height);
 });

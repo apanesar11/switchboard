@@ -361,9 +361,12 @@ function detailLines(detail: string | undefined, width: number, rich?: FlowRichT
 /** Measure mixed weights and the list's hanging indent, including wrapped items. */
 function richTextLines(text: string, rich: FlowRichText | undefined, width: number, fontSize: number, weight: number): { text: string; width: number }[] {
   if (!rich) return wrapText(text, width, fontSize, weight).map((text) => ({ text, width: measureText(text, fontSize, weight) }))
+  const indents: number[] = []
   return richTextVisualLines(rich.length ? rich : plainTextParagraphs(text)).flatMap((paragraph) => {
     const text = paragraph.runs.map((run) => run.text).join("")
-    const indent = fontSize * (paragraph.checked !== undefined ? FLOW_CHECKLIST_INDENT : paragraph.bullet ? FLOW_BULLET_INDENT : 0)
+    indents.length = paragraph.level ?? 0
+    indents.push(paragraph.checked !== undefined ? FLOW_CHECKLIST_INDENT : paragraph.bullet ? FLOW_BULLET_INDENT : 0)
+    const indent = fontSize * indents.reduce((total, padding) => total + padding, 0)
     const available = Math.max(1, width - indent)
     const measure = (start: number, end: number) => {
       let offset = 0, measured = 0

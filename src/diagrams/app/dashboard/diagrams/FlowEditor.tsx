@@ -116,6 +116,8 @@ import {
   RiBold,
   RiCheckLine,
   RiCheckboxLine,
+  RiIndentDecrease,
+  RiIndentIncrease,
   RiCloseLine,
   RiCursorLine,
   RiDeleteBinLine,
@@ -237,7 +239,7 @@ import {
 } from "./DiagramNodes"
 import { FLOW_EDGE_THEME } from "./DiagramEdges"
 import { RichTextField } from "./RichTextField"
-import { flowChecklistActive, formatActiveFlowText, type FlowTextCommand } from "@/lib/diagrams/rich-text-dom"
+import { flowListState, formatActiveFlowText, type FlowTextCommand } from "@/lib/diagrams/rich-text-dom"
 import { parseFlowRichText } from "@/lib/diagrams/rich-text"
 
 import "@xyflow/react/dist/style.css"
@@ -746,8 +748,8 @@ const EditorContext = createContext<EditorContextValue | null>(null)
 // The text fields that stand in for a box's label and second line while you
 // edit it. Enter or clicking away keeps the text, Escape puts the original
 // back, and Shift+Enter starts a new line. Enter continues a bullet list (the
-// second line itself is added from the text toolbar). Tab and Shift+Tab
-// belong to the editor — see its keyboard handler.
+// second line itself is added from the text toolbar). In lists, Tab and
+// Shift+Tab change indentation; otherwise the canvas handles them.
 function TextEditor({
   id,
   box,
@@ -4917,18 +4919,16 @@ function TextBar({
   onDone: () => void
 }) {
   const size = FLOW_TEXT_SIZES.indexOf(box.textSize)
-  const [marks, setMarks] = useState({ bold: false, italic: false, bullet: false, checklist: false })
+  const [marks, setMarks] = useState({ bold: false, italic: false, bullet: false, checklist: false, indent: false, outdent: false })
   useEffect(() => {
     const refresh = () => {
       const focused = document.activeElement
       const element = focused instanceof HTMLElement ? focused.closest<HTMLElement>("[data-flow-text]") : null
       if (!element?.isContentEditable) return
-      const checklist = flowChecklistActive(element)
       setMarks({
+        ...flowListState(element),
         bold: document.queryCommandState("bold"),
         italic: document.queryCommandState("italic"),
-        bullet: !checklist && document.queryCommandState("insertUnorderedList"),
-        checklist,
       })
     }
     refresh()
@@ -4979,6 +4979,12 @@ function TextBar({
       </BarButton>
       <BarButton label="Checkbox list" active={marks.checklist} onClick={() => format("checklist")}>
         <RiCheckboxLine className="size-4" aria-hidden="true" />
+      </BarButton>
+      <BarButton label="Indent list · Tab" disabled={!marks.indent} onClick={() => format("indent")}>
+        <RiIndentIncrease className="size-4" aria-hidden="true" />
+      </BarButton>
+      <BarButton label="Outdent list · ⇧Tab" disabled={!marks.outdent} onClick={() => format("outdent")}>
+        <RiIndentDecrease className="size-4" aria-hidden="true" />
       </BarButton>
       <BarDivider />
       {FLOW_TEXT_ALIGNS.map((align) => {

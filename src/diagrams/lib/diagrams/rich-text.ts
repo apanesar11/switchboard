@@ -2,11 +2,33 @@ import { DIAGRAM_TEXT_MAX_LENGTH, type FlowRichText, type FlowTextParagraph, typ
 
 export const FLOW_BULLET_INDENT = 1.35
 export const FLOW_CHECKLIST_INDENT = 1.65
+export const FLOW_LIST_MAX_LEVEL = 8
 
-function listStyle(paragraph: Pick<FlowTextParagraph, "bullet" | "checked">): Pick<FlowTextParagraph, "bullet" | "checked"> {
-  return paragraph.checked !== undefined
+function isList(paragraph: FlowTextParagraph): boolean {
+  return paragraph.checked !== undefined || Boolean(paragraph.bullet)
+}
+
+function listStyle(paragraph: Pick<FlowTextParagraph, "bullet" | "checked" | "level">): Pick<FlowTextParagraph, "bullet" | "checked" | "level"> {
+  const marker = paragraph.checked !== undefined
     ? { checked: paragraph.checked }
     : paragraph.bullet ? { bullet: true } : {}
+  return { ...marker, ...((paragraph.checked !== undefined || paragraph.bullet) && paragraph.level ? { level: paragraph.level } : {}) }
+}
+
+/** A nested item must follow a parent, without skipping a nesting level. */
+function normalizeListLevels(value: FlowRichText): FlowRichText {
+  const ancestors: number[] = []
+  return value.map((paragraph) => {
+    if (!isList(paragraph)) {
+      ancestors.length = 0
+      return { runs: paragraph.runs }
+    }
+    const sourceLevel = paragraph.level ?? 0
+    while (ancestors.length && ancestors[ancestors.length - 1] >= sourceLevel) ancestors.pop()
+    const level = Math.min(ancestors.length, FLOW_LIST_MAX_LEVEL)
+    ancestors.push(sourceLevel)
+    return { runs: paragraph.runs, ...listStyle({ ...paragraph, level }) }
+  })
 }
 
 export function richTextPlainText(value: FlowRichText): string {
@@ -78,7 +100,7 @@ export function normalizeRichText(value: FlowRichText): FlowRichText {
     }
     previous = line.paragraph
   }
-  return paragraphs
+  return normalizeListLevels(paragraphs)
 }
 
 /** Visual lines retain an item's indent without creating additional bullets. */
@@ -119,7 +141,10 @@ export function parseFlowRichText(value: unknown, plainText: string): FlowRichTe
     if (paragraph.checked !== undefined && typeof paragraph.checked !== "boolean") {
       throw new Error("checklist state must be true or false")
     }
-    return { runs, ...listStyle({ bullet: paragraph.bullet === true, checked: paragraph.checked }) }
+    if (paragraph.level !== undefined && (!Number.isInteger(paragraph.level) || paragraph.level < 0 || paragraph.level > FLOW_LIST_MAX_LEVEL)) {
+      throw new Error(`list nesting level must be an integer from 0 to ${FLOW_LIST_MAX_LEVEL}`)
+    }
+    return { runs, ...listStyle({ bullet: paragraph.bullet === true, checked: paragraph.checked, level: paragraph.level }) }
   })
   const normalized = normalizeRichText(rich)
   if (richTextPlainText(normalized) !== plainText) return undefined
@@ -152,13 +177,21 @@ function escapeHtml(text: string): string {
 /** Only our own escaped text and fixed tags enter a contenteditable field. */
 export function richTextHtml(value: FlowRichText, interactive = true): string {
   let html = ""
-  let list: "bullet" | "check" | undefined
-  value.forEach((paragraph, index) => {
+  const lists: ("bullet" | "check")[] = []
+  const closeList = () => { html += "</li></ul>"; lists.pop() }
+  normalizeListLevels(value).forEach((paragraph, index) => {
     const kind = paragraph.checked !== undefined ? "check" : paragraph.bullet ? "bullet" : undefined
-    if (kind !== list) {
-      if (list) html += "</ul>"
-      if (kind) html += kind === "check" ? '<ul data-flow-checklist="true">' : "<ul>"
-      list = kind
+    const level = paragraph.level ?? 0
+    if (!kind) {
+      while (lists.length) closeList()
+    } else {
+      while (lists.length > level + 1) closeList()
+      if (lists.length === level + 1 && lists[level] !== kind) closeList()
+      if (lists.length === level + 1) html += "</li>"
+      else {
+        html += kind === "check" ? '<ul data-flow-checklist="true">' : "<ul>"
+        lists.push(kind)
+      }
     }
     const text = paragraph.runs.map((run) => {
       let content = escapeHtml(run.text)
@@ -170,12 +203,13 @@ export function richTextHtml(value: FlowRichText, interactive = true): string {
     if (kind === "check") {
       const label = escapeHtml(`${paragraph.checked ? "Uncheck" : "Check"} ${paragraph.runs.map((run) => run.text).join("") || "item"}`)
       const checkbox = `<button type="button" role="checkbox" contenteditable="false" class="flow-checkbox nodrag nopan" data-flow-checkbox="${index}" aria-checked="${paragraph.checked}" aria-label="${label}"${interactive ? "" : ' disabled tabindex="-1"'}></button>`
-      html += `<li ${position} data-flow-checked="${paragraph.checked}">${checkbox}${text}</li>`
+      html += `<li ${position} data-flow-checked="${paragraph.checked}">${checkbox}${text}`
     } else {
-      html += kind === "bullet" ? `<li ${position}>${text}</li>` : `<div ${position}>${text}</div>`
+      html += kind === "bullet" ? `<li ${position}>${text}` : `<div ${position}>${text}</div>`
     }
   })
-  return html + (list ? "</ul>" : "")
+  while (lists.length) closeList()
+  return html
 }
 
 export type FlowTextSelection = { start: number; end: number }
@@ -195,14 +229,40 @@ export function richTextSelectedParagraphs(value: FlowRichText, selection: FlowT
 export function toggleChecklist(value: FlowRichText, selection: FlowTextSelection): FlowRichText {
   const selected = new Set(richTextSelectedParagraphs(value, selection))
   const remove = [...selected].every((index) => value[index].checked !== undefined)
-  return value.map((paragraph, index) => selected.has(index)
-    ? { runs: paragraph.runs, ...(!remove ? { checked: paragraph.checked ?? false } : {}) }
-    : paragraph)
+  return normalizeListLevels(value.map((paragraph, index) => selected.has(index)
+    ? { runs: paragraph.runs, ...(!remove ? listStyle({ checked: paragraph.checked ?? false, level: paragraph.level }) : {}) }
+    : paragraph))
 }
 
 export function checklistToBullets(value: FlowRichText, selection: FlowTextSelection): FlowRichText {
   const selected = new Set(richTextSelectedParagraphs(value, selection))
-  return value.map((paragraph, index) => selected.has(index) ? { runs: paragraph.runs, bullet: true } : paragraph)
+  return normalizeListLevels(value.map((paragraph, index) => selected.has(index) ? { runs: paragraph.runs, ...listStyle({ bullet: true, level: paragraph.level }) } : paragraph))
+}
+
+export function toggleBullets(value: FlowRichText, selection: FlowTextSelection): FlowRichText {
+  const selected = new Set(richTextSelectedParagraphs(value, selection))
+  const remove = [...selected].every((index) => value[index].bullet && value[index].checked === undefined)
+  return remove
+    ? normalizeListLevels(value.map((paragraph, index) => selected.has(index) ? { runs: paragraph.runs } : paragraph))
+    : checklistToBullets(value, selection)
+}
+
+/** Move selected list items with their descendants, preserving the list tree. */
+export function shiftListIndent(value: FlowRichText, selection: FlowTextSelection, direction: 1 | -1): FlowRichText {
+  const selected = richTextSelectedParagraphs(value, selection)
+  if (!selected.length || selected.some((index) => !isList(value[index]))) return value
+  const first = selected[0]
+  let last = selected[selected.length - 1]
+  const lastLevel = Math.min(...selected.map((index) => value[index].level ?? 0))
+  while (last + 1 < value.length && isList(value[last + 1]) && (value[last + 1].level ?? 0) > lastLevel) last += 1
+  if (direction === 1 && (first === 0 || !isList(value[first - 1]) || (value[first - 1].level ?? 0) < (value[first].level ?? 0))) return value
+  if (value.slice(first, last + 1).some((paragraph) => {
+    const level = (paragraph.level ?? 0) + direction
+    return level < 0 || level > FLOW_LIST_MAX_LEVEL
+  })) return value
+  return normalizeListLevels(value.map((paragraph, index) => index >= first && index <= last
+    ? { runs: paragraph.runs, ...listStyle({ ...paragraph, level: (paragraph.level ?? 0) + direction }) }
+    : paragraph))
 }
 
 function sliceRuns(runs: FlowTextRun[], start: number, end: number): FlowTextRun[] {
@@ -215,8 +275,8 @@ function sliceRuns(runs: FlowTextRun[], start: number, end: number): FlowTextRun
   return result
 }
 
-/** Split a task at the caret; an empty task exits the checklist. */
-export function continueChecklist(value: FlowRichText, selection: FlowTextSelection): { richText: FlowRichText; selection: FlowTextSelection } {
+/** Enter keeps the item's level; an empty item outdents, then exits the list. */
+export function continueList(value: FlowRichText, selection: FlowTextSelection): { richText: FlowRichText; selection: FlowTextSelection } {
   const selected = richTextSelectedParagraphs(value, selection)
   const first = selected[0] ?? 0
   const last = richTextSelectedParagraphs(value, { start: selection.end, end: selection.end })[0] ?? selected[selected.length - 1] ?? first
@@ -224,10 +284,14 @@ export function continueChecklist(value: FlowRichText, selection: FlowTextSelect
   const lastOffset = value.slice(0, last).reduce((length, paragraph) => length + richTextPlainText([paragraph]).length + 1, 0)
   const paragraph = value[first]
   if (!richTextPlainText([paragraph]).trim() && selection.start === selection.end) {
-    return { richText: value.map((paragraph, index) => index === first ? { runs: paragraph.runs } : paragraph), selection }
+    const richText = paragraph.level
+      ? shiftListIndent(value, selection, -1)
+      : normalizeListLevels(value.map((paragraph, index) => index === first ? { runs: paragraph.runs } : paragraph))
+    return { richText, selection }
   }
   const before = sliceRuns(paragraph.runs, 0, selection.start - offset)
   const after = sliceRuns(value[last].runs, selection.end - lastOffset, Infinity)
-  const richText = [...value.slice(0, first), { runs: before, checked: paragraph.checked }, { runs: after, checked: false }, ...value.slice(last + 1)]
+  const nextStyle = listStyle({ ...paragraph, checked: paragraph.checked !== undefined ? false : undefined })
+  const richText = normalizeListLevels([...value.slice(0, first), { runs: before, ...listStyle(paragraph) }, { runs: after, ...nextStyle }, ...value.slice(last + 1)])
   return { richText, selection: { start: selection.start + 1, end: selection.start + 1 } }
 }
