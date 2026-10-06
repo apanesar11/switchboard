@@ -3235,7 +3235,9 @@ function FlowEditorCanvas({
       const plain = !event.metaKey && !event.ctrlKey && !event.altKey
 
       if (event.key === "Tab" && plain && !event.isComposing) {
-        // A box's own text fields hand Tab to the canvas; other fields keep it.
+        // List fields consume Tab first, including at an indentation limit.
+        // Only an unhandled Tab from a box's text reaches the canvas behavior.
+        if (event.defaultPrevented) return
         const boxText =
           event.target instanceof HTMLElement && event.target.dataset.flowText !== undefined
         if (inControl || (inField && !boxText) || !onCanvas(event.target)) return

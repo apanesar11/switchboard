@@ -6,7 +6,10 @@ const path = require('node:path');
 app.setPath('userData', path.join(__dirname, 'profile'));
 app.whenReady().then(async () => {
   const window = new BrowserWindow({ show: false, width: 1200, height: 800, webPreferences: { offscreen: true, backgroundThrottling: false } });
-  const run = code => window.webContents.executeJavaScript(code, true);
+  const run = async code => {
+    try { return await window.webContents.executeJavaScript(code, true); }
+    catch (error) { throw new Error(`${error.message}\nRenderer script: ${code}`, { cause: error }); }
+  };
   const tick = () => run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
   const edit = async id => {
     await run(`document.querySelector('[data-id="${id}"]').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
@@ -31,8 +34,16 @@ app.whenReady().then(async () => {
     await tick();
   };
   const tab = async (shift = false) => {
-    await run(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: ${shift}, bubbles: true, cancelable: true }))`);
+    const result = await run(`(() => {
+      const key = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: ${shift}, bubbles: true, cancelable: true });
+      let bubbled = false;
+      const observe = event => { if (event === key) bubbled = true; };
+      window.addEventListener('keydown', observe);
+      try { document.activeElement.dispatchEvent(key); return { prevented: key.defaultPrevented, bubbled }; }
+      finally { window.removeEventListener('keydown', observe); }
+    })()`);
     await tick();
+    return result;
   };
   try {
     await window.loadFile(path.join(__dirname, 'fixture.html'));
@@ -257,10 +268,45 @@ app.whenReady().then(async () => {
     await run('window.selectFlowText(7, 7)');
     assert.deepEqual(await run('window.flowTextSelection(document.querySelector("[data-flow-text]"))'), { start: 7, end: 7 }, 'an empty parent caret stays before its children');
     await run('window.mount(window.snapshot)'); await tick();
+    await run(`window.mount({ kind: 'flow', nodes: [
+      { id: 'priority-parent', label: 'Original parent', position: { x: 20, y: 100 } },
+      { id: 'priority-child', label: 'One\\nTwo', align: 'left', position: { x: 300, y: 100 },
+        labelRichText: [{ bullet: true, runs: [{ text: 'One' }] }, { bullet: true, runs: [{ text: 'Two' }] }] }
+    ], edges: [{ from: 'priority-parent', to: 'priority-child' }] })`); await tick();
+    await edit('priority-child'); await run('window.selectFlowText(0, 0)');
+    assert.deepEqual(await tab(), { prevented: true, bubbled: false }, 'a first bullet consumes Tab even when it cannot indent');
+    assert.deepEqual(await tab(true), { prevented: true, bubbled: false }, 'a top-level bullet consumes Shift+Tab instead of editing its canvas parent');
+    assert.equal(await run('document.activeElement.closest("[data-id]").dataset.id'), 'priority-child');
+    await run('window.selectFlowText(4, 4)');
+    assert.deepEqual(await tab(), { prevented: true, bubbled: false });
+    assert.equal((await node('priority-child')).labelRichText[1].level, 1);
+    assert.deepEqual(await tab(true), { prevented: true, bubbled: false });
+    assert.equal((await node('priority-child')).labelRichText[1].level, undefined);
+    await run('window.editText("selectAll")'); await click('Checkbox list');
+    await run('window.selectFlowText(0, 0)');
+    assert.deepEqual(await tab(), { prevented: true, bubbled: false }, 'checkbox lists also consume Tab at the first item');
+    assert.deepEqual(await tab(true), { prevented: true, bubbled: false });
+    await run('window.selectFlowText(4, 4)'); await tab();
+    assert.equal((await node('priority-child')).labelRichText[1].level, 1);
+    await tab(true);
+    assert.equal(await run('document.activeElement.closest("[data-id]").dataset.id'), 'priority-child');
+    assert.equal(await run('window.editor.current.currentSpec().nodes.length'), 2, 'list keys never add a canvas node');
+    assert.equal(await run('window.editor.current.currentSpec().edges.length'), 1, 'list keys never add a canvas connection');
+    assert.equal((await node('priority-parent')).label, 'Original parent');
+    await run('window.editText("selectAll")'); await click('Checkbox list');
+    assert.equal((await node('priority-child')).labelRichText, undefined);
+    const canvasTab = await tab();
+    assert.deepEqual(canvasTab, { prevented: true, bubbled: true }, 'ordinary text still hands Tab to the canvas');
+    assert.equal(await run('window.editor.current.currentSpec().nodes.length'), 3);
+    assert.equal(await run('window.editor.current.currentSpec().edges.length'), 2);
+    await tab(true);
+    assert.equal(await run('document.querySelector(".react-flow__node.selected").dataset.id'), 'priority-child', 'ordinary Shift+Tab still selects the canvas parent');
+    assert.equal(await run('document.querySelector("[data-flow-text]")'), null, 'canvas Shift+Tab finishes text editing');
+    await run('window.mount(window.snapshot)'); await tick();
     if (process.env.SWITCHBOARD_RICH_TEXT_SCREENSHOT) {
       require('node:fs').writeFileSync(process.env.SWITCHBOARD_RICH_TEXT_SCREENSHOT, (await window.webContents.capturePage()).toPNG());
     }
-    console.log('PASS — Chromium: rich text, nested bullets and checklists, Tab/Shift+Tab, list continuation, undo/redo, save/reload, and native Edit menu actions');
+    console.log('PASS — Chromium: rich text, nested lists, list Tab precedence and canvas fallback, undo/redo, save/reload, and native Edit menu actions');
     app.exit(0);
   } catch (error) {
     console.error(error);
