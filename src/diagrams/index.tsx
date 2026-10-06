@@ -96,6 +96,9 @@ function create(element: HTMLElement, initial: Props) {
       const editor = instance.editor
       if (!editor || !instance.props.active) return false
       const focused = document.activeElement
+      // Documents own native source/title editing and focus navigation. A menu
+      // command inside their panel must never undo or delete the canvas behind it.
+      if (focused instanceof Element && focused.closest("[data-flow-document-panel]")) return false
       const field = focused instanceof HTMLElement ? focused.closest<HTMLElement>("[data-flow-text]") : null
       if (field?.isContentEditable && app.contains(field)) {
         return image ? true : editFlowText(field, action, text, writeClipboard)

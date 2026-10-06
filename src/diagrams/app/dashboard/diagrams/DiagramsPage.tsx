@@ -735,6 +735,8 @@ export function DiagramsPage({
                 ) : (
                   <DiagramCanvas
                     spec={loaded.spec}
+                    workspace={productId}
+                    diagramName={selected.name}
                     resetKey={`${selected.id}:${canvasNonce}:${fullscreen}`}
                   />
                 )}

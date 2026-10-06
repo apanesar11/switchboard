@@ -37,6 +37,7 @@ const config = require('./config.js');
 // its name. A diagram's size is not limited here (lib/diagrams/types.ts says why).
 const NAME_MAX = 120;
 const IMAGE_MAX_BYTES = 25 * 1024 * 1024;
+const DOCUMENT_MAX_BYTES = 10 * 1024 * 1024;
 const IMAGE_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
 const IMAGE_FILE_RE = /^[0-9a-f]{32}\.(png|jpg|webp)$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -82,6 +83,79 @@ function fileFor(wsId, id) {
   const dir = dirFor(wsId);
   if (!dir || typeof id !== 'string' || !UUID_RE.test(id)) return null;
   return path.join(dir, id.toLowerCase() + '.json');
+}
+
+function documentFile(wsId, id) {
+  const dir = dirFor(wsId);
+  if (!dir || typeof id !== 'string' || !UUID_RE.test(id)) return null;
+  return path.join(dir, 'documents', id.toLowerCase() + '.md');
+}
+
+function documentRevision(text) {
+  return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+async function readDocumentFile(file) {
+  const stat = await fs.promises.stat(file);
+  if (stat.size > DOCUMENT_MAX_BYTES) throw new Error('Documents must be 10 MB or smaller');
+  const text = await fs.promises.readFile(file, 'utf8');
+  return { text, revision: documentRevision(text), path: file };
+}
+
+function documentTextError(text) {
+  if (typeof text !== 'string') return 'Document text is required';
+  if (Buffer.byteLength(text, 'utf8') > DOCUMENT_MAX_BYTES) return 'Documents must be 10 MB or smaller';
+  return null;
+}
+
+// Markdown stays in an ordinary file, independent of the canvas JSON. Removing a
+// node keeps its file: undo, redo and a copied node must still be able to open it.
+async function createDocument(wsId, text = '') {
+  if (!dirFor(wsId)) return { ok: false, error: 'No workspace was named' };
+  const problem = documentTextError(text);
+  if (problem) return { ok: false, error: problem };
+  const id = crypto.randomUUID();
+  const file = documentFile(wsId, id);
+  return serial(file, async () => {
+    try {
+      await writeAtomic(file, text);
+      return { ok: true, data: { id, text, revision: documentRevision(text), path: file } };
+    } catch (err) {
+      return { ok: false, error: `Could not create the document: ${why(err)}` };
+    }
+  });
+}
+
+function getDocument(wsId, id) {
+  const file = documentFile(wsId, id);
+  if (!file) return Promise.resolve({ ok: false, error: 'Invalid document id' });
+  return serial(file, async () => {
+    try {
+      return { ok: true, data: { id: id.toLowerCase(), ...await readDocumentFile(file) } };
+    } catch (err) {
+      return { ok: false, error: err.code === 'ENOENT' ? 'Document file not found' : `Could not read the document: ${why(err)}` };
+    }
+  });
+}
+
+function saveDocument(wsId, id, text, revision) {
+  const file = documentFile(wsId, id);
+  const problem = documentTextError(text);
+  if (!file || problem || typeof revision !== 'string') {
+    return Promise.resolve({ ok: false, error: problem || 'Invalid document id or revision' });
+  }
+  return serial(file, async () => {
+    try {
+      const current = await readDocumentFile(file);
+      if (current.revision !== revision) {
+        return { ok: false, code: 'conflict', error: 'This file changed in another editor. Reload it, or save your version over it.' };
+      }
+      await writeAtomic(file, text);
+      return { ok: true, data: { id: id.toLowerCase(), text, revision: documentRevision(text), path: file } };
+    } catch (err) {
+      return { ok: false, error: `Could not save the document: ${why(err)}` };
+    }
+  });
 }
 
 function why(err) {
@@ -378,6 +452,9 @@ module.exports = {
   update,
   setArchived,
   remove,
+  createDocument,
+  getDocument,
+  saveDocument,
   saveImage,
   imagePath,
   settle,

@@ -4,7 +4,9 @@
 
 import type { DiagramDetail, DiagramSummary } from "./diagrams/types"
 
-export type Result<T> = { ok: true; data: T } | { ok: false; error: string }
+export type Result<T> = { ok: true; data: T } | { ok: false; error: string; code?: string }
+
+export type FlowDocument = { id: string; text: string; revision: string; path: string }
 
 /** What a CLI is doing while it answers, a line at a time — main/answer.js claudeStep(). */
 export type AnswerStep = {
@@ -94,6 +96,9 @@ type Bridge = {
   diagramsUpdate(wsId: string, id: string, name: string, spec: unknown): Promise<Result<DiagramDetail>>
   diagramsArchive(wsId: string, id: string, archived: boolean): Promise<Result<DiagramSummary>>
   diagramsDelete(wsId: string, id: string): Promise<Result<{ id: string }>>
+  diagramsCreateDocument(wsId: string, text: string): Promise<Result<FlowDocument>>
+  diagramsGetDocument(wsId: string, id: string): Promise<Result<FlowDocument>>
+  diagramsSaveDocument(wsId: string, id: string, text: string, revision: string): Promise<Result<FlowDocument>>
   diagramsSaveImage(bytes: Uint8Array, type: string): Promise<{ ok: true; src: string } | { ok: false; error: string }>
   diagramsClipboardImage(): Promise<{ ok: true; bytes: Uint8Array; type: string } | { ok: false; error: string }>
   diagramsDirty(count: number): Promise<unknown>

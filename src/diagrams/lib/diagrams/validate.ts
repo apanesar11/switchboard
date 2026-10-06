@@ -243,6 +243,11 @@ function optionalSize(raw: unknown, where: string): FlowSize | undefined {
 // An image's address. https only: the canvas puts it straight into an <img>
 // on an https page, and a picture there has no business arriving unencrypted.
 // Switchboard: or sbimg://image/<file>, a picture kept on this Mac (upload.ts).
+function documentId(raw: unknown, where: string): string {
+  if (typeof raw !== "string" || !isUuid(raw)) fail(where, '"documentId" must be a UUID')
+  return raw.toLowerCase()
+}
+
 function imageSrc(raw: unknown, where: string): string {
   if (raw === undefined || raw === null || raw === "") {
     fail(where, 'an "image" node needs "src", the https URL of the picture')
@@ -322,6 +327,7 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       // Each kept only on the shapes it means something for, so a box turned
       // from an image doesn't carry a dead URL around.
       src: shape === "image" ? imageSrc(entry.src, where) : undefined,
+      documentId: shape === "document" ? documentId(entry.documentId, where) : undefined,
       size:
         shape !== undefined && isFlowSizedShape(shape)
           ? optionalSize(entry.size, where)

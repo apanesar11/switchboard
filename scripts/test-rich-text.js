@@ -245,3 +245,21 @@ test('Enter and soft lines retain nesting; empty nested items outdent before lea
   assert.ok(flowNodeSize(nested).width > flowNodeSize(flat).width);
   assert.ok(flowNodeSize({ ...nested, size: { width: 100, height: 16 } }).height > flowNodeSize({ ...flat, size: { width: 100, height: 16 } }).height);
 });
+
+test('document references validate and round-trip through canvas layout without Markdown in the spec', () => {
+  const documentId = 'A0000000-0000-0000-0000-000000000001';
+  const parsed = parseDiagramSpec(spec({ label: 'Integration brief', shape: 'document', documentId }));
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.value.nodes[0].documentId, documentId.toLowerCase());
+  const canvas = layoutDiagram(parsed.value);
+  assert.deepEqual({ width: canvas.nodes[0].width, height: canvas.nodes[0].height }, { width: 240, height: 76 });
+  const saved = flowSpecFromCanvas({}, canvas.nodes, canvas.edges);
+  assert.equal(saved.nodes[0].documentId, documentId.toLowerCase());
+  assert.equal(parseDiagramSpec(saved).ok, true);
+  for (const invalid of [undefined, '../file.md', 'invalid']) {
+    assert.equal(parseDiagramSpec(spec({ label: 'Brief', shape: 'document', documentId: invalid })).ok, false);
+  }
+  const ordinary = parseDiagramSpec(spec({ label: 'Step', documentId }));
+  assert.equal(ordinary.ok, true);
+  assert.equal(ordinary.value.nodes[0].documentId, undefined);
+});

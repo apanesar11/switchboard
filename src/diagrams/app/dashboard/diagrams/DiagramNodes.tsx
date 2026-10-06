@@ -12,7 +12,7 @@
 
 import { useLayoutEffect, useRef, useState } from "react"
 import { Handle, Position, type NodeProps } from "@xyflow/react"
-import { RiImageLine, RiSparkling2Fill } from "@remixicon/react"
+import { RiImageLine, RiSparkling2Fill, RiFileTextLine } from "@remixicon/react"
 import { cx } from "@/lib/utils"
 import {
   FLOW_TEXT_METRICS,
@@ -233,6 +233,20 @@ export function FlowBox({
   children?: React.ReactNode
 }) {
   const { label, detail, shape, tone, dashed, align } = box
+  if (shape === "document") {
+    return (
+      <div className={cx("relative flex size-full items-center gap-3 rounded-xl border border-gray-300 bg-white px-4 shadow-sm dark:border-gray-700 dark:bg-gray-900", className)} title={`${label} · Double-click to open`}>
+        <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-brand-faint text-brand dark:bg-brand/15 dark:text-brand-light">
+          <RiFileTextLine className="size-6" aria-hidden="true" />
+        </div>
+        <div className="min-w-0 text-left">
+          <div className="truncate text-sm font-medium text-gray-900 dark:text-gray-50">{label}</div>
+          <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Markdown document</div>
+        </div>
+        {children}
+      </div>
+    )
+  }
   if (shape === "image") {
     return (
       <div className="relative size-full">

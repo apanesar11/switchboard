@@ -51,6 +51,7 @@ export const FLOW_SHAPES = [
   "note",
   "text",
   "image",
+  "document",
 ] as const
 
 export type FlowShape = (typeof FLOW_SHAPES)[number]
@@ -173,6 +174,8 @@ export type FlowNodeSpec = {
    * and only kept on one. `label` is its alt text.
    */
   src?: string
+  /** Stable UUID of a plain Markdown file beside the local diagrams. */
+  documentId?: string
   /**
    * How big someone made a note, a text or an image in the editor. Only kept
    * for those shapes. A note grows past it to fit its text, and a text uses

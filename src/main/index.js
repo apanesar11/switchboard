@@ -1313,6 +1313,9 @@ handle('sb:diagrams:create', (id, name, spec) => diagrams.create(id, name, spec)
 handle('sb:diagrams:update', (id, diagramId, name, spec) => diagrams.update(id, diagramId, name, spec));
 handle('sb:diagrams:archive', (id, diagramId, archived) => diagrams.setArchived(id, diagramId, archived));
 handle('sb:diagrams:delete', (id, diagramId) => diagrams.remove(id, diagramId));
+handle('sb:diagrams:createDocument', (id, text) => diagrams.createDocument(id, text));
+handle('sb:diagrams:getDocument', (id, documentId) => diagrams.getDocument(id, documentId));
+handle('sb:diagrams:saveDocument', (id, documentId, text, revision) => diagrams.saveDocument(id, documentId, text, revision));
 handle('sb:diagrams:saveImage', (bytes, type) => diagrams.saveImage(bytes, type));
 
 // The clipboard's picture, for Edit ▸ Paste over a canvas. The same read as

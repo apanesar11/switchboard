@@ -234,3 +234,9 @@ test('invalid summaries fail before replacing any selected content', () => {
   assert.throws(() => replaceFlowSelection(large, large.nodes.map(n => n.id), Array.from({ length: 7 }, (_, i) => ({ label: `Concept ${i}` }))), /one to six/);
   assert.equal(JSON.stringify(spec), before);
 });
+
+test('condense leaves document references intact instead of summarizing their names', () => {
+  const spec = flow([node('start', 0, 0), node('document', 300, 0, { shape: 'document', documentId: '00000000-0000-0000-0000-000000000001' })], [edge('start', 'document')]);
+  assert.throws(() => inspectFlowCondenseSelection(spec, ['start', 'document']), /Leave documents out/);
+  assert.equal(spec.nodes[1].documentId, '00000000-0000-0000-0000-000000000001');
+});

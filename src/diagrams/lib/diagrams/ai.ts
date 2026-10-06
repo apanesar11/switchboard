@@ -438,7 +438,7 @@ export function flowQuestionPath(
     const arrow = [tidy(edge.data?.label), carried].filter(Boolean).join(" → ") || undefined
     const label = tidy(from.data.label)
     // An image or an empty note says nothing, but the walk goes on past it.
-    if (label && from.data.shape !== "image") {
+    if (label && from.data.shape !== "image" && from.data.shape !== "document") {
       path.push({ label, detail: tidy(from.data.detail), arrow })
       carried = undefined
     } else {

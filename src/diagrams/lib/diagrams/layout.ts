@@ -216,6 +216,7 @@ export type FlowBoxNodeData = {
   italic: boolean
   /** An image's picture. */
   src?: string
+  documentId?: string
   /** The size someone gave a note, text or image — see FlowNodeSpec.size. */
   size?: FlowSize
   /** Written by ✦ Answer and not edited since — see FlowNodeSpec.ai. */
@@ -409,6 +410,7 @@ function detailHeight(lines: string[]): number {
 export function flowNodeSize(node: FlowSizing): FlowSize {
   const shape = node.shape ?? DEFAULT_FLOW_SHAPE
   if (shape === "image") return node.size ?? FLOW_IMAGE_DEFAULT_SIZE
+  if (shape === "document") return { width: 240, height: 76 }
 
   const { fontSize, lineHeight } =
     FLOW_TEXT_METRICS[node.textSize ?? DEFAULT_FLOW_TEXT_SIZE]
@@ -665,6 +667,7 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
       bold: node.bold === true,
       italic: node.italic === true,
       src: node.src,
+      documentId: node.documentId,
       size: node.size,
       ai: node.ai === true ? true : undefined,
       detached: node.detached === true ? true : undefined,

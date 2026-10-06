@@ -62,6 +62,9 @@ export function inspectFlowCondenseSelection(
   if (selected.some((node) => node.shape === "image")) {
     throw new Error("Condense supports text nodes. Leave images out of the selection.")
   }
+  if (selected.some((node) => node.shape === "document")) {
+    throw new Error("Leave documents out of the selection before condensing.")
+  }
   if (selected.some((node) => !(node.label.trim() || node.detail?.trim()))) {
     throw new Error("Every selected node needs text before it can be condensed.")
   }

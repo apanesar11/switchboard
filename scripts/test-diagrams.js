@@ -210,3 +210,69 @@ test('every selector is scoped to the editor, without adding specificity', () =>
   // A word that only starts like a root is an ordinary element.
   assert.equal(scopeSelector('header'), ':where(.sbdg) header');
 });
+
+// Markdown document nodes keep their text in ordinary files, with independent
+// revisions so a canvas autosave cannot overwrite an external editor's changes.
+test('documents store exact Markdown under the workspace and stay separate from diagram JSON', async () => {
+  const text = '# Brief\n\n**Selected words**\n\n- parent\n  - child\n- [ ] Open\n- [x] Done\n\n```js\nconst count = 2;\n```\n';
+  const made = await diagrams.createDocument('documents-1', text);
+  assert.equal(made.ok, true);
+  assert.equal(made.data.path, path.join(diagrams.dirFor('documents-1'), 'documents', made.data.id + '.md'));
+  assert.equal(fs.readFileSync(made.data.path, 'utf8'), text);
+  assert.deepEqual(await diagrams.getDocument('documents-1', made.data.id), made);
+  assert.equal((await diagrams.getDocument('documents-2', made.data.id)).ok, false);
+  const spec = { kind: 'flow', nodes: [{ id: 'brief', label: 'Brief', shape: 'document', documentId: made.data.id }], edges: [] };
+  const chart = await diagrams.create('documents-1', 'Reference flow', spec);
+  assert.equal(chart.ok, true);
+  spec.nodes[0].label = 'Renamed brief';
+  assert.equal((await diagrams.update('documents-1', chart.data.id, 'Reference flow', spec)).ok, true);
+  assert.equal((await diagrams.getDocument('documents-1', made.data.id)).data.path, made.data.path);
+  assert.equal((await diagrams.list('documents-1')).data.length, 1, 'Markdown files are not diagram rows');
+  await diagrams.remove('documents-1', chart.data.id);
+  assert.equal((await diagrams.getDocument('documents-1', made.data.id)).ok, true, 'files survive deletion for recovery and undo');
+});
+
+test('document saves require the current revision and never clobber another editor', async () => {
+  const { data } = await diagrams.createDocument('revisions-1', 'Original');
+  const saved = await diagrams.saveDocument('revisions-1', data.id, 'First edit', data.revision);
+  assert.equal(saved.ok, true);
+  const stale = await diagrams.saveDocument('revisions-1', data.id, 'Stale edit', data.revision);
+  assert.equal(stale.code, 'conflict');
+  fs.writeFileSync(data.path, 'External edit\n');
+  const external = await diagrams.saveDocument('revisions-1', data.id, 'Panel edit', saved.data.revision);
+  assert.equal(external.code, 'conflict');
+  assert.equal(fs.readFileSync(data.path, 'utf8'), 'External edit\n');
+  const reloaded = await diagrams.getDocument('revisions-1', data.id);
+  const resolved = await diagrams.saveDocument('revisions-1', data.id, 'Chosen version', reloaded.data.revision);
+  assert.equal(resolved.ok, true);
+  assert.equal(fs.readFileSync(data.path, 'utf8'), 'Chosen version');
+});
+
+test('concurrent document writes serialize and a copy has independent contents', async () => {
+  const { data } = await diagrams.createDocument('concurrent-docs', 'Before');
+  const results = await Promise.all([
+    diagrams.saveDocument('concurrent-docs', data.id, 'A', data.revision),
+    diagrams.saveDocument('concurrent-docs', data.id, 'B', data.revision),
+  ]);
+  assert.equal(results.filter(result => result.ok).length, 1);
+  assert.equal(results.filter(result => result.code === 'conflict').length, 1);
+  const original = (await diagrams.getDocument('concurrent-docs', data.id)).data;
+  const copy = (await diagrams.createDocument('copied-docs', original.text)).data;
+  assert.notEqual(copy.id, original.id);
+  await diagrams.saveDocument('copied-docs', copy.id, 'Independent edit', copy.revision);
+  assert.equal((await diagrams.getDocument('concurrent-docs', data.id)).data.text, original.text);
+  await diagrams.settle();
+  assert.deepEqual(fs.readdirSync(path.dirname(data.path)), [data.id + '.md']);
+});
+
+test('document storage rejects traversal, missing files and oversized text without creating a file', async () => {
+  for (const id of ['../escape', '', 'not-a-uuid']) {
+    assert.equal((await diagrams.getDocument('invalid-docs', id)).ok, false);
+    assert.equal((await diagrams.saveDocument('invalid-docs', id, 'text', 'version')).ok, false);
+  }
+  assert.equal((await diagrams.getDocument('invalid-docs', '00000000-0000-0000-0000-000000000000')).ok, false);
+  assert.equal((await diagrams.createDocument('', 'text')).ok, false);
+  assert.equal((await diagrams.createDocument('invalid-docs', null)).ok, false);
+  assert.equal((await diagrams.createDocument('invalid-docs', 'a'.repeat(10 * 1024 * 1024 + 1))).ok, false);
+  assert.equal(fs.existsSync(diagrams.dirFor('invalid-docs')), false);
+});

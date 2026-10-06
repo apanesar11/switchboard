@@ -679,6 +679,21 @@ the link — a dangling self-reference, the bytes gone and never in the Trash. M
 
 ### 4.17 Diagrams
 
+**Markdown documents.** A `shape: "document"` node stores a display label and UUID
+`documentId`; its source is a plain file at
+`<config dir>/diagrams/<workspace-folder>/documents/<documentId>.md`.
+`DocumentPanel.tsx` opens floating by default, with docked and focus layouts and
+Read / Write / Split modes. Rendering reuses `SB.markdown` with document soft breaks.
+The native textarea owns its editing history; Tab indents Markdown and panel events
+stay outside canvas shortcuts. `useFlowDocuments.ts` owns buffers and serial save
+queues per workspace, retaining failed edits across diagram switches. Saves use the
+file's content hash as a revision, refusing stale writes after an external edit.
+`diagramsCreateDocument`, `diagramsGetDocument`, and `diagramsSaveDocument` bridge to
+atomic writes in `main/diagrams.js`, whose `settle()` includes document writes.
+Copies and duplicates create independent files; removing nodes retains their files
+for undo and recovery. Archived canvases open documents in Read mode. The isolated
+production-bundle check is `npm run test:documents:browser`.
+
 The fifth workspace tab, **Diagrams** (added 2026-10-04, the user's ask: their web
 admin's diagram feature as a desktop app, inside Switchboard, with its ✦ Answer using
 "the corresponding workspace and the CLI tool … I should be able to select what CLI tool

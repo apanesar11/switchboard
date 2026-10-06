@@ -12,7 +12,7 @@
 // Panning and zooming are the only gestures, which is the whole interaction
 // budget for something you are reading.
 
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 import {
   Background,
   BackgroundVariant,
@@ -22,7 +22,9 @@ import {
   Panel,
   ReactFlow,
 } from "@xyflow/react"
-import { layoutDiagram } from "@/lib/diagrams/layout"
+import { layoutDiagram, type FlowBoxNodeData } from "@/lib/diagrams/layout"
+import { DocumentPanel, type DocumentView } from "./DocumentPanel"
+import { useFlowDocuments } from "./useFlowDocuments"
 import { cx } from "@/lib/utils"
 import type { DiagramSpec } from "@/lib/diagrams/types"
 import { diagramNodeTypes } from "./DiagramNodes"
@@ -53,13 +55,19 @@ type Props = {
    * in both of those cases anyway.
    */
   resetKey: string
+  workspace?: string
+  diagramName?: string
 }
 
-export function DiagramCanvas({ spec, resetKey }: Props) {
+export function DiagramCanvas({ spec, resetKey, workspace = "", diagramName }: Props) {
   const layout = useMemo(() => layoutDiagram(spec), [spec])
+  const [document, setDocument] = useState<FlowBoxNodeData | null>(null)
+  const [view, setView] = useState<DocumentView>("floating")
+  const documents = useFlowDocuments(workspace, document?.documentId)
 
   return (
-    <div className={cx("size-full bg-gray-50 dark:bg-gray-900", FLOW_EDGE_THEME)}>
+    <div className={cx("relative flex size-full min-w-0 bg-gray-50 dark:bg-gray-900", FLOW_EDGE_THEME)}>
+      <div className="h-full min-w-0 flex-1">
       <ReactFlow
         key={resetKey}
         nodes={layout.nodes}
@@ -75,6 +83,10 @@ export function DiagramCanvas({ spec, resetKey }: Props) {
         // mode is what lets an edge LAND on one. See FlowBoxNode.
         connectionMode={ConnectionMode.Loose}
         nodesFocusable={false}
+        onNodeDoubleClick={(_, node) => {
+          const box = node.data as FlowBoxNodeData
+          if (workspace && box.shape === "document") { setDocument(box); setView("floating") }
+        }}
         edgesFocusable={false}
         elementsSelectable={false}
         panOnScroll
@@ -128,6 +140,8 @@ export function DiagramCanvas({ spec, resetKey }: Props) {
           </Panel>
         ) : null}
       </ReactFlow>
+      </div>
+      {document?.documentId ? <DocumentPanel key={document.documentId} title={document.label} diagramName={diagramName} buffer={documents.active} view={view} onView={setView} readOnly onRename={() => {}} onEdit={() => {}} onSave={() => {}} onResolve={() => {}} onRetry={() => void documents.retry(document.documentId!, true)} onClose={() => setDocument(null)} /> : null}
     </div>
   )
 }

@@ -122,7 +122,7 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   pretending. Nothing here runs git: a file you make is untracked, exactly as it would
   be if you had made it in a shell.
 - **Diagrams** — flow diagrams for a workspace — boxes, arrows, sticky
-  notes, free text and pictures, arranged by hand. Click a shape on the toolbar down the
+  notes, free text, pictures and Markdown documents, arranged by hand. Click a shape on the toolbar down the
   left and click the canvas to place it; with a box selected, Tab adds the next one joined
   to its right and starts you typing, ⇧Tab steps back, the arrow keys move between boxes
   and ⌘D duplicates. Drag from a box's dot to draw an arrow. Drop, paste or pick a picture
@@ -145,6 +145,17 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   **New diagram** makes one, and **Actions** renames, archives or deletes the one on
   screen. Each diagram is a file in `~/.switchboard/diagrams/`, one folder per workspace —
   never in your repo.
+
+  Choose **Document** on the toolbar and click or drag it onto the canvas. A document
+  appears as an icon and name; double-click it or press Enter to open a scrollable
+  floating panel. Its controls also offer a docked panel and a wider focus view.
+  **Read**, **Write**, and **Split** show rendered Markdown, source, or both. Tab and
+  ⇧Tab indent and outdent Markdown before any canvas shortcuts run. Text autosaves to
+  `~/.switchboard/diagrams/<workspace-folder>/documents/<document-id>.md`; renaming the
+  card keeps its filename. The footer copies the file path for opening it elsewhere.
+  Copies get independent files, and removing a card keeps its file for undo and
+  recovery. External edits reload when you return to Switchboard; conflicting edits
+  offer **Reload file** or **Save my version**. Archived documents open for reading.
 
   **✦ Answer** leads a box's toolbar (and ⌘I or ⌘↵): write a question in a box and the
   answer comes back as a box for each part it has, hanging off it, as one undo step. Several boxes

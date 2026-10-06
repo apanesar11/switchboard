@@ -85,6 +85,9 @@ contextBridge.exposeInMainWorld('sb', {
   diagramsUpdate: (id, diagramId, name, spec) => ipcRenderer.invoke('sb:diagrams:update', id, diagramId, name, spec),
   diagramsArchive: (id, diagramId, archived) => ipcRenderer.invoke('sb:diagrams:archive', id, diagramId, !!archived),
   diagramsDelete: (id, diagramId) => ipcRenderer.invoke('sb:diagrams:delete', id, diagramId),
+  diagramsCreateDocument: (id, text) => ipcRenderer.invoke('sb:diagrams:createDocument', id, text),
+  diagramsGetDocument: (id, documentId) => ipcRenderer.invoke('sb:diagrams:getDocument', id, documentId),
+  diagramsSaveDocument: (id, documentId, text, revision) => ipcRenderer.invoke('sb:diagrams:saveDocument', id, documentId, text, revision),
   // A picture for a canvas: its bytes and MIME type in, { ok, src } out — the
   // sbimg://image/<file> address main serves it from.
   diagramsSaveImage: (bytes, type) => ipcRenderer.invoke('sb:diagrams:saveImage', bytes, type),

@@ -104,6 +104,7 @@ import {
 } from "@xyflow/react"
 import {
   RiAddLine,
+  RiFileTextLine,
   RiAlignCenter,
   RiAlignLeft,
   RiAlignRight,
@@ -228,6 +229,8 @@ import { imageUrlsFromDrop, isUrlDrag } from "@/lib/diagrams/image-search"
 import type { ProductId } from "@/lib/products"
 import { FIT_VIEW_OPTIONS } from "./DiagramCanvas"
 import { ImageSearchPanel, type ImageSearchAsk } from "./ImageSearchPanel"
+import { DocumentPanel, type DocumentView } from "./DocumentPanel"
+import { useFlowDocuments } from "./useFlowDocuments"
 import {
   FlowBox,
   FLOW_TEXT_WRAP,
@@ -278,7 +281,7 @@ const REVEAL_MARGIN = { left: 84, right: 32, top: 72, bottom: 64 }
  * What a click on the empty canvas does: select (dragging draws a selection
  * box), pan (dragging moves the view), or place a box, a note or a text.
  */
-type Tool = "select" | "hand" | "shape" | "note" | "text"
+type Tool = "select" | "hand" | "shape" | "note" | "text" | "document"
 
 /** A ✦ Answer being waited for. */
 type Asking = {
@@ -574,9 +577,9 @@ function isText(box: FlowBoxNodeData): boolean {
   return box.shape === "text"
 }
 
-/** Whether a node has text you can edit — everything but an image. */
+/** Whether a node has text you can edit directly on the canvas. */
 function hasText(box: FlowBoxNodeData): boolean {
-  return box.shape !== "image"
+  return box.shape !== "image" && box.shape !== "document"
 }
 
 function rectOf(node: Node): FlowRect {
@@ -599,6 +602,7 @@ function deselected<T extends { selected?: boolean }>(items: T[]): T[] {
 // the clipboard still holds them, so text copied since, from anywhere, never pastes
 // boxes from an older copy.
 type FlowCopy = {
+  documents?: Promise<Map<string, string>>
   text: string
   nodes: { id: string; position: { x: number; y: number }; width?: number; height?: number; data: FlowBoxNodeData }[]
   edges: {
@@ -955,7 +959,7 @@ function EditableFlowNode({ id, data, selected }: NodeProps) {
     !selectionRect &&
     !editing &&
     !connecting &&
-    !isFlowBoxShape(box.shape)
+    (box.shape === "note" || box.shape === "text" || box.shape === "image")
 
   return (
     <div className={cx("relative size-full", interactive && "group")}>
@@ -1156,6 +1160,15 @@ function FlowEditorCanvas({
   const [nodes, setNodes] = useState<Node[]>(initial.nodes)
   const [edges, setEdges] = useState<Edge[]>(initial.edges)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [documentNodeId, setDocumentNodeId] = useState<string | null>(null)
+  const [documentView, setDocumentView] = useState<DocumentView>("floating")
+  const [documentStartsWriting, setDocumentStartsWriting] = useState(false)
+  const documentNode = nodes.find((node) => node.id === documentNodeId && (node.data as FlowBoxNodeData).shape === "document")
+  const documentBox = documentNode?.data as FlowBoxNodeData | undefined
+  const documents = useFlowDocuments(productId, documentBox?.documentId)
+  const documentsFlush = documents.flush
+  const alive = useRef(true)
+  useEffect(() => () => { alive.current = false }, [])
 
   const [tool, setTool] = useState<Tool>("select")
   // Which box the shape tool places — the last one picked from its menu.
@@ -1194,7 +1207,7 @@ function FlowEditorCanvas({
     const timer = setTimeout(() => setAnswered(null), ANSWERED_NOTICE_MS)
     return () => clearTimeout(timer)
   }, [answered])
-  const placing = tool === "shape" || tool === "note" || tool === "text"
+  const placing = tool === "shape" || tool === "note" || tool === "text" || tool === "document"
   // For an upload landing later, which mustn't act on the tool it started with.
   const toolRef = useRef(tool)
   useEffect(() => {
@@ -1272,7 +1285,10 @@ function FlowEditorCanvas({
     return chainRef.current
   }, [])
 
-  const flush = useCallback(() => enqueueSave(latestRef.current), [enqueueSave])
+  const flush = useCallback(async () => {
+    await documentsFlush()
+    await enqueueSave(latestRef.current)
+  }, [enqueueSave, documentsFlush])
   useImperativeHandle(
     editorRef,
     () => ({
@@ -1311,7 +1327,7 @@ function FlowEditorCanvas({
   )
 
   // A picture still uploading is a change not yet saved, too.
-  const dirty = json !== savedJson || saving || uploading > 0
+  const dirty = json !== savedJson || saving || uploading > 0 || documents.dirty
   useEffect(() => {
     onDirtyRef.current?.(dirty)
   }, [dirty])
@@ -1735,9 +1751,11 @@ function FlowEditorCanvas({
     const right = (rect.x + rect.width) * zoom + x
     const top = rect.y * zoom + y
     const bottom = (rect.y + rect.height) * zoom + y
+    const floating = wrapperRef.current?.parentElement?.querySelector(".flow-document-floating")?.getBoundingClientRect()
+    const visibleWidth = floating ? Math.min(bounds.width, floating.left - bounds.left - 16) : bounds.width
     let dx = 0
     let dy = 0
-    if (right > bounds.width - REVEAL_MARGIN.right) dx = bounds.width - REVEAL_MARGIN.right - right
+    if (right > visibleWidth - REVEAL_MARGIN.right) dx = visibleWidth - REVEAL_MARGIN.right - right
     if (left + dx < REVEAL_MARGIN.left) dx = REVEAL_MARGIN.left - left
     if (bottom > bounds.height - REVEAL_MARGIN.bottom) {
       dy = bounds.height - REVEAL_MARGIN.bottom - bottom
@@ -1745,6 +1763,23 @@ function FlowEditorCanvas({
     if (top + dy < REVEAL_MARGIN.top) dy = REVEAL_MARGIN.top - top
     if (dx !== 0 || dy !== 0) void setViewport({ x: x + dx, y: y + dy, zoom }, { duration: 200 })
   }
+
+  useEffect(() => {
+    if (!documentNodeId || documentView === "focus") return
+    let frame = 0
+    const show = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        const node = nodesRef.current.find((entry) => entry.id === documentNodeId)
+        if (node) reveal(rectOf(node))
+      })
+    }
+    const observer = new ResizeObserver(show)
+    const panel = wrapperRef.current?.parentElement?.querySelector(".flow-document-panel")
+    if (panel) observer.observe(panel)
+    show()
+    return () => { cancelAnimationFrame(frame); observer.disconnect() }
+  }, [documentNodeId, documentView])
 
   // Makes `node` the whole selection.
   function select(node: Node) {
@@ -1823,10 +1858,32 @@ function FlowEditorCanvas({
     return { id, rect: { ...position, width, height } }
   }
 
-  // Adds a box, a note or a text from the toolbar where it was clicked or
-  // dropped (`at`, canvas coordinates): a box or a note centred there, a text
-  // starting there, the way a caret would.
-  function placeNew(shape: FlowBoxShape | "note" | "text", at: { x: number; y: number }) {
+  // Documents open beside the canvas; their Markdown is saved independently.
+  function openDocument(node: Node, writing = false) {
+    changeEditing(null)
+    setImagesOpen(false)
+    setImageMenu(false)
+    setTool("select")
+    setDocumentStartsWriting(writing)
+    setDocumentView("floating")
+    setDocumentNodeId(node.id)
+  }
+
+  async function placeDocument(at: { x: number; y: number }) {
+    const result = await documents.create()
+    if (!alive.current) return
+    if (!result.ok) { toast({ title: result.error, variant: "error" }); return }
+    record()
+    const box = { ...plainBox({ label: "Untitled document", shape: "rounded", tone: "default" }), shape: "document" as const, documentId: result.data.id }
+    const { width, height } = boxSize(box)
+    const position = clearOfBoxes({ x: snap(at.x - width / 2), y: snap(at.y - height / 2), width, height }, nodesRef.current.map(rectOf))
+    const inserted = insertBox(box, position)
+    openDocument(nodesRef.current.find((node) => node.id === inserted.id)!, true)
+  }
+
+  // Places a toolbar item at the click or drop, centred except for free text.
+  function placeNew(shape: FlowBoxShape | "note" | "text" | "document", at: { x: number; y: number }) {
+    if (shape === "document") { void placeDocument(at); return }
     record()
     const item = PALETTE.find((entry) => entry.shape === shape)
     const box =
@@ -1985,6 +2042,7 @@ function FlowEditorCanvas({
   // anything else, the panel shows the page it showed last, or Google Images'
   // own first page. Again while open, it searches again, or takes you to its field.
   function openImages() {
+    setDocumentNodeId(null)
     setImageMenu(false)
     const chosen = nodesRef.current.filter((node) => node.selected)
     const box = chosen.length === 1 ? (chosen[0].data as FlowBoxNodeData) : null
@@ -2059,7 +2117,7 @@ function FlowEditorCanvas({
     // there is no picture to repeat. A note keeps its size; a text runs as
     // wide as its own words.
     const box: FlowBoxNodeData =
-      from.shape === "image"
+      from.shape === "image" || from.shape === "document"
         ? plainBox({ label: "", shape: "rounded", tone: "default" })
         : {
             ...from,
@@ -2226,30 +2284,42 @@ function FlowEditorCanvas({
     return true
   }
 
-  function duplicate(node: Node) {
+  function duplicate(node: Node, documentCopied = false) {
+    const original = node.data as FlowBoxNodeData
+    if (original.shape === "document" && original.documentId && !documentCopied) {
+      void (async () => {
+        const content = await documents.read(original.documentId!)
+        if (!content.ok) { toast({ title: content.error, variant: "error" }); return }
+        const created = await documents.create(content.data)
+        if (!alive.current) return
+        if (!created.ok) { toast({ title: created.error, variant: "error" }); return }
+        duplicate({ ...node, data: { ...original, documentId: created.data.id } }, true)
+      })()
+      return
+    }
     record()
     const box = node.data as FlowBoxNodeData
+    const current = nodesRef.current
     const rect = rectOf(node)
     const position = clearOfBoxes(
       { ...rect, y: rect.y + rect.height + FLOW_TAB_GAP_Y },
-      showing(nodes, edges).nodes.map(rectOf),
+      showing(current, edgesRef.current).nodes.map(rectOf),
     )
     const id = nextFlowNodeId(
-      nodes.map((other) => other.id),
+      current.map((other) => other.id),
       box.label,
     )
-    setNodes((current) => [
-      ...deselected(current),
-      {
-        id,
-        type: EDIT_NODE_TYPE,
-        position,
-        width: rect.width,
-        height: rect.height,
-        data: { ...box },
-        selected: true,
-      },
-    ])
+    const added: Node = {
+      id,
+      type: EDIT_NODE_TYPE,
+      position,
+      width: rect.width,
+      height: rect.height,
+      data: { ...box },
+      selected: true,
+    }
+    nodesRef.current = [...deselected(current), added]
+    setNodes((now) => [...deselected(now), added])
     setEdges(deselected)
     settleSelection()
     reveal({ ...rect, ...position })
@@ -2271,7 +2341,15 @@ function FlowEditorCanvas({
       .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
       .map((node) => clipboardWords(node.data as FlowBoxNodeData))
       .join("\n")
+    const documentIds = [...new Set(chosen.map((node) => (node.data as FlowBoxNodeData).documentId).filter((id): id is string => !!id))]
     flowCopy = {
+      // Capture the words at Copy time, including edits awaiting autosave. A paste
+      // into any workspace creates independent Markdown files from this snapshot.
+      documents: documentIds.length ? Promise.all(documentIds.map(async (id) => {
+        const result = await documents.read(id)
+        if (!result.ok) throw new Error(result.error)
+        return [id, result.data] as const
+      })).then((pairs) => new Map(pairs)) : undefined,
       text,
       nodes: chosen.map((node) => ({
         id: node.id,
@@ -2290,6 +2368,7 @@ function FlowEditorCanvas({
           data: { ...((edge.data as FlowEdgeData | undefined) ?? { dashed: false }) },
         })),
     }
+    void flowCopy.documents?.catch(() => {})
     writeClipboard(text)
     return true
   }
@@ -2297,20 +2376,36 @@ function FlowEditorCanvas({
   // ⌘V: what ⌘C copied, as new boxes centred on the pointer — or the middle of
   // the view, before the pointer has been over the canvas — arranged as they
   // were, with the arrows between them, and selected. One undo step.
-  function pasteBoxes(text: string): boolean {
-    const copy = flowCopy
+  function pasteBoxes(text: string, prepared?: FlowCopy, position?: { x: number; y: number }): boolean {
+    const copy = prepared ?? flowCopy
     if (!copy || !sameClipboard(text, copy.text)) return false
+    const bounds = wrapperRef.current?.getBoundingClientRect()
+    const pointer = pointerRef.current
+    const spot = position ?? screenToFlowPosition(
+      pointer ?? (bounds ? { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } : { x: 0, y: 0 }),
+    )
+    if (copy.documents) {
+      void (async () => {
+        try {
+          const contents = await copy.documents!
+          const ids = new Map<string, string>()
+          for (const [id, content] of contents) {
+            const result = await documents.create(content)
+            if (!result.ok) throw new Error(result.error)
+            ids.set(id, result.data.id)
+          }
+          if (!alive.current) return
+          pasteBoxes(text, { ...copy, documents: undefined, nodes: copy.nodes.map((node) => ({ ...node, data: { ...node.data, documentId: node.data.documentId ? ids.get(node.data.documentId) : undefined } })) }, spot)
+        } catch (error) { if (alive.current) toast({ title: error instanceof Error ? error.message : "Could not copy document", variant: "error" }) }
+      })()
+      return true
+    }
     record()
     lastRecordAt.current = 0
     const left = Math.min(...copy.nodes.map((node) => node.position.x))
     const top = Math.min(...copy.nodes.map((node) => node.position.y))
     const right = Math.max(...copy.nodes.map((node) => node.position.x + (node.width ?? FLOW_NODE_WIDTH)))
     const bottom = Math.max(...copy.nodes.map((node) => node.position.y + (node.height ?? 0)))
-    const bounds = wrapperRef.current?.getBoundingClientRect()
-    const pointer = pointerRef.current
-    const spot = screenToFlowPosition(
-      pointer ?? (bounds ? { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } : { x: 0, y: 0 }),
-    )
     // On the grid, as everything placed or dragged is.
     const snap = (value: number) => Math.round(value / SNAP_GRID[0]) * SNAP_GRID[0]
     const dx = snap(spot.x - (left + right) / 2)
@@ -3007,7 +3102,7 @@ function FlowEditorCanvas({
     }
     const dropped = event.dataTransfer.getData(DRAG_MIME)
     const shape =
-      dropped === "note" || dropped === "text"
+      dropped === "note" || dropped === "text" || dropped === "document"
         ? dropped
         : FLOW_BOX_SHAPES.find((option) => option === dropped)
     if (!shape) return
@@ -3119,6 +3214,7 @@ function FlowEditorCanvas({
       return true
     }
     if (soleNode) {
+      if ((soleNode.data as FlowBoxNodeData).shape === "document") { openDocument(soleNode); return true }
       if (!hasText(soleNode.data as FlowBoxNodeData)) return false
       changeEditing(soleNode.id)
       return true
@@ -3245,6 +3341,7 @@ function FlowEditorCanvas({
     }
 
     function onKeyDown(event: KeyboardEvent) {
+      if (event.target instanceof Element && event.target.closest("[data-flow-document-panel]")) return
       const shortcuts = shortcutsRef.current
       const inField = isTextField(event.target)
       const inControl =
@@ -3426,7 +3523,7 @@ function FlowEditorCanvas({
           under it. Everything measured from wrapperRef is the canvas alone. In a
           narrow window the panel gives way first: the canvas keeps 360px, room
           for the rail and the menus beside it, which it clips. */}
-      <div className="flex size-full">
+      <div className="relative flex size-full min-w-0">
         <div
           ref={wrapperRef}
           className={cx(
@@ -3491,6 +3588,7 @@ function FlowEditorCanvas({
               }
             }}
             onNodeDoubleClick={(_, node) => {
+              if (tool !== "hand" && (node.data as FlowBoxNodeData).shape === "document") openDocument(node)
               if (tool !== "hand" && hasText(node.data as FlowBoxNodeData)) changeEditing(node.id)
             }}
             onPaneClick={onPaneClick}
@@ -3590,6 +3688,7 @@ function FlowEditorCanvas({
                       ? () => changeEditing(soleNode.id)
                       : undefined
                   }
+                  onOpenDocument={soleNode && (soleNode.data as FlowBoxNodeData).shape === "document" ? () => openDocument(soleNode) : undefined}
                   onDuplicate={soleNode ? () => duplicate(soleNode) : undefined}
                   onDelete={deleteSelection}
                   branch={
@@ -3767,10 +3866,15 @@ function FlowEditorCanvas({
                   </span>
                 ) : null}
                 <SaveStatus
-                  saving={saving}
-                  dirty={json !== savedJson}
-                  error={saveError}
-                  onRetry={() => void flush()}
+                  saving={saving || documents.saving}
+                  dirty={dirty}
+                  error={saveError ?? documents.problem?.error ?? null}
+                  onRetry={() => {
+                    const failedId = documents.problem?.id
+                    const problem = failedId ? nodesRef.current.find((node) => (node.data as FlowBoxNodeData).documentId === failedId) : undefined
+                    if (problem) openDocument(problem)
+                    void flush()
+                  }}
                 />
               </div>
             </Panel>
@@ -3801,6 +3905,23 @@ function FlowEditorCanvas({
             />
           ) : null}
         </div>
+        {documentBox?.documentId && documentNode ? (
+          <DocumentPanel
+            key={documentNode.id}
+            buffer={documents.active}
+            title={documentBox.label}
+            diagramName={diagramName}
+            view={documentView}
+            onView={setDocumentView}
+            initialWrite={documentStartsWriting}
+            onRename={(label) => updateNode(documentNode.id, { label }, true)}
+            onEdit={(text) => documents.edit(documentBox.documentId!, text)}
+            onSave={() => void documents.save(documentBox.documentId!)}
+            onRetry={() => void documents.retry(documentBox.documentId!, true)}
+            onResolve={(overwrite) => void documents.resolve(documentBox.documentId!, overwrite)}
+            onClose={() => { void documents.flush(); setDocumentNodeId(null) }}
+          />
+        ) : null}
         {imagesOpen ? (
           <ImageSearchPanel
             ask={imagesAsk}
@@ -4118,6 +4239,7 @@ function BoxBar({
   count,
   onChange,
   onEditText,
+  onOpenDocument,
   onDuplicate,
   onDelete,
   ai,
@@ -4128,6 +4250,7 @@ function BoxBar({
   /** Everything selected, arrows included — what Delete removes. */
   count: number
   onChange: (patch: Partial<FlowBoxNodeData>) => void
+  onOpenDocument?: () => void
   onEditText?: () => void
   onDuplicate?: () => void
   onDelete: () => void
@@ -4143,7 +4266,7 @@ function BoxBar({
   const tone = shared(boxes, "tone")
   const dashed = shared(boxes, "dashed")
   const allBoxes = boxes.every((box) => isFlowBoxShape(box.shape))
-  const colourable = boxes.every((box) => box.shape !== "image")
+  const colourable = boxes.every((box) => box.shape !== "image" && box.shape !== "document")
   // Swatches drawn as notes or ink only when every node selected is one.
   const swatch: "box" | "note" | "text" =
     sharedShape === "note" ? "note" : sharedShape === "text" ? "text" : "box"
@@ -4161,6 +4284,7 @@ function BoxBar({
           <BarDivider />
         </>
       ) : null}
+      {onOpenDocument ? <BarButton label="Open document · Enter" onClick={onOpenDocument}><RiFileTextLine className="size-4" aria-hidden="true" /></BarButton> : null}
       {onEditText ? (
         <>
           <BarButton label="Edit text · Enter" onClick={onEditText}>
@@ -5300,6 +5424,9 @@ function ToolRail({
       <RailButton label="Text" shortcut="T" active={tool === "text"} onClick={() => onTool(tool === "text" ? "select" : "text")} drag="text">
         <RiText className="size-4" aria-hidden="true" />
       </RailButton>
+      <RailButton label="Document" active={tool === "document"} onClick={() => onTool(tool === "document" ? "select" : "document")} drag="document">
+        <RiFileTextLine className="size-4" aria-hidden="true" />
+      </RailButton>
       <div className="relative">
         <RailButton
           label={uploading ? "Uploading…" : "Image"}
@@ -5461,7 +5588,7 @@ function RailButton({
    */
   expanded?: boolean
   onClick: () => void
-  drag?: FlowBoxShape | "note" | "text"
+  drag?: FlowBoxShape | "note" | "text" | "document"
   /** False while something it opened is showing where the tip would go. */
   tip?: boolean
   children: React.ReactNode

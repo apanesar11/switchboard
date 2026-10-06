@@ -99,7 +99,7 @@ export function flowSpecFromCanvas(
   )
 
   const specNodes: FlowNodeSpec[] = nodes.filter((node) => !blank.has(node.id)).map((node) => {
-    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, size, ai, detached } =
+    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, detached } =
       node.data
     const cleanLabel = cleanBoxText(label) ?? (shape === "note" ? "" : UNTITLED_FLOW_LABEL)
     const cleanDetail = cleanBoxText(detail)
@@ -124,6 +124,7 @@ export function flowSpecFromCanvas(
       detached: detached === true ? true : undefined,
       position: { x: pixel(node.position.x), y: pixel(node.position.y) },
       src: shape === "image" ? src : undefined,
+      documentId: shape === "document" ? documentId : undefined,
       size:
         isFlowSizedShape(shape) && size
           ? { width: pixel(size.width), height: pixel(size.height) }
