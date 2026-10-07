@@ -1,6 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react"
-import { RiCloseLine, RiFileTextLine, RiLayoutRightLine, RiFullscreenLine, RiWindowLine, RiArrowGoBackLine, RiCheckLine, RiFileCopyLine } from "@remixicon/react"
-import { writeClipboard } from "@/lib/bridge"
+import { RiCloseLine, RiFileTextLine, RiLayoutRightLine, RiFullscreenLine, RiWindowLine, RiArrowGoBackLine, RiCheckLine } from "@remixicon/react"
+import type { Result } from "@/lib/bridge"
+import { CopyPathButton } from "./DiagramFileCopy"
 import type { DocumentBuffer } from "./useFlowDocuments"
 
 export type DocumentView = "floating" | "docked" | "focus"
@@ -15,7 +16,7 @@ function Markdown({ text }: { text: string }) {
   return <div ref={ref} className="flow-document-markdown" />
 }
 
-export function DocumentPanel({ buffer, title, diagramName, view, onView, onRename, onEdit, onSave, onResolve, onRetry, onClose, initialWrite = false, readOnly = false }: {
+export function DocumentPanel({ buffer, title, diagramName, view, onView, onRename, onEdit, onSave, onCopyPath, onResolve, onRetry, onClose, initialWrite = false, readOnly = false }: {
   buffer?: DocumentBuffer
   title: string
   diagramName?: string
@@ -24,6 +25,7 @@ export function DocumentPanel({ buffer, title, diagramName, view, onView, onRena
   onRename(title: string): void
   onEdit(text: string): void
   onSave(): void
+  onCopyPath(): Promise<Result<string>>
   onResolve(overwrite: boolean): void
   onRetry(): void
   onClose(): void
@@ -209,7 +211,7 @@ export function DocumentPanel({ buffer, title, diagramName, view, onView, onRena
         <footer className="flow-document-footer">
           <span role="status">{ready && !buffer?.error ? <RiCheckLine size={14} /> : null}{buffer?.error ? "Save needs attention" : ready ? status : "Markdown file"}</span>
           <span>{text.trim() ? text.trim().split(/\s+/).length.toLocaleString() : 0} words</span>
-          {buffer?.path ? <button title={buffer.path} aria-label="Copy Markdown file path" onClick={() => writeClipboard(buffer.path)}><RiFileCopyLine size={14} /> .md file</button> : null}
+          {buffer?.path ? <CopyPathButton label="Copy Markdown file path" onPath={onCopyPath} disabled={!ready}>.md file</CopyPathButton> : null}
         </footer>
       </section>
     </div>

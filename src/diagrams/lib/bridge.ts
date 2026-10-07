@@ -100,9 +100,10 @@ type Bridge = {
   diagramsGetDocument(wsId: string, id: string): Promise<Result<FlowDocument>>
   diagramsSaveDocument(wsId: string, id: string, text: string, revision: string): Promise<Result<FlowDocument>>
   diagramsSaveImage(bytes: Uint8Array, type: string): Promise<{ ok: true; src: string } | { ok: false; error: string }>
+  diagramsGetImagePath(src: string): Promise<Result<string>>
   diagramsClipboardImage(): Promise<{ ok: true; bytes: Uint8Array; type: string } | { ok: false; error: string }>
   diagramsDirty(count: number): Promise<unknown>
-  writeClipboard(text: string): Promise<unknown>
+  writeClipboard(text: string): Promise<{ ok: true } | { ok: false; error: string }>
   answerStatus(opts?: { fresh?: boolean }): Promise<AnswerStatus | { ok: false; error: string }>
   answerSetSettings(patch: Partial<AnswerSettings>): Promise<AnswerStatus | { ok: false; error: string }>
   answerStart(

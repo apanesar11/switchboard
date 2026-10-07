@@ -193,6 +193,19 @@ test('a picture is kept once, by content, and served only by its own name', asyn
   assert.equal((await diagrams.saveImage(new Uint8Array(0), 'image/png')).ok, false);
 });
 
+test('image paths resolve only existing stored pictures, never arbitrary files or traversal', async () => {
+  const saved = await diagrams.saveImage(Buffer.from('example picture'), 'image/png');
+  const expected = diagrams.imagePath(saved.src.slice('sbimg://image/'.length));
+  assert.deepEqual(await diagrams.getImagePath(saved.src), { ok: true, data: expected });
+  for (const src of [null, {}, expected, 'file://' + expected, 'https://example.com/picture.png',
+    'sbimg://image/../config.json', 'sbimg://image/%2e%2e%2fconfig.json',
+    saved.src + '?extra=1', saved.src + '#extra', saved.src.replace('sbimg://image/', 'sbimg://other/')]) {
+    assert.equal((await diagrams.getImagePath(src)).ok, false);
+  }
+  await fs.promises.unlink(expected);
+  assert.deepEqual(await diagrams.getImagePath(saved.src), { ok: false, error: 'Image file not found' });
+});
+
 // ---------------------------------------------------------------------------
 // the bundle's stylesheet stays inside .sbdg
 // ---------------------------------------------------------------------------

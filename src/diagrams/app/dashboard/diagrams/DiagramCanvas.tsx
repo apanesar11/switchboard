@@ -9,8 +9,8 @@
 //
 // Read-only is enforced on every axis React Flow offers rather than by leaving
 // handlers off: no dragging nodes, no connecting, no selecting, no deleting.
-// Panning and zooming are the only gestures, which is the whole interaction
-// budget for something you are reading.
+// Panning, zooming, opening documents and copying file paths remain available
+// while reading a diagram.
 
 import { useMemo, useState } from "react"
 import {
@@ -25,6 +25,7 @@ import {
 import { layoutDiagram, type FlowBoxNodeData } from "@/lib/diagrams/layout"
 import { DocumentPanel, type DocumentView } from "./DocumentPanel"
 import { useFlowDocuments } from "./useFlowDocuments"
+import { DiagramFileCopyContext } from "./DiagramFileCopy"
 import { cx } from "@/lib/utils"
 import type { DiagramSpec } from "@/lib/diagrams/types"
 import { diagramNodeTypes } from "./DiagramNodes"
@@ -66,6 +67,7 @@ export function DiagramCanvas({ spec, resetKey, workspace = "", diagramName }: P
   const documents = useFlowDocuments(workspace, document?.documentId)
 
   return (
+    <DiagramFileCopyContext.Provider value={documents.getPath}>
     <div className={cx("relative flex size-full min-w-0 bg-gray-50 dark:bg-gray-900", FLOW_EDGE_THEME)}>
       <div className="h-full min-w-0 flex-1">
       <ReactFlow
@@ -141,7 +143,8 @@ export function DiagramCanvas({ spec, resetKey, workspace = "", diagramName }: P
         ) : null}
       </ReactFlow>
       </div>
-      {document?.documentId ? <DocumentPanel key={document.documentId} title={document.label} diagramName={diagramName} buffer={documents.active} view={view} onView={setView} readOnly onRename={() => {}} onEdit={() => {}} onSave={() => {}} onResolve={() => {}} onRetry={() => void documents.retry(document.documentId!, true)} onClose={() => setDocument(null)} /> : null}
+      {document?.documentId ? <DocumentPanel key={document.documentId} title={document.label} diagramName={diagramName} buffer={documents.active} view={view} onView={setView} readOnly onRename={() => {}} onEdit={() => {}} onSave={() => {}} onCopyPath={() => documents.getPath(document.documentId!)} onResolve={() => {}} onRetry={() => void documents.retry(document.documentId!, true)} onClose={() => setDocument(null)} /> : null}
     </div>
+    </DiagramFileCopyContext.Provider>
   )
 }

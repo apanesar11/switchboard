@@ -1317,6 +1317,18 @@ handle('sb:diagrams:createDocument', (id, text) => diagrams.createDocument(id, t
 handle('sb:diagrams:getDocument', (id, documentId) => diagrams.getDocument(id, documentId));
 handle('sb:diagrams:saveDocument', (id, documentId, text, revision) => diagrams.saveDocument(id, documentId, text, revision));
 handle('sb:diagrams:saveImage', (bytes, type) => diagrams.saveImage(bytes, type));
+handle('sb:diagrams:getImagePath', async src => {
+  // Imported specs can name an HTTPS picture. Keep a local copy before handing
+  // its path to a terminal, using the same fetch and storage as a canvas drop.
+  if (typeof src === 'string' && /^https:\/\//i.test(src)) {
+    const fetched = await images.fetchImage(src);
+    if (!fetched.ok) return fetched;
+    const saved = await diagrams.saveImage(fetched.bytes, fetched.type);
+    if (!saved.ok) return saved;
+    src = saved.src;
+  }
+  return diagrams.getImagePath(src);
+});
 
 // The clipboard's picture, for Edit ▸ Paste over a canvas. The same read as
 // clipboardImagePaste() below, handing back the bytes rather than a file path.

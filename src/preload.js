@@ -91,6 +91,8 @@ contextBridge.exposeInMainWorld('sb', {
   // A picture for a canvas: its bytes and MIME type in, { ok, src } out — the
   // sbimg://image/<file> address main serves it from.
   diagramsSaveImage: (bytes, type) => ipcRenderer.invoke('sb:diagrams:saveImage', bytes, type),
+  // An existing local path; HTTPS pictures are downloaded into the image store first.
+  diagramsGetImagePath: src => ipcRenderer.invoke('sb:diagrams:getImagePath', src),
   // The clipboard's picture as { ok, bytes, type } — Edit ▸ Paste over the canvas,
   // which a menu item delivers instead of a paste event.
   diagramsClipboardImage: () => ipcRenderer.invoke('sb:diagrams:clipboardImage'),

@@ -1,18 +1,25 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, nativeImage, protocol, net } = require('electron');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const diagrams = require(path.join(process.env.SWITCHBOARD_DOCUMENT_TEST_REPO, 'src/main/diagrams'));
 app.setPath('userData', path.join(__dirname, 'profile'));
 const workspace = 'fictional-documents';
-const methods = { List: 'list', Get: 'get', Create: 'create', Update: 'update', Archive: 'setArchived', Delete: 'remove', CreateDocument: 'createDocument', GetDocument: 'getDocument', SaveDocument: 'saveDocument' };
+const methods = { List: 'list', Get: 'get', Create: 'create', Update: 'update', Archive: 'setArchived', Delete: 'remove', CreateDocument: 'createDocument', GetDocument: 'getDocument', SaveDocument: 'saveDocument', GetImagePath: 'getImagePath' };
 for (const [name, method] of Object.entries(methods)) ipcMain.handle('diagram:' + name, (_, ...args) => diagrams[method](...args));
 let clipboard = '';
-ipcMain.handle('clipboard:write', (_, text) => { clipboard = text; return { ok: true }; });
+let clipboardFails = false;
+ipcMain.handle('clipboard:write', (_, text) => { if (clipboardFails) return { ok: false, error: 'Clipboard unavailable' }; clipboard = text; return { ok: true }; });
+protocol.registerSchemesAsPrivileged([{ scheme: 'sbimg', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 
 app.whenReady().then(async () => {
+  protocol.handle('sbimg', async request => {
+    const result = await diagrams.getImagePath(request.url);
+    return result.ok ? net.fetch(pathToFileURL(result.data).toString()) : new Response('not found', { status: 404 });
+  });
   const window = new BrowserWindow({ show: false, width: 1440, height: 960, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), offscreen: true, backgroundThrottling: false } });
   const run = async code => {
     try { return await window.webContents.executeJavaScript(code, true); }
@@ -49,14 +56,52 @@ app.whenReady().then(async () => {
   try {
     const originalText = '# Integration brief\n\nA **clear** explanation with *details*.\n\n## Supported connections\n\n- Point of sale\n  - Orders\n  - Refunds\n- Advertising\n\n## Checklist\n\n- [ ] Confirm scope\n- [x] Draft design\n\n> Keep the canvas readable.\n\n| System | Purpose |\n| --- | --- |\n| Orders | Sales events |\n\n```js\nconst ready = true;\n```\n\n' + Array.from({ length: 24 }, (_, i) => `### Detail ${i + 1}\n\nAdditional context for the flowchart, written as a Markdown file.\n`).join('\n');
     const made = await diagrams.createDocument(workspace, originalText);
+    const picture = await diagrams.saveImage(nativeImage.createFromBitmap(Buffer.from(Array.from({ length: 240 * 160 }, () => [210, 230, 250, 255]).flat()), { width: 240, height: 160 }).toPNG(), 'image/png');
+    const picturePath = (await diagrams.getImagePath(picture.src)).data;
     const chart = await diagrams.create(workspace, 'Example flow', { kind: 'flow', nodes: [
       { id: 'start', label: 'Connect the systems', position: { x: 30, y: 130 } },
       { id: 'brief', label: 'Integration brief', shape: 'document', documentId: made.data.id, position: { x: 330, y: 130 } },
+      { id: 'picture', label: 'Reference image', shape: 'image', src: picture.src, width: 240, height: 160, position: { x: 330, y: 280 } },
     ], edges: [{ from: 'start', to: 'brief' }] });
     assert.equal(chart.ok, true);
     const stored = async () => (await diagrams.get(workspace, chart.data.id)).data.spec;
     await window.loadFile(path.join(__dirname, 'fixture.html'));
     await until('!!document.querySelector("[data-id=brief]")');
+    const imageButton = '[data-id=picture] .flow-file-copy';
+    const documentButton = '[data-id=brief] .flow-file-copy';
+    await until('document.querySelector("[data-id=picture] img")?.naturalWidth === 240');
+    assert.equal(await run(`getComputedStyle(document.querySelector(${JSON.stringify(imageButton)})).opacity`), '0');
+    const imagePoint = await run(`(() => { const rect = document.querySelector('[data-id=picture]').getBoundingClientRect(); return { x: Math.round(rect.right - 20), y: Math.round(rect.bottom - 20) }; })()`);
+    window.webContents.sendInputEvent({ type: 'mouseMove', ...imagePoint });
+    await until(`getComputedStyle(document.querySelector(${JSON.stringify(imageButton)})).opacity === '1'`);
+    assert.equal(await run(`(() => { const button = document.querySelector(${JSON.stringify(imageButton)}).getBoundingClientRect(), node = document.querySelector('[data-id=picture]').getBoundingClientRect(); return button.right <= node.right && button.bottom <= node.bottom && node.right - button.right < 15 && node.bottom - button.bottom < 15; })()`), true, 'copy button sits inside the bottom-right corner');
+    await capture('file-copy-hover');
+    const beforeCopy = await stored();
+    window.webContents.sendInputEvent({ type: 'mouseDown', ...imagePoint, button: 'left', clickCount: 1 });
+    window.webContents.sendInputEvent({ type: 'mouseUp', ...imagePoint, button: 'left', clickCount: 1 });
+    await until(`document.querySelector(${JSON.stringify(imageButton)}).dataset.copied === 'true'`);
+    assert.equal(clipboard, picturePath);
+    assert.equal(fs.existsSync(clipboard), true);
+    await run('window.diagram.flush()');
+    assert.deepEqual(await stored(), beforeCopy, 'copy does not move or change a node');
+    await run(`document.querySelector(${JSON.stringify(documentButton)}).focus()`);
+    await until(`getComputedStyle(document.querySelector(${JSON.stringify(documentButton)})).opacity === '1'`);
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+    window.webContents.sendInputEvent({ type: 'char', keyCode: '\r' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+    await until(`document.querySelector(${JSON.stringify(documentButton)}).dataset.copied === 'true'`);
+    assert.equal(clipboard, made.data.path);
+    assert.equal(await run('!!document.querySelector(".flow-document-panel")'), false, 'copy does not open the document');
+    clipboardFails = true;
+    clipboard = 'Keep the previous clipboard';
+    await run(`document.querySelector(${JSON.stringify(imageButton)}).click()`);
+    await until(`document.querySelector(${JSON.stringify(imageButton)}).getAttribute('aria-busy') === 'false'`);
+    assert.equal(clipboard, 'Keep the previous clipboard');
+    assert.equal(await run(`document.querySelector(${JSON.stringify(imageButton)}).dataset.copied`), 'false', 'clipboard failures do not report success');
+    clipboardFails = false;
+    await diagrams.update(workspace, chart.data.id, 'Example flow', { ...beforeCopy, nodes: beforeCopy.nodes.filter(node => node.id !== 'picture') });
+    await window.reload();
+    await until('!!document.querySelector("[data-id=brief]") && !document.querySelector("[data-id=picture]")');
     await edit('brief');
     assert.equal(await run('document.querySelector(".flow-document-host").classList.contains("flow-document-floating")'), true);
     assert.equal(await run('getComputedStyle(document.querySelector(".flow-document-panel")).borderRadius'), '14px');
@@ -117,8 +162,21 @@ app.whenReady().then(async () => {
     await edit('brief');
     assert.equal(await run('!!document.querySelector(".flow-document-floating")'), true);
     assert.equal(await sourceText(), finalText);
-    await click('Copy Markdown file path');
+    await run('document.querySelector(".flow-document-footer button[aria-label=\\"Copy Markdown file path\\"]").click()');
+    await until('document.querySelector(".flow-document-footer button").dataset.copied === "true"');
     assert.equal(clipboard, made.data.path);
+
+    await mode('Write');
+    const pendingCopyText = '# Copied before autosave\n';
+    await text(pendingCopyText);
+    await run(`document.querySelector(${JSON.stringify(documentButton)}).click()`);
+    await until(`document.querySelector(${JSON.stringify(documentButton)}).dataset.copied === 'true'`);
+    assert.equal(clipboard, made.data.path);
+    assert.equal(fs.readFileSync(clipboard, 'utf8'), pendingCopyText, 'node copy saves pending Markdown before copying');
+    await text(finalText);
+    await run('document.querySelector(".flow-document-footer button").click()');
+    await until('document.querySelector(".flow-document-footer button").dataset.copied === "true"');
+    assert.equal(fs.readFileSync(clipboard, 'utf8'), finalText, 'panel copy also saves pending Markdown');
 
     // A clean document picks up external edits on focus. A dirty one retains the
     // local buffer and asks which version to use before overwriting anything.
@@ -132,6 +190,11 @@ app.whenReady().then(async () => {
     await until('!!document.querySelector(".flow-document-error")');
     assert.equal(fs.readFileSync(made.data.path, 'utf8'), '# Other editor\n');
     assert.equal(await sourceText(), '# Local version\n');
+    clipboard = 'Keep the previous clipboard';
+    await run(`document.querySelector(${JSON.stringify(documentButton)}).click()`);
+    await until(`document.querySelector(${JSON.stringify(documentButton)}).getAttribute('aria-busy') === 'false'`);
+    assert.equal(clipboard, 'Keep the previous clipboard', 'conflicts leave the clipboard untouched');
+    assert.equal(fs.readFileSync(made.data.path, 'utf8'), '# Other editor\n', 'copy never overwrites an external edit');
     await diagrams.create('fictional-recovery', 'Another flow', { kind: 'flow', nodes: [{ id: 'example', label: 'Another step' }], edges: [] });
     await run('window.diagram.update({ wsId: "fictional-recovery", wsName: "Example recovery" })');
     await until('!!document.querySelector("[data-id=example]") && !document.querySelector(".flow-document-panel")');
@@ -224,12 +287,19 @@ app.whenReady().then(async () => {
     await diagrams.setArchived(workspace, chart.data.id, true);
     await window.reload();
     await until('!!document.querySelector("[data-id=brief]")');
+    const archivedCopyPoint = await run(`(() => { const rect = document.querySelector(${JSON.stringify(documentButton)}).getBoundingClientRect(); return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) }; })()`);
+    window.webContents.sendInputEvent({ type: 'mouseMove', ...archivedCopyPoint });
+    await until(`getComputedStyle(document.querySelector(${JSON.stringify(documentButton)})).opacity === '1'`);
+    window.webContents.sendInputEvent({ type: 'mouseDown', ...archivedCopyPoint, button: 'left', clickCount: 1 });
+    window.webContents.sendInputEvent({ type: 'mouseUp', ...archivedCopyPoint, button: 'left', clickCount: 1 });
+    await until(`document.querySelector(${JSON.stringify(documentButton)}).dataset.copied === 'true'`);
+    assert.equal(clipboard, made.data.path, 'archived documents can copy paths');
     await run('document.querySelector("[data-id=brief]").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))');
     await until('!!document.querySelector(".flow-document-markdown h1")');
     assert.equal(await run('document.querySelectorAll(".flow-document-tabs [role=tab]").length'), 1);
     assert.equal(await run('document.querySelector("input[aria-label=\\"Document name\\"]").readOnly'), true);
 
-    console.log('Documents browser checks passed: default floating, docked/focus, scrollable Markdown, native source undo, Tab precedence, file autosave/reopen, conflict recovery, creation/undo/redo, independent duplicates, cross-workspace copy, reload, archived read-only documents and dark theme.');
+    console.log('Documents browser checks passed: image/document hover copy, focus accessibility, clipboard failures, save-before-copy and conflicts, default floating, docked/focus, scrollable Markdown, native source undo, Tab precedence, file autosave/reopen, conflict recovery, creation/undo/redo, independent duplicates, cross-workspace copy, reload, archived read-only documents and dark theme.');
     window.destroy(); app.exit(0);
   } catch (error) {
     console.error(error.stack || error);

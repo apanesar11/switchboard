@@ -16,7 +16,7 @@ async function main() {
     </script></body></html>`);
     fs.writeFileSync(path.join(temp, 'preload.cjs'), `const { contextBridge, ipcRenderer } = require('electron');
       const api = {};
-      for (const name of ['List','Get','Create','Update','Archive','Delete','CreateDocument','GetDocument','SaveDocument']) api['diagrams'+name] = (...args) => ipcRenderer.invoke('diagram:'+name, ...args);
+      for (const name of ['List','Get','Create','Update','Archive','Delete','CreateDocument','GetDocument','SaveDocument','GetImagePath']) api['diagrams'+name] = (...args) => ipcRenderer.invoke('diagram:'+name, ...args);
       api.writeClipboard = text => ipcRenderer.invoke('clipboard:write', text);
       contextBridge.exposeInMainWorld('sb', api);
     `);

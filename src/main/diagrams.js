@@ -440,6 +440,19 @@ function imagePath(name) {
   return path.join(imagesDir(), name);
 }
 
+/** Resolve a canvas image address to an existing local file for terminal paste. */
+async function getImagePath(src) {
+  const match = typeof src === 'string' && /^sbimg:\/\/image\/([0-9a-f]{32}\.(?:png|jpg|webp))$/.exec(src);
+  const file = match && imagePath(match[1]);
+  if (!file) return { ok: false, error: 'Invalid image address' };
+  try {
+    if (!(await fs.promises.stat(file)).isFile()) return { ok: false, error: 'Image file not found' };
+    return { ok: true, data: file };
+  } catch (err) {
+    return { ok: false, error: err.code === 'ENOENT' ? 'Image file not found' : `Could not read the image: ${why(err)}` };
+  }
+}
+
 /** Every write that has been started has finished — the quit path waits on this. */
 function settle() {
   return Promise.all(Array.from(chains.values())).then(() => ({ ok: true }), () => ({ ok: true }));
@@ -457,6 +470,7 @@ module.exports = {
   saveDocument,
   saveImage,
   imagePath,
+  getImagePath,
   settle,
   // For the tests, and for a sentence that has to name the folder.
   rootDir,

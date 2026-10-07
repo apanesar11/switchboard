@@ -5,10 +5,9 @@
 // already decided where it goes and how big it is (the node's `width`/`height`
 // come from there), so this only decides what it looks like.
 //
-// Nothing here is interactive: the read-only canvas emits every node with
-// draggable:false and selectable:false. The handles exist because React Flow
-// routes a diagram's edges between them. (Diagrams are arranged by hand in
-// FlowEditor.tsx, which reuses FlowBox from here.)
+// The read-only canvas disables dragging and selection, while file nodes still
+// offer their copy-path button. The handles route a diagram's edges between
+// nodes. FlowEditor.tsx reuses FlowBox for the editable canvas.
 
 import { useLayoutEffect, useRef, useState } from "react"
 import { Handle, Position, type NodeProps } from "@xyflow/react"
@@ -31,6 +30,7 @@ import {
 } from "@/lib/diagrams/types"
 import { plainTextParagraphs, richTextHtml } from "@/lib/diagrams/rich-text"
 import { flowCheckbox } from "@/lib/diagrams/rich-text-dom"
+import { DiagramFileCopy } from "./DiagramFileCopy"
 
 // Every box is sized from its text; in the browser, measure that text for
 // real rather than estimate it, so a box is as tall as its text really wraps.
@@ -235,7 +235,7 @@ export function FlowBox({
   const { label, detail, shape, tone, dashed, align } = box
   if (shape === "document") {
     return (
-      <div className={cx("relative flex size-full items-center gap-3 rounded-xl border border-gray-300 bg-white px-4 shadow-sm dark:border-gray-700 dark:bg-gray-900", className)} title={`${label} · Double-click to open`}>
+      <div className={cx("flow-file-node relative flex size-full items-center gap-3 rounded-xl border border-gray-300 bg-white px-4 shadow-sm dark:border-gray-700 dark:bg-gray-900", className)} title={`${label} · Double-click to open`}>
         <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-brand-faint text-brand dark:bg-brand/15 dark:text-brand-light">
           <RiFileTextLine className="size-6" aria-hidden="true" />
         </div>
@@ -243,14 +243,16 @@ export function FlowBox({
           <div className="truncate text-sm font-medium text-gray-900 dark:text-gray-50">{label}</div>
           <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Markdown document</div>
         </div>
+        <DiagramFileCopy box={box} />
         {children}
       </div>
     )
   }
   if (shape === "image") {
     return (
-      <div className="relative size-full">
+      <div className="flow-file-node relative size-full">
         <FlowImage src={box.src} alt={label} />
+        <DiagramFileCopy box={box} />
         {children}
       </div>
     )

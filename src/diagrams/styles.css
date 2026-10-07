@@ -93,6 +93,18 @@
 
 /* Markdown documents share the canvas, but own their scrolling and keyboard. */
 @layer components {
+  /* React Flow disables pointer events on read-only nodes; file actions stay usable. */
+  .flow-file-node { pointer-events: auto; }
+  .flow-file-copy { position: absolute; right: 6px; bottom: 6px; z-index: 5; display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid #d1d5db; border-radius: 6px; background: #ffffffed; color: #4b5563; box-shadow: 0 1px 4px #1118271a; opacity: 0; pointer-events: none; cursor: pointer; transition: opacity .12s; }
+  .flow-file-node:hover .flow-file-copy, .flow-file-node:focus-within .flow-file-copy, .flow-file-copy[data-copied=true], .flow-file-copy[aria-busy=true] { opacity: 1; pointer-events: auto; }
+  .flow-file-copy:hover { background: #eff6ff; color: #0969da; }
+  .flow-file-copy:focus-visible { outline: 2px solid #0969da; outline-offset: 2px; }
+  .flow-file-copy:disabled { cursor: wait; }
+  .flow-file-copy[data-copied=true] { color: #16a34a; }
+  .flow-file-copy:where([data-term-theme="dark"] *) { border-color: #374151; background: #111827ed; color: #d1d5db; }
+  .flow-file-copy:hover:where([data-term-theme="dark"] *) { background: #1e3a5f; color: #93c5fd; }
+  .flow-file-copy[data-copied=true]:where([data-term-theme="dark"] *) { color: #4ade80; }
+  @media (hover: none) { .flow-file-copy { opacity: 1; pointer-events: auto; } }
   .flow-document-host { z-index: 30; min-width: 0; min-height: 0; color: #1f2937; }
   .flow-document-floating { position: absolute; inset: 16px 16px 16px auto; max-width: calc(100% - 32px); }
   .flow-document-docked { position: relative; flex-shrink: 0; max-width: 60%; height: 100%; }

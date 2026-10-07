@@ -134,7 +134,10 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   (or G): Google's own image results open in a panel beside the canvas, searching the
   selected box's words, and a picture dragged out of it — or right-clicked ▸ Add Image to
   Diagram — goes onto the diagram like a dropped file, at its full size rather than the
-  thumbnail's. Tab keeps a branch symmetrical
+  thumbnail's. Hover over a picture or document and click the copy button in its
+  bottom-right corner to copy its local file path for pasting into the AI terminal.
+  Document edits are saved before the path is copied; the document panel's `.md file`
+  button does the same. Tab keeps a branch symmetrical
   around the box it hangs off, and so do ✦ Answer's boxes and a delete; anything in the
   branch's way moves aside. A box drags everything hanging off it along; drag one up or
   down among its siblings and let go, and it takes that place, back in line, the branch

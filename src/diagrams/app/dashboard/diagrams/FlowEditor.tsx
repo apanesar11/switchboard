@@ -231,6 +231,7 @@ import { FIT_VIEW_OPTIONS } from "./DiagramCanvas"
 import { ImageSearchPanel, type ImageSearchAsk } from "./ImageSearchPanel"
 import { DocumentPanel, type DocumentView } from "./DocumentPanel"
 import { useFlowDocuments } from "./useFlowDocuments"
+import { DiagramFileCopyContext } from "./DiagramFileCopy"
 import {
   FlowBox,
   FLOW_TEXT_WRAP,
@@ -3517,6 +3518,7 @@ function FlowEditorCanvas({
   const barNodes = editingNode ? [editingNode] : selectedNodes
 
   return (
+    <DiagramFileCopyContext.Provider value={documents.getPath}>
     <EditorContext.Provider value={context}>
       {/* Switchboard: a row — the canvas, and Google Images docked on its right
           while open, so the canvas narrows beside the panel rather than hiding
@@ -3917,6 +3919,7 @@ function FlowEditorCanvas({
             onRename={(label) => updateNode(documentNode.id, { label }, true)}
             onEdit={(text) => documents.edit(documentBox.documentId!, text)}
             onSave={() => void documents.save(documentBox.documentId!)}
+            onCopyPath={() => documents.getPath(documentBox.documentId!)}
             onRetry={() => void documents.retry(documentBox.documentId!, true)}
             onResolve={(overwrite) => void documents.resolve(documentBox.documentId!, overwrite)}
             onClose={() => { void documents.flush(); setDocumentNodeId(null) }}
@@ -3932,6 +3935,7 @@ function FlowEditorCanvas({
         ) : null}
       </div>
     </EditorContext.Provider>
+    </DiagramFileCopyContext.Provider>
   )
 }
 

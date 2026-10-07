@@ -144,6 +144,20 @@ export function useFlowDocuments(workspace: string, activeId?: string) {
     return entry?.revision ? { ok: true, data: entry.text } : { ok: false, error: entry?.error ?? "Document not found" }
   }, [load])
 
+  // The AI reads the file on disk, so do not hand out a path while this editor
+  // still holds newer text or a save conflict. Copying must not overwrite a conflict.
+  const getPath = useCallback(async (id: string): Promise<Result<string>> => {
+    await chains.current.get(id)
+    await load(id, true)
+    const entry = entries.current.get(id)
+    if (!entry?.revision || entry.error) return { ok: false, error: entry?.error ?? "Document not found" }
+    while (entry.text !== entry.saved || entry.saving) {
+      await save(id)
+      if (entry.error) return { ok: false, error: entry.error }
+    }
+    return { ok: true, data: entry.path }
+  }, [load, save])
+
   const resolve = useCallback(async (id: string, overwrite: boolean) => {
     await chains.current.get(id)
     const entry = entries.current.get(id)
@@ -187,6 +201,6 @@ export function useFlowDocuments(workspace: string, activeId?: string) {
   const problem = [...entries.current.values()].find((entry) => entry.error && entry.text !== entry.saved)
   return useMemo(() => ({
     active: activeId ? entries.current.get(activeId) : undefined,
-    dirty, saving, problem, edit, flush, create, read, resolve, retry: load, save,
-  }), [version, activeId, dirty, saving, problem, edit, flush, create, read, resolve, load, save])
+    dirty, saving, problem, edit, flush, create, read, getPath, resolve, retry: load, save,
+  }), [version, activeId, dirty, saving, problem, edit, flush, create, read, getPath, resolve, load, save])
 }
