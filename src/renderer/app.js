@@ -846,8 +846,9 @@ window.SB = window.SB || {};
     if (!wsId) return;
     var want = !!on;
     // The Grid only reads a terminal's bell while that square shows Terminal.
-    // Changes and Diagrams leave its output hidden, so its bell stays unread.
-    if (want && gridShows(wsId)) return;
+    // Changes and Diagrams leave its output hidden, unless the floating terminal
+    // is open, so a hidden terminal's bell stays unread.
+    if (want && (gridShows(wsId) || (SB.views.diagrams && SB.views.diagrams.terminalVisible(wsId)))) return;
     if (!!state.bell[wsId] === want) return;
     if (want) state.bell[wsId] = true;
     else delete state.bell[wsId];
@@ -1633,7 +1634,8 @@ window.SB = window.SB || {};
       // inside that window and the pane its output is about to arrive in gets thrown out
       // from under it. hasLivePane() is the view's own answer to the same question and is
       // true from the instant the pane exists. This is the caller it was written for.
-      if (canTerm && id !== onTerm && onGrid.indexOf(id) === -1 && shell.status !== 'running') {
+      var diagramTerminal = SB.views.diagrams && SB.views.diagrams.terminalVisible(id);
+      if (canTerm && id !== onTerm && !diagramTerminal && onGrid.indexOf(id) === -1 && shell.status !== 'running') {
         var paneAlive = typeof term.hasLivePane === 'function' && term.hasLivePane(id);
         if (!paneAlive) term.dispose(id);
       }
@@ -1762,6 +1764,10 @@ window.SB = window.SB || {};
   // DOM selection — but this is the path it takes now.
   function handleEdit(e) {
     if (!e || !e.action) return;
+    // ⌘A is a native menu accelerator. On diagrams it toggles the workspace's
+    // floating terminal, including while xterm has focus; text editors decline.
+    var dg = SB.views.diagrams;
+    if (e.action === 'selectAll' && dg && dg.toggleTerminalShortcut()) return;
     var term = SB.views.terminal;
     var done = term && typeof term.editAction === 'function'
       ? term.editAction(e.action, e.text) : false;
@@ -1770,7 +1776,6 @@ window.SB = window.SB || {};
     // selected boxes, and a pasted screenshot goes onto it as a picture — before the
     // line below throws an image paste away. Only while the canvas has the keyboard; a
     // box's text field gets the document's fallback.
-    var dg = SB.views.diagrams;
     if (dg && typeof dg.editAction === 'function') {
       try {
         if (dg.editAction(e.action, e.text, e.image)) return;

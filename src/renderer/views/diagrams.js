@@ -55,7 +55,11 @@ SB.views = SB.views || {};
   function makeCanvas(wsId) {
     if (canvases[wsId]) return canvases[wsId];
     var slab = h('div.dgslab');
-    var item = { slab: slab, api: null, active: false, dirty: false, home: null, fullscreen: false };
+    // Keep xterm outside the React/Tailwind scope, exactly as in Grid.
+    var canvas = h('div.dgcanvas');
+    slab.appendChild(canvas);
+    var item = { wsId: wsId, slab: slab, api: null, active: false, dirty: false, home: null, fullscreen: false,
+      terminalOpen: false, terminalPanel: null, terminalBody: null, returnFocus: null };
     canvases[wsId] = item;
     var b = bundle();
     if (!b || typeof b.create !== 'function') {
@@ -65,7 +69,7 @@ SB.views = SB.views || {};
       return item;
     }
     try {
-      item.api = b.create(slab, {
+      item.api = b.create(canvas, {
         wsId: wsId,
         wsName: wsId,
         active: false,
@@ -75,11 +79,100 @@ SB.views = SB.views || {};
         },
         onDirty: function (count) { reportDirty(wsId, count); },
         onFullscreenChange: function (open) { hostFullscreen(item, open); },
+        onToggleTerminal: function () { toggleTerminal(item); },
       });
     } catch (err) {
       console.error('[switchboard] diagrams: mount:', err);
     }
     return item;
+  }
+
+  function mountTerminal(item, force) {
+    var term = SB.views.terminal;
+    if (!term || !item.terminalBody) return;
+    var shell = ((SB.state || {}).shell || {})[item.wsId] || null;
+    if (!force && item.terminalShell === shell && item.terminalBody.querySelector('.xterm')) return;
+    var focused = item.terminalBody.contains(document.activeElement);
+    item.terminalBody.replaceChildren();
+    term.mount(item.wsId, item.terminalBody);
+    item.terminalShell = shell;
+    if (focused) term.focus(item.wsId);
+  }
+
+  function toggleTerminal(item) {
+    item.terminalOpen = !item.terminalOpen;
+    if (item.terminalOpen) {
+      item.returnFocus = document.activeElement;
+      if (!item.terminalPanel) {
+        item.terminalBody = h('div.dgterminal-body');
+        var resize = h('div.dgterminal-resize', { title: 'Resize AI terminal' });
+        item.terminalPanel = h('section.dgterminal', { role: 'region', 'aria-label': 'AI terminal for ' + item.wsId },
+          resize,
+          h('header.dgterminal-header', null,
+            h('span.dgterminal-title', null, D.icon('term'), 'AI terminal', h('span.dgterminal-workspace', null, item.wsId)),
+            h('button.ib', { type: 'button', title: 'Close AI terminal · ⌘A', 'aria-label': 'Close AI terminal',
+              onClick: function () { toggleTerminal(item); } }, '×')),
+          item.terminalBody);
+        // Terminal keys and wheel input stay in the existing terminal. ⌘A is
+        // handled by the native Edit menu, or by onKey before bubbling stops.
+        item.terminalPanel.addEventListener('keydown', function (e) {
+          if (onKey(e)) e.preventDefault();
+          e.stopPropagation();
+        });
+        item.terminalPanel.addEventListener('wheel', function (e) { e.stopPropagation(); });
+        resize.addEventListener('pointerdown', function (e) {
+          e.preventDefault();
+          var start = e.clientX, width = item.terminalPanel.getBoundingClientRect().width;
+          resize.setPointerCapture(e.pointerId);
+          function move(event) { item.terminalPanel.style.width = Math.max(340, Math.min(900, width + start - event.clientX)) + 'px'; }
+          function done() { resize.removeEventListener('pointermove', move); resize.removeEventListener('pointerup', done); resize.removeEventListener('pointercancel', done); }
+          resize.addEventListener('pointermove', move);
+          resize.addEventListener('pointerup', done);
+          resize.addEventListener('pointercancel', done);
+        });
+      }
+      item.slab.appendChild(item.terminalPanel);
+      mountTerminal(item, true);
+      if (typeof SB.bell === 'function') SB.bell(item.wsId, false);
+      // A new xterm opens after its host has layout; focus after that same timer.
+      setTimeout(function () {
+        if (item.terminalOpen && terminalVisible(item.wsId)) SB.views.terminal.focus(item.wsId);
+      }, 0);
+    } else {
+      item.terminalPanel.remove();
+      var previous = item.returnFocus;
+      var target = previous && previous.isConnected && !item.terminalPanel.contains(previous)
+        ? previous : item.slab.querySelector('[data-diagram-terminal-toggle]');
+      if (target && typeof target.focus === 'function') target.focus({ preventScroll: true });
+    }
+    if (item.api) item.api.update({ terminalOpen: item.terminalOpen });
+  }
+
+  function terminalVisible(wsId) {
+    var item = canvases[wsId], r = route();
+    if (!item || !item.terminalOpen || !item.terminalPanel || !item.terminalPanel.isConnected) return false;
+    return onTab(r) ? r.wsId === wsId : r.view === 'grid' && !!item.home && !!item.home.closest('.gridbd');
+  }
+
+  function toggleTerminalShortcut() {
+    // Reparenting a focused xterm between Grid and its floating panel need not
+    // emit focusin. Resolve its canvas from the actual focus before toggling.
+    if (route().view === 'grid' && document.activeElement !== document.body) {
+      chooseFrom({ target: document.activeElement });
+    }
+    var item = activeCanvas(route());
+    if (!item || !item.api) return false;
+    var active = document.activeElement;
+    if (active && active !== document.body) {
+      if (!item.slab.contains(active) && !onTab(route())) return false;
+      // The terminal's helper textarea is part of the toggle. Every other text
+      // editor keeps Select All, including Markdown and inline rich text.
+      if (!active.closest('.dgterminal') && (active.isContentEditable ||
+          /^(INPUT|TEXTAREA|SELECT|WEBVIEW)$/.test(active.tagName) ||
+          active.closest('[role="dialog"], [role="menu"], [role="listbox"]'))) return false;
+    }
+    toggleTerminal(item);
+    return true;
   }
 
   function build() {
@@ -166,6 +259,10 @@ SB.views = SB.views || {};
     var current = activeCanvas(r);
     Object.keys(canvases).forEach(function (id) {
       var item = canvases[id];
+      if (terminalVisible(id)) {
+        mountTerminal(item);
+        if (typeof SB.bell === 'function') SB.bell(id, false);
+      }
       var active = item === current;
       if (!item.api || item.active === active) return;
       item.active = active;
@@ -197,8 +294,12 @@ SB.views = SB.views || {};
   document.addEventListener('focusin', chooseFrom, true);
 
   function onKey(e) {
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && String(e.key).toLowerCase() === 'a') {
+      return toggleTerminalShortcut();
+    }
     var item = activeCanvas(route());
     if (!item || !item.api) return false;
+    if (e.target instanceof Element && e.target.closest('.dgterminal')) return false;
     if (e.key === 'Escape' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       // Radix owns Escape inside its picker, menus and dialogs. Their portal sits
       // outside the canvas, and Switchboard must not navigate back underneath it.
@@ -218,6 +319,7 @@ SB.views = SB.views || {};
     var item = activeCanvas(route());
     if (!item || !item.api) return false;
     var active = document.activeElement;
+    if (active instanceof Element && active.closest('.dgterminal')) return false;
     if (active && active !== document.body && !item.slab.contains(active)) return false;
     try { return !!item.api.editAction(action, !!image, typeof text === 'string' ? text : ''); }
     catch (err) { console.error('[switchboard] diagrams: edit:', err); return false; }
@@ -264,5 +366,7 @@ SB.views = SB.views || {};
     editAction: editAction,
     refresh: refresh,
     flushAll: flushAll,
+    toggleTerminalShortcut: toggleTerminalShortcut,
+    terminalVisible: terminalVisible,
   };
 })(window.SB);

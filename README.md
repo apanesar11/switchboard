@@ -122,7 +122,11 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   pretending. Nothing here runs git: a file you make is untracked, exactly as it would
   be if you had made it in a shell.
 - **Diagrams** — flow diagrams for a workspace — boxes, arrows, sticky
-  notes, free text, pictures and Markdown documents, arranged by hand. Click a shape on the toolbar down the
+  notes, free text, pictures and Markdown documents, arranged by hand.
+  **AI terminal** (⌘A) toggles a resizable floating panel with the
+  workspace's existing live terminal, so you can use your AI session beside the canvas.
+  It shares the same shell and scrollback as Terminal and Grid, including in a full-screen
+  diagram. ⌘A keeps Select All while editing a label or Markdown document. Click a shape on the toolbar down the
   left and click the canvas to place it; with a box selected, Tab adds the next one joined
   to its right and starts you typing, ⇧Tab steps back, the arrow keys move between boxes
   and ⌘D duplicates. Drag from a box's dot to draw an arrow. Drop, paste or pick a picture

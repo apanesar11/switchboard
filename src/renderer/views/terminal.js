@@ -687,8 +687,8 @@ window.SB = window.SB || {};
   }
 
   // Puts a workspace's terminal — the pane, or the sentence standing in for it, and
-  // the exit footer when there is one — into `into`. The Terminal tab's body and a
-  // Grid cell are the two callers, and they get the SAME pane: one xterm and one
+  // the exit footer when there is one — into `into`. The Terminal tab, Grid and
+  // floating diagram panel get the SAME pane: one xterm and one
   // shell per workspace, whichever screen is showing it. Only one screen ever is, so
   // the host simply moves. That is the whole reason the Grid can exist without a
   // second copy of everything in this file.

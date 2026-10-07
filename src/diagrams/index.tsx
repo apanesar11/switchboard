@@ -20,6 +20,8 @@ type Props = {
   onOpenTerminal: (wsId: string) => void
   onDirty: (count: number) => void
   onFullscreenChange?: (open: boolean) => void
+  terminalOpen?: boolean
+  onToggleTerminal?: () => void
 }
 
 type Instance = {
@@ -44,6 +46,8 @@ function render(instance: Instance) {
         active={current.active}
         onOpenSettings={current.onOpenSettings}
         onOpenTerminal={() => current.onOpenTerminal(current.wsId)}
+        terminalOpen={current.terminalOpen}
+        onToggleTerminal={current.onToggleTerminal}
         onEditor={instance.onEditor}
         onFullscreen={instance.onFullscreen}
         onFullscreenChange={current.onFullscreenChange}

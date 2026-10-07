@@ -42,6 +42,7 @@ import {
   RiFullscreenExitLine,
   RiFullscreenLine,
   RiInboxUnarchiveLine,
+  RiTerminalBoxLine,
 } from "@remixicon/react"
 import {
   archiveDiagram,
@@ -157,6 +158,8 @@ export type DiagramsPageProps = {
   active: boolean
   onOpenSettings?: () => void
   onOpenTerminal?: () => void
+  terminalOpen?: boolean
+  onToggleTerminal?: () => void
   /** The editor on screen, so the Edit menu and the quit flush can reach it. */
   onEditor?: (editor: FlowEditorHandle | null) => void
   /** Whether that editor holds anything not yet saved. */
@@ -174,6 +177,8 @@ export function DiagramsPage({
   active,
   onOpenSettings,
   onOpenTerminal,
+  terminalOpen,
+  onToggleTerminal,
   onEditor,
   onDirtyChange,
   onFullscreen,
@@ -576,6 +581,11 @@ export function DiagramsPage({
             </div>
 
             <div className="flex shrink-0 items-center gap-1.5">
+              {onToggleTerminal ? <Button variant="secondary" className={BAR_BUTTON}
+                data-diagram-terminal-toggle aria-label="Toggle AI terminal" aria-pressed={!!terminalOpen}
+                title="Toggle AI terminal · ⌘A" onClick={onToggleTerminal}>
+                <RiTerminalBoxLine className="-ml-1 mr-1 size-4" aria-hidden="true" /> AI terminal
+              </Button> : null}
               <Button variant="secondary" className={BAR_BUTTON} onClick={() => setNewFlowOpen(true)}>
                 <RiAddLine className="-ml-1 mr-1 size-4" aria-hidden="true" />
                 New diagram

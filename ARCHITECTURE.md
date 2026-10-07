@@ -2212,6 +2212,22 @@ cell, preserving the current drawing across renders. A Grid canvas has the same 
 picker and full-screen control as the tab. While full screen, its slab moves to the
 document body so the Grid's container query cannot confine the overlay.
 
+The **AI terminal** button or ⌘A toggles a floating, resizable workspace terminal.
+`views/diagrams.js` calls the same `terminal.mount(wsId, into)` as Grid: one xterm
+and one existing shell/tmux session per workspace, with no new chat backend. Its panel
+is a sibling of the `.dgcanvas.sbdg` React root inside `.dgslab`, keeping Tailwind's
+reset away from xterm and moving with the canvas in Grid and fullscreen. Closing
+the panel detaches its host; the session stays alive. Visible panels receive shell
+state changes and keep the existing exit/retry footer. Opening/returning marks bells
+read; a visible exited terminal is protected from `retirePanes()`.
+
+⌘A arrives through `sb:evt:edit` from the native Edit menu. The diagram toggle has
+first refusal before terminal Select All, including from xterm's helper textarea;
+Markdown, rich labels, inputs and dialogs keep their own Select All. Panel keys and
+wheel events stop before canvas shortcuts. `test:diagram-terminal:browser` exercises
+the production app/preload and a real temporary PTY, including menu routing, shared
+terminal identity across views, text editing, fullscreen, exit and failed-spawn retry.
+
 `renderMain()` tells the view after every render which canvas is visible (`shown(route)`).
 Only the active canvas handles document shortcuts; in Grid, focus or a pointer press
 selects it. Hidden canvases turn their keyboard handlers off, so Backspace in a Terminal
