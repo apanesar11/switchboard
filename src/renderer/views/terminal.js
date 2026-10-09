@@ -905,6 +905,23 @@ window.SB = window.SB || {};
     return true;
   }
 
+  // A pinned terminal whose node changed its own type size (Smaller text, Larger
+  // text): the new font first, then the grid its box holds at that font, fixed — the
+  // one pty resize a type size costs. The grid is measured at the font itself, not at
+  // a step-down setFontSize took to squeeze the old grid in. Returns the new grid, or
+  // null when the pane is not this owner's or can't be measured yet.
+  function refont(wsId, px, owner) {
+    var pane = ownedPane(wsId, owner);
+    if (!pane) return null;
+    applyFont(pane, px);
+    var p = proposeOf(pane);
+    if (!p) return null;
+    pane.fixed = p;
+    queueFit(pane);
+    setFontSize(wsId, px, owner);
+    return p;
+  }
+
   // Fixed (a pinned terminal) or fit (null). The fit that follows applies it; a new
   // fixed size is the one time a pinned terminal's pty is told anything.
   function setFixed(wsId, size, owner) {
@@ -971,9 +988,11 @@ window.SB = window.SB || {};
     relayout: relayout,
     mount: function (wsId, into) { return mount(wsId, ((SB.state || {}).shell || {})[wsId] || null, into); },
     // The whiteboards' side of the same pane (views/wbterminals.js): a yielding mount,
-    // and the zoomed font, fixed grid and drag hold of a pinned or floating terminal.
+    // and the zoomed font, text size, fixed grid and drag hold of a pinned or floating
+    // terminal.
     place: place,
     setFontSize: setFontSize,
+    refont: refont,
     propose: propose,
     setFixed: setFixed,
     hold: hold,

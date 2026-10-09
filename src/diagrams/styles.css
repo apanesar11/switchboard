@@ -208,6 +208,9 @@
   .flow-terminal-btn { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; color: #5a5a5f; cursor: pointer; }
   .flow-terminal-btn:hover { background: #0000000f; color: #1d1d1f; }
   .flow-terminal-btn:disabled { opacity: .4; cursor: default; }
+  .flow-terminal-textsize { display: inline-flex; align-items: center; font: 600 12px -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; line-height: 1; }
+  .flow-terminal-textsize svg { width: 9px; height: 9px; margin-left: -1px; }
+  .flow-terminal-sep { align-self: center; width: 1px; height: 14px; margin: 0 3px; background: #0000001a; }
   .flow-terminal-body { position: relative; flex: 1; min-height: 0; background: var(--term-bg, #1c1c1e); color: var(--term-fg, #d4d4d8); }
   .flow-terminal-watermark { position: absolute; left: 50%; top: 50%; width: 28px; height: 28px; transform: translate(-50%, -50%); opacity: .14; }
   .flow-terminal-card { display: flex; align-items: center; justify-content: center; overflow: hidden; text-align: center; }
@@ -224,6 +227,7 @@
   .flow-terminal-head small:where([data-term-theme="dark"] *) { color: #9ca3af; }
   .flow-terminal-btn:where([data-term-theme="dark"] *) { color: #d1d5db; }
   .flow-terminal-btn:hover:where([data-term-theme="dark"] *) { background: #ffffff14; color: #fff; }
+  .flow-terminal-sep:where([data-term-theme="dark"] *) { background: #ffffff24; }
 
   @media (max-width: 720px) {
     .flow-document-floating { inset: 8px; max-width: calc(100% - 16px); }

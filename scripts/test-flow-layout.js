@@ -39,6 +39,8 @@ const {
   FLOW_TAB_GAP_X,
   FLOW_TAB_GAP_Y,
   FLOW_ROOM_GAP,
+  stepTerminalFont,
+  TERMINAL_FONT_STEP,
 } = require(outfile);
 
 // Switchboard: ✦ Answer's question path, to check what it walks past.
@@ -670,4 +672,51 @@ test('a pinned terminal leads nothing into a question, but the walk goes on past
   const path = flowQuestionPath(nodes, edges, nodes[2].id);
   assert.deepEqual(path.map(step => step.label), ['Where is the session issued']);
   assert.equal(path[0].arrow, 'then');
+});
+
+// ── Switchboard: Smaller text and Larger text on a pinned terminal ──
+
+test('Smaller text and Larger text step the type a tenth either way, in the same box', () => {
+  const size = { width: 560, height: 340 };
+  assert.equal(stepTerminalFont(12.5, 1, -1, size), Math.round(12.5 / TERMINAL_FONT_STEP * 1000) / 1000);
+  assert.equal(stepTerminalFont(12.5, 1, 1, size), Math.round(12.5 * TERMINAL_FONT_STEP * 1000) / 1000);
+  // No font of its own is the base 12.5; the step is the same at any zoom.
+  assert.equal(stepTerminalFont(undefined, 1, -1, size), stepTerminalFont(12.5, 1, -1, size));
+  assert.equal(stepTerminalFont(5, 2, -1, size), Math.round(5 / TERMINAL_FONT_STEP * 1000) / 1000);
+  // Smaller then Larger lands back within rounding.
+  const down = stepTerminalFont(9.124, 1.37, -1, size);
+  assert.ok(Math.abs(stepTerminalFont(down, 1.37, 1, size) - 9.124) < 0.002);
+});
+
+test('Smaller text never takes the type under the size a terminal can be read at', () => {
+  const size = { width: 560, height: 340 };
+  // 7.4px on screen: one step would be 6.7, so it stops at exactly 7.
+  const font = stepTerminalFont(7.4, 1, -1, size);
+  assert.equal(font, 7);
+  assert.equal(stepTerminalFont(font, 1, -1, size), null, 'at the floor it can go no smaller');
+  // At zoom 0.5 the floor is 14 canvas units, drawn at 7px.
+  assert.equal(stepTerminalFont(14.5, 0.5, -1, size), 14);
+  assert.ok(stepTerminalFont(14.5, 0.5, -1, size) * 0.5 >= 7);
+  // Already under it (the node says "Zoom in to use"): no smaller, but larger is fine.
+  assert.equal(stepTerminalFont(5, 1, -1, size), null);
+  assert.ok(stepTerminalFont(5, 1, 1, size) > 5);
+  assert.equal(stepTerminalFont(12.5, 0, -1, size), null, 'no zoom, no step');
+});
+
+test('Larger text stops while the box still holds a usable grid', () => {
+  const small = { width: 280, height: 140 };
+  let font = 12.5;
+  for (let i = 0; i < 40; i++) {
+    const next = stepTerminalFont(font, 1, 1, small);
+    if (next === null) break;
+    assert.ok(next > font);
+    font = next;
+  }
+  assert.equal(stepTerminalFont(font, 1, 1, small), null, 'it stops');
+  // 20 columns of 0.6em across the width, 4 rows of 1.4em under the header.
+  assert.ok(small.width / (font * 0.6) >= 20 - 1e-9, `cols at ${font}`);
+  assert.ok((small.height - 30) / (font * 1.4) >= 4 - 1e-9, `rows at ${font}`);
+  // A big box is capped by the spec's own limit instead.
+  assert.ok(stepTerminalFont(79, 1, 1, { width: 4000, height: 4000 }) <= 80);
+  assert.equal(stepTerminalFont(80, 1, 1, { width: 4000, height: 4000 }), null);
 });

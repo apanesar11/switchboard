@@ -16,7 +16,8 @@
 // Show or hide terminals; Esc, Paste, Copy and the bell inside a panel; Pin to board
 // keeping the same xterm and cols/rows (no pty resize) while the overlay follows the
 // node through a pan, a pinch (also over the terminal) and the "Zoom in to use" floor;
-// a pinned terminal minimized in place; the pinned node in the board file; Float back
+// a pinned terminal minimized in place; Smaller text and Larger text refitting its grid
+// in the same node (and Undo of each); the pinned node in the board file; Float back
 // to the same spot; Undo of the Float putting the node back with a grid that fits it,
 // and Redo floating it where its text was; Markdown and box labels keeping ⌘A as
 // Select All; full screen; a Grid square showing any whiteboard and its terminal; the
@@ -562,6 +563,65 @@ if (!process.versions.electron) {
       await until(`!!document.querySelector(${q(pin(wsId) + ' .xterm')})`);
       assert.equal(await run(`SB.views.terminal.xterm(${q(wsId)}) === originalTerm`), true);
       assert.deepEqual(await run('({ cols: originalTerm.cols, rows: originalTerm.rows })'), pinned, 'restoring keeps cols/rows');
+
+      mark('Smaller text and Larger text: the type changes in the same box, and the grid with it');
+      const grid = () => run('({ cols: originalTerm.cols, rows: originalTerm.rows })');
+      const screenFits = `(() => { const s = originalTerm.element.querySelector('.xterm-screen').getBoundingClientRect(), p = document.querySelector(${q(pin(wsId))}).getBoundingClientRect(); return s.width > 0 && s.right <= p.right + 1 && s.bottom <= p.bottom + 1; })()`;
+      const nodeSel = `.react-flow__node:has([data-terminal-node="${wsId}"])`;
+      await check('Smaller text fits more rows and columns into the same node', async () => {
+        const nodeBefore = await rect(nodeSel);
+        const resizesBeforeText = resizes.length;
+        await click('Smaller text in ' + wsId);
+        await until(`originalTerm.cols > ${pinned.cols} && originalTerm.rows > ${pinned.rows}`);
+        await sleep(150);
+        const font = await run('originalTerm.options.fontSize');
+        assert.ok(font < fontBefore - 0.5, `font ${font} after Smaller text, ${fontBefore} before`);
+        const nodeAfter = await rect(nodeSel);
+        for (const key of ['width', 'height']) assert.ok(Math.abs(nodeAfter[key] - nodeBefore[key]) <= 1, `the node keeps its ${key}`);
+        const now = await grid();
+        const told = resizes.slice(resizesBeforeText).filter(r => r.id === wsId);
+        assert.ok(told.length >= 1, 'the pty is told the new grid');
+        assert.deepEqual({ cols: told[told.length - 1].cols, rows: told[told.length - 1].rows }, now);
+        await until(screenFits, 100);
+        await tracks('after Smaller text');
+        assert.equal(await run(`SB.views.terminal.xterm(${q(wsId)}) === originalTerm`), true, 'the same xterm');
+        assert.deepEqual(opens.filter(id => id === wsId), [wsId], 'Smaller text never reconnects');
+      });
+      await check('a zoom after Smaller text keeps its grid', async () => {
+        const kept = await grid();
+        const resizesBeforeZoom2 = resizes.length;
+        const small = await run('originalTerm.options.fontSize');
+        pinch(spot.x, spot.y, -10);
+        await until(`Math.abs(originalTerm.options.fontSize - ${small}) >= 0.75`);
+        await sleep(150);
+        assert.deepEqual(await grid(), kept);
+        pinch(spot.x, spot.y, 10);
+        await until(`Math.abs(originalTerm.options.fontSize - ${small}) < 0.3`);
+        await sleep(150);
+        assert.deepEqual(await grid(), kept);
+        assert.deepEqual(resizes.slice(resizesBeforeZoom2).filter(r => r.id === wsId && (r.cols !== kept.cols || r.rows !== kept.rows)), []);
+      });
+      await check('Smaller text is in the board file, and Undo puts the type and the grid back', async () => {
+        await run(`${apiOf(boardId)}.flush()`);
+        await whiteboards.settle();
+        const saved = boardFile(boardId).spec.nodes.find(n => n.shape === 'terminal');
+        // Pinned at 12.5px on screen, then a tenth smaller.
+        assert.ok(saved && Math.abs(saved.font - 12.5 / atPin.slot.zoom / 1.1) < 0.01, JSON.stringify(saved));
+        await click('Undo · ⌘Z');
+        await until(`originalTerm.cols === ${pinned.cols} && originalTerm.rows === ${pinned.rows}`);
+        await until(`Math.abs(originalTerm.options.fontSize - ${fontBefore}) < 0.3`);
+        await until(screenFits, 100);
+      });
+      await check('Larger text fits fewer, larger rows into the same node', async () => {
+        await click('Larger text in ' + wsId);
+        await until(`originalTerm.cols < ${pinned.cols} && originalTerm.rows < ${pinned.rows}`);
+        await sleep(150);
+        assert.ok(await run('originalTerm.options.fontSize') > fontBefore + 0.5);
+        await until(screenFits, 100);
+        await click('Undo · ⌘Z');
+        await until(`originalTerm.cols === ${pinned.cols} && originalTerm.rows === ${pinned.rows}`);
+      });
+      await capture('pinned-text-size');
 
       mark('the pinned node is board content: it is in the board file');
       await run(`${apiOf(boardId)}.flush()`);

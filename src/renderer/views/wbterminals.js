@@ -304,7 +304,7 @@ window.SB = window.SB || {};
         body: h('div.wbterm-body'),
         shell: undefined,             // the Shell object the body was last placed with
         fixed: null, font: BASE_FONT, size: null, live: false, resizing: false,
-        nodeFont: null,               // a pinned node's font in canvas units (slot.font / slot.zoom)
+        nodeFont: null,               // a pinned node's own font in canvas units (slot.nodeFont)
         pinning: null,                // the timer waiting for a pin's first slot
         refocus: false,               // Pin to board was pressed while focus was in this panel
         gesture: null,                // ends the drag or edge resize under way (track)
@@ -1101,6 +1101,8 @@ window.SB = window.SB || {};
       t.minimized = false;
       t.font = round4(s.font) || BASE_FONT;
       t.size = null;
+      // A node of its own, not a text size change on the last one this terminal had.
+      t.nodeFont = null;
       unmountPanel(t);
       layoutPin(t, s, true);
       if (had && t.live) focusSoon(t);
@@ -1162,6 +1164,7 @@ window.SB = window.SB || {};
       t.fixed = null;
       t.font = BASE_FONT;
       t.size = null;
+      t.nodeFont = null;
       t.live = false;
       t.minimized = false;
       t.rect = at ? fit(at) : nextRect();
@@ -1278,14 +1281,21 @@ window.SB = window.SB || {};
 
     // One slot: where the node's body is on screen right now. Integer left/top/
     // width/height, no transform; the font follows the zoom; cols/rows are fixed and
-    // change only when the node's committed size does (resize end).
+    // change only when the node's committed size or its own type size does (resize
+    // end; Smaller text, Larger text).
     function layoutPin(t, s, placing) {
       if (!t.pin) buildPin(t);
       var el = t.pin;
       var font = round4(s.font) || BASE_FONT;
       // The node's own font, in canvas units: what a saved grid is matched against.
+      // From the slot when it says (exact), else worked back from the zoom.
+      var was = t.nodeFont;
       var zoom = Number(s.zoom);
-      if (zoom > 0 && Number(s.font) > 0) t.nodeFont = Math.round(Number(s.font) / zoom * 1000) / 1000;
+      if (Number(s.nodeFont) > 0) t.nodeFont = Math.round(Number(s.nodeFont) * 1000) / 1000;
+      else if (zoom > 0 && Number(s.font) > 0) t.nodeFont = Math.round(Number(s.font) / zoom * 1000) / 1000;
+      // Smaller text or Larger text (or an undo of one) — never a zoom, which leaves
+      // the node's own font alone: the grid fitted at the old one no longer fits.
+      var restyled = !!was && !!t.nodeFont && Math.abs(t.nodeFont - was) > 0.0005;
       var st = el.style;
       st.left = Math.round(s.body.left - s.clip.left) + 'px';
       st.top = Math.round(s.body.top - s.clip.top) + 'px';
@@ -1305,6 +1315,7 @@ window.SB = window.SB || {};
         if (el.parentNode) el.parentNode.removeChild(el);
         t.live = false;
         if (s.size) takeSize(t, s);
+        if (restyled) t.fixed = null;
         return;
       }
 
@@ -1317,6 +1328,7 @@ window.SB = window.SB || {};
       if (back || placing) {
         t.font = font;
         takeSize(t, s);
+        if (restyled) t.fixed = null;
         t.resizing = !!s.resizing;
         // A terminal restored with its board (or back from a stand-in) takes the grid
         // it had at this size before, if it has one, rather than one fitted at today's
@@ -1331,7 +1343,19 @@ window.SB = window.SB || {};
         return;
       }
 
-      if (font !== t.font) {
+      if (restyled && !t.resizing && tm && holds(t) && typeof tm.refont === 'function') {
+        // The node's own type size changed in the same box: a new grid at the new font.
+        t.font = font;
+        var g = tm.refont(t.wsId, font, owner);
+        if (g) {
+          t.fixed = g;
+          persist();
+        } else tm.setFontSize(t.wsId, font, owner);
+      } else if (restyled && !holds(t)) {
+        // Shown somewhere else for now: the way back works the grid out at this font.
+        t.font = font;
+        t.fixed = null;
+      } else if (font !== t.font) {
         t.font = font;
         if (tm) tm.setFontSize(t.wsId, font, owner);
       }

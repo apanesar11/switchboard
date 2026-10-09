@@ -192,6 +192,7 @@ import {
   flowNodeFoldGroups,
   toggleFlowNodeFold,
   carryFoldedPositions as carryFolded,
+  stepTerminalFont,
   UNTITLED_FLOW_LABEL,
   type FlowCanvasEdge,
   type FlowCanvasNode,
@@ -940,6 +941,8 @@ type TerminalContextValue = {
   float: (wsId: string) => void
   /** Minimize / Restore — an undoable canvas edit. */
   toggleMinimized: (id: string) => void
+  /** Smaller text (-1) / Larger text (1) — an undoable canvas edit (stepTerminalFont). */
+  stepFont: (id: string, direction: -1 | 1) => void
   /** Close — deletes the node, as Delete would. */
   close: (id: string) => void
   /** "Zoom in to use": to the zoom the terminal's type reads at, centred on it. */
@@ -1174,10 +1177,11 @@ function EditableFlowNode(props: NodeProps) {
 /**
  * Switchboard: a terminal pinned to the board — the frame the host lays the live
  * terminal into. A header that drags it (the rail's dot, the workspace, its branch,
- * then Float, Minimize or Restore, and Close), and under it a dark body the live
- * terminal covers, inset a few pixels so the resize handles stay reachable. When
- * the terminal can't be shown there the body says why: its type would be too small
- * to read at this zoom ("Zoom in to use"), or its workspace has left the rail.
+ * then Smaller text and Larger text, Float, Minimize or Restore, and Close), and
+ * under it a dark body the live terminal covers, inset a few pixels so the resize
+ * handles stay reachable. When the terminal can't be shown there the body says why:
+ * its type would be too small to read at this zoom ("Zoom in to use"), or its
+ * workspace has left the rail.
  */
 function TerminalNode({ id, box, selected }: { id: string; box: FlowBoxNodeData; selected: boolean }) {
   const editor = useContext(EditorContext)
@@ -1190,6 +1194,9 @@ function TerminalNode({ id, box, selected }: { id: string; box: FlowBoxNodeData;
   const gone = terminal?.gone(workspace) ?? false
   const minimized = box.minimized === true
   const tooSmall = (box.font ?? TERMINAL_BASE_FONT) * zoom < TERMINAL_MIN_FONT
+  // The type one step either way in the same box, or null where it can go no further.
+  const smaller = stepTerminalFont(box.font, zoom, -1, box.size)
+  const larger = stepTerminalFont(box.font, zoom, 1, box.size)
   const status = terminal?.status[workspace]
   const resizable =
     editor !== null &&
@@ -1203,12 +1210,12 @@ function TerminalNode({ id, box, selected }: { id: string; box: FlowBoxNodeData;
   // all only when the board is zoomed out, where canvas-sized words can't be read.
   const unscale = Math.min(1 / Math.max(zoom, 0.01), 4)
   // A button in the header: never a drag, nor a click on the node beneath it.
-  const action = (label: string, run: () => void, icon: React.ReactNode) => (
+  const action = (label: string, run: () => void, icon: React.ReactNode, off = false) => (
     <button
       type="button"
       aria-label={label}
       title={label}
-      disabled={!interactive}
+      disabled={!interactive || off}
       onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => {
         event.stopPropagation()
@@ -1237,6 +1244,13 @@ function TerminalNode({ id, box, selected }: { id: string; box: FlowBoxNodeData;
           {status?.branch ? <small>{status.branch}</small> : null}
           <TerminalDot dot={status?.dot} />
           <span className="flow-terminal-actions">
+            {gone || minimized || !terminal ? null : (
+              <>
+                {action(`Smaller text in ${workspace}`, () => terminal.stepFont(id, -1), <TextSizeGlyph larger={false} />, smaller === null)}
+                {action(`Larger text in ${workspace}`, () => terminal.stepFont(id, 1), <TextSizeGlyph larger />, larger === null)}
+                <span className="flow-terminal-sep" aria-hidden="true" />
+              </>
+            )}
             {gone || !terminal
               ? null
               : action(`Float ${workspace} over the whiteboard`, () => terminal.float(workspace), (
@@ -1316,6 +1330,17 @@ function TerminalNode({ id, box, selected }: { id: string; box: FlowBoxNodeData;
         />
       ))}
     </div>
+  )
+}
+
+/** Switchboard: Smaller text and Larger text — an A with a minus or a plus. */
+function TextSizeGlyph({ larger }: { larger: boolean }) {
+  const Sign = larger ? RiAddLine : RiSubtractLine
+  return (
+    <span className="flow-terminal-textsize" aria-hidden="true">
+      A
+      <Sign />
+    </span>
   )
 }
 
@@ -1965,6 +1990,7 @@ function FlowEditorCanvas({
         zoom: roundTo(zoom, 4),
         size: { width: size.width, height: size.height },
         font,
+        nodeFont: box.font ?? TERMINAL_BASE_FONT,
         minimized,
         selected: Boolean(node.selected),
         resizing: terminalResizingRef.current === node.id,
@@ -3963,6 +3989,25 @@ function FlowEditorCanvas({
     setNodes(apply)
   }, [record, meta])
 
+  // Smaller text / Larger text: the type one step smaller or larger in the same box,
+  // so the host fits a new grid of rows and columns into it. One undo step a press.
+  const stepTerminalText = useCallback((id: string, direction: -1 | 1) => {
+    const node = nodesRef.current.find((candidate) => candidate.id === id)
+    if (!node || !isTerminal(node)) return
+    const box = node.data as FlowBoxNodeData
+    const font = stepTerminalFont(box.font, store.getState().transform[2], direction, box.size)
+    if (font === null) return
+    record()
+    lastRecordAt.current = 0
+    const apply = (current: Node[]) =>
+      current.map((candidate) =>
+        candidate.id === id ? withBox(candidate, { ...(candidate.data as FlowBoxNodeData), font }) : candidate,
+      )
+    nodesRef.current = apply(nodesRef.current)
+    latestRef.current = canvasJson(meta, nodesRef.current, edgesRef.current)
+    setNodes(apply)
+  }, [record, meta, store])
+
   const terminalContext = useMemo<TerminalContextValue>(
     () => ({
       status: workspaceStatus,
@@ -3972,6 +4017,7 @@ function FlowEditorCanvas({
         const node = nodesRef.current.find((candidate) => candidate.id === id)
         if (node) setTerminalMinimized(id, (node.data as FlowBoxNodeData).minimized !== true)
       },
+      stepFont: (id, direction) => stepTerminalText(id, direction),
       // As Delete would: one undo step, and the host closes the terminal.
       close: (id) => void deleteElements({ nodes: [{ id }] }),
       // To the zoom its type reads at the Terminal tab's size, centred on it.
@@ -3993,7 +4039,7 @@ function FlowEditorCanvas({
         scheduleSlots()
       },
     }),
-    [workspaceStatus, choices, freshPins, setTerminalMinimized, deleteElements, setCenter, scheduleSlots],
+    [workspaceStatus, choices, freshPins, setTerminalMinimized, stepTerminalText, deleteElements, setCenter, scheduleSlots],
   )
 
   // The handle's pinTerminal: the floating panel's rect becomes a node in the same

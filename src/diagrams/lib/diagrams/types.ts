@@ -348,6 +348,11 @@ export type TerminalSlot = {
   size: FlowSize
   /** The rendered type size in pixels: node.font × zoom. */
   font: number
+  /**
+   * The node's own type size in canvas units (node.font). A zoom never changes it;
+   * Smaller text and Larger text do, and the host then fits a new grid to the box.
+   */
+  nodeFont: number
   minimized: boolean
   selected: boolean
   /** From a resize handle's press until the new size is committed. */

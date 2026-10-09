@@ -23,11 +23,18 @@ import {
   DEFAULT_FLOW_TONE,
   DIAGRAM_TEXT_MAX_LENGTH,
   FLOW_SIDES,
+  FLOW_TERMINAL_DEFAULT_SIZE,
+  TERMINAL_BASE_FONT,
+  TERMINAL_FONT_MAX,
+  TERMINAL_FONT_MIN,
+  TERMINAL_HEADER,
+  TERMINAL_MIN_FONT,
   isFlowSizedShape,
   type FlowEdgeSpec,
   type FlowNodeSpec,
   type FlowShape,
   type FlowSide,
+  type FlowSize,
   type FlowSpec,
 } from "./types"
 
@@ -181,6 +188,46 @@ export function nextFlowNodeId(taken: Iterable<string>, label: string): string {
     const candidate = `${base}-${n}`
     if (!used.has(candidate)) return candidate
   }
+}
+
+// ─── Switchboard: a pinned terminal's type size ───
+
+/** One press of a pinned terminal's Smaller text or Larger text: a tenth, at any zoom. */
+export const TERMINAL_FONT_STEP = 1.1
+/** The least grid Larger text leaves a pinned terminal's body room for. */
+export const TERMINAL_FONT_MIN_GRID = { cols: 20, rows: 4 }
+// A cell of the terminal's monospace type, in ems: SF Mono and Menlo advance 0.6 of
+// the size, and the Terminal tab sets a line height of 1.4.
+const TERMINAL_CELL_EMS = { width: 0.6, height: 1.4 }
+
+/**
+ * Switchboard: a pinned terminal's `font` one step smaller (-1) or larger (1), in
+ * canvas units, or null when it can go no further. Its box stays the size it is, so
+ * the host fits more (or fewer) rows and columns into it. Smaller stops where the
+ * type would be drawn under TERMINAL_MIN_FONT at this zoom — the node would only say
+ * "Zoom in to use" — and Larger where the body would no longer hold
+ * TERMINAL_FONT_MIN_GRID, a little short of any font's exact cells.
+ */
+export function stepTerminalFont(
+  font: number | undefined,
+  zoom: number,
+  direction: -1 | 1,
+  size: FlowSize = FLOW_TERMINAL_DEFAULT_SIZE,
+): number | null {
+  const now = font ?? TERMINAL_BASE_FONT
+  if (!(zoom > 0) || !(now > 0)) return null
+  if (direction < 0) {
+    const floor = Math.max(TERMINAL_FONT_MIN, Math.ceil((TERMINAL_MIN_FONT / zoom) * 1000) / 1000)
+    const next = Math.max(Math.round((now / TERMINAL_FONT_STEP) * 1000) / 1000, floor)
+    return next < now - 0.001 ? next : null
+  }
+  const room = Math.min(
+    size.width / (TERMINAL_FONT_MIN_GRID.cols * TERMINAL_CELL_EMS.width),
+    (size.height - TERMINAL_HEADER) / (TERMINAL_FONT_MIN_GRID.rows * TERMINAL_CELL_EMS.height),
+  )
+  const ceiling = Math.min(TERMINAL_FONT_MAX, Math.floor(room * 1000) / 1000)
+  const next = Math.min(Math.round(now * TERMINAL_FONT_STEP * 1000) / 1000, ceiling)
+  return next > now + 0.001 ? next : null
 }
 
 // ─── Tab: add the next box ───
