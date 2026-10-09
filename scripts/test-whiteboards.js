@@ -659,6 +659,189 @@ test('workspaceChoices: the rail in discovery order, home as ~, recent ones that
 });
 
 // ---------------------------------------------------------------------------
+// ✦ Answer's conversations, kept beside the spec
+// ---------------------------------------------------------------------------
+
+/** A conversation as answer.js keeps one — every value fictional. */
+function talk(extra) {
+  return Object.assign({
+    id: crypto.randomUUID(),
+    workspace: 'sample-2',
+    dir: '/fictional/apps/sample-2',
+    startedAt: '2026-10-09T10:00:00.000Z',
+    lastAt: '2026-10-09T10:05:00.000Z',
+    turns: 2,
+  }, extra);
+}
+
+function boardRow(mod, id) {
+  return JSON.parse(fs.readFileSync(path.join(mod.rootDir(), 'boards', id + '.json'), 'utf8'));
+}
+
+test('a conversation is kept per CLI beside the spec, and is not an edit of the board', async () => {
+  const { mod } = fresh();
+  const made = (await mod.create({ folderId: null, name: 'Talks', spec: ONE_BOX, workspace: 'sample-2' })).data;
+  assert.deepEqual(await mod.conversations(made.id), { ok: true, data: { 'claude-code': null, codex: null } });
+  assert.deepEqual(await mod.conversation(made.id, 'codex'), { ok: true, data: null });
+  const claude = talk();
+  await pause();
+  let set;
+  const seen = await changesDuring(mod, async () => { set = await mod.setConversation(made.id, 'claude-code', claude); });
+  assert.deepEqual(set, { ok: true, data: claude });
+  assert.deepEqual(seen, [], 'no screen hears of it, so an open editor never reloads');
+  const row = boardRow(mod, made.id);
+  assert.equal(row.updatedAt, made.updatedAt, 'updatedAt stays');
+  assert.deepEqual(row.conversations, { 'claude-code': claude });
+  assert.deepEqual(row.spec, ONE_BOX, 'the spec is not where it goes');
+  assert.deepEqual(await mod.conversation(made.id, 'claude-code'), { ok: true, data: claude });
+
+  const codex = talk({ turns: 1 });
+  await mod.setConversation(made.id, 'codex', codex);
+  assert.deepEqual((await mod.conversations(made.id)).data, { 'claude-code': claude, codex });
+
+  // Forgetting one keeps the other; forgetting both leaves no trace in the file.
+  assert.deepEqual(await mod.setConversation(made.id, 'codex', null), { ok: true, data: null });
+  assert.deepEqual(boardRow(mod, made.id).conversations, { 'claude-code': claude });
+  await mod.setConversation(made.id, 'claude-code', null);
+  assert.equal('conversations' in boardRow(mod, made.id), false);
+  // Forgetting one there is none of writes nothing at all.
+  const before = fs.statSync(path.join(mod.rootDir(), 'boards', made.id + '.json')).mtimeMs;
+  await pause();
+  assert.deepEqual(await mod.setConversation(made.id, 'codex', null), { ok: true, data: null });
+  assert.equal(fs.statSync(path.join(mod.rootDir(), 'boards', made.id + '.json')).mtimeMs, before);
+});
+
+test('saveSpec, rename, move and archive keep the conversations; none of them shows one', async () => {
+  const { mod } = fresh();
+  const f = await folderNamed(mod, 'Kept talks');
+  const made = (await mod.create({ folderId: null, name: 'Keeps', spec: BLANK, workspace: 'sample-2' })).data;
+  const both = { 'claude-code': talk(), codex: talk({ turns: 4 }) };
+  await mod.setConversation(made.id, 'claude-code', both['claude-code']);
+  await mod.setConversation(made.id, 'codex', both.codex);
+  const answers = [];
+  answers.push(await mod.saveSpec(made.id, ONE_BOX));
+  answers.push(await mod.rename(made.id, 'Keeps 2'));
+  answers.push(await mod.move(made.id, f.id));
+  answers.push(await mod.setArchived(made.id, true));
+  answers.push(await mod.setArchived(made.id, false));
+  answers.push(await mod.setWorkspace(made.id, 'sample-2'));      // the same workspace: no change
+  answers.push(await mod.get(made.id));
+  answers.push(await mod.list());
+  for (const res of answers) assert.equal(res.ok, true, res.error);
+  assert.deepEqual((await mod.conversations(made.id)).data, both);
+  // A session id or a folder never leaves main in a summary or a get.
+  const said = JSON.stringify(answers);
+  for (const entry of Object.values(both)) {
+    assert.equal(said.includes(entry.id), false);
+    assert.equal(said.includes(entry.dir), false);
+  }
+  assert.equal(said.includes('conversations'), false);
+});
+
+test('an autosave and a conversation written at once both land', async () => {
+  const { mod } = fresh();
+  const made = (await mod.create({ folderId: null, name: 'Racing', spec: BLANK })).data;
+  const entry = talk();
+  const specs = Array.from({ length: 6 }, (_, i) => ({ kind: 'flow', nodes: [{ id: `n${i}`, label: `Box ${i}` }], edges: [] }));
+  await Promise.all([
+    ...specs.slice(0, 3).map(spec => mod.saveSpec(made.id, spec)),
+    mod.setConversation(made.id, 'claude-code', entry),
+    ...specs.slice(3).map(spec => mod.saveSpec(made.id, spec)),
+  ]);
+  const row = boardRow(mod, made.id);
+  assert.deepEqual(row.spec, specs[5]);
+  assert.deepEqual(row.conversations, { 'claude-code': entry });
+});
+
+test('a copy starts no conversation of its own, and a new workspace forgets the old ones', async () => {
+  const { mod } = fresh();
+  const made = (await mod.create({ folderId: null, name: 'Original talk', spec: BLANK, workspace: 'sample-2' })).data;
+  const entry = talk();
+  await mod.setConversation(made.id, 'claude-code', entry);
+  const copy = (await mod.duplicate(made.id)).data;
+  assert.equal('conversations' in boardRow(mod, copy.id), false);
+  assert.deepEqual((await mod.conversations(copy.id)).data, { 'claude-code': null, codex: null });
+  assert.deepEqual((await mod.conversation(made.id, 'claude-code')).data, entry, 'the original keeps its own');
+
+  await mod.setConversation(made.id, 'codex', talk());
+  await mod.setWorkspace(made.id, 'example-1');
+  assert.equal('conversations' in boardRow(mod, made.id), false);
+  assert.deepEqual((await mod.conversations(made.id)).data, { 'claude-code': null, codex: null });
+  await mod.setConversation(made.id, 'codex', talk({ workspace: 'example-1' }));
+  await mod.setWorkspace(made.id, null);
+  assert.deepEqual((await mod.conversations(made.id)).data, { 'claude-code': null, codex: null }, 'no workspace is a change too');
+});
+
+test('a conversation is read back only when it is one answer.js could have written', async () => {
+  const { mod } = fresh();
+  const made = (await mod.create({ folderId: null, name: 'Edited by hand', spec: BLANK })).data;
+  const file = path.join(mod.rootDir(), 'boards', made.id + '.json');
+  const good = talk();
+  const bad = [
+    talk({ id: '--dangerously-bypass-approvals-and-sandbox' }),
+    talk({ id: 'not-a-uuid' }),
+    talk({ id: good.id + ' --resume' }),
+    talk({ workspace: '/fictional/apps/sample-2' }),
+    talk({ workspace: '' }),
+    talk({ dir: 'relative/sample-2' }),
+    talk({ dir: '/fictional/two\nlines' }),
+    talk({ dir: 7 }),
+    talk({ turns: 0 }),
+    talk({ turns: 1.5 }),
+    talk({ turns: '3' }),
+    talk({ startedAt: 'yesterday' }),
+    talk({ lastAt: undefined }),
+    'a string',
+    null,
+  ];
+  for (const entry of bad) {
+    const row = JSON.parse(fs.readFileSync(file, 'utf8'));
+    row.conversations = { 'claude-code': entry, codex: good };
+    fs.writeFileSync(file, JSON.stringify(row));
+    assert.deepEqual((await mod.conversations(made.id)).data, { 'claude-code': null, codex: good }, JSON.stringify(entry));
+  }
+  // Writing one drops what could not be read, and any key that is not one of the two CLIs.
+  const row = JSON.parse(fs.readFileSync(file, 'utf8'));
+  row.conversations = { 'claude-code': bad[0], codex: good, 'claude-api': good, fictionalExtra: true };
+  row.fictionalExtra = { kept: true };
+  fs.writeFileSync(file, JSON.stringify(row));
+  const fresher = talk({ turns: 3 });
+  assert.equal((await mod.setConversation(made.id, 'codex', fresher)).ok, true);
+  const after = boardRow(mod, made.id);
+  assert.deepEqual(after.conversations, { codex: fresher });
+  assert.deepEqual(after.fictionalExtra, { kept: true }, 'the rest of the row survives');
+  // A conversations field that is not an object reads as none.
+  for (const odd of ['text', [good], 7]) {
+    const r = boardRow(mod, made.id);
+    r.conversations = odd;
+    fs.writeFileSync(file, JSON.stringify(r));
+    assert.deepEqual((await mod.conversations(made.id)).data, { 'claude-code': null, codex: null });
+  }
+});
+
+test('what setConversation refuses, and where there is no board', async () => {
+  const { mod } = fresh();
+  const made = (await mod.create({ folderId: null, name: 'Refusals', spec: BLANK })).data;
+  const before = fs.readFileSync(path.join(mod.rootDir(), 'boards', made.id + '.json'), 'utf8');
+  for (const entry of [talk({ id: '--dangerously-bypass-approvals-and-sandbox' }), talk({ dir: 'relative' }), talk({ turns: 0 }), 'text', 7]) {
+    assert.equal((await mod.setConversation(made.id, 'claude-code', entry)).ok, false, JSON.stringify(entry));
+  }
+  for (const provider of ['claude-api', 'openai-api', '', undefined, '__proto__']) {
+    assert.equal((await mod.setConversation(made.id, provider, talk())).ok, false, String(provider));
+    assert.equal((await mod.conversation(made.id, provider)).ok, false, String(provider));
+  }
+  assert.equal(fs.readFileSync(path.join(mod.rootDir(), 'boards', made.id + '.json'), 'utf8'), before, 'nothing was written');
+  const missing = crypto.randomUUID();
+  assert.deepEqual(await mod.setConversation(missing, 'codex', talk()), { ok: false, error: 'Whiteboard not found' });
+  assert.deepEqual(await mod.conversations(missing), { ok: false, error: 'Whiteboard not found' });
+  assert.deepEqual(await mod.conversations('../store'), { ok: false, error: 'Invalid whiteboard id' });
+  assert.deepEqual(await mod.setConversation('../store', 'codex', null), { ok: false, error: 'Invalid whiteboard id' });
+  await mod.remove(made.id);
+  assert.deepEqual(await mod.setConversation(made.id, 'codex', null), { ok: false, error: 'Whiteboard not found' });
+  assert.equal(fs.existsSync(path.join(mod.rootDir(), 'boards', made.id + '.json')), false, 'a deleted board is not made again');
+});
+
+// ---------------------------------------------------------------------------
 // change events
 // ---------------------------------------------------------------------------
 

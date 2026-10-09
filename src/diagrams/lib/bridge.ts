@@ -79,9 +79,13 @@ export type WhiteboardsChange = {
 
 export type FlowDocument = { id: string; text: string; revision: string; path: string }
 
-/** What a CLI is doing while it answers, a line at a time — main/answer.js claudeStep(). */
+/**
+ * What a CLI is doing while it answers, a line at a time — main/answer.js claudeStep().
+ * "wait" comes before any of them when the answer is queued behind another on the same
+ * whiteboard: its conversation (ConversationInfo) takes one question at a time.
+ */
 export type AnswerStep = {
-  kind: "read" | "search" | "list" | "run" | "think" | "write" | "fetch" | "web" | "other"
+  kind: "read" | "search" | "list" | "run" | "think" | "write" | "fetch" | "web" | "wait" | "other"
   text: string
   target?: string
 }
@@ -137,8 +141,22 @@ export type AnswerStatus = {
   keysSafe: boolean
 }
 
+/** The two that keep a whiteboard's conversation; an API's answers each stand alone. */
+export type ConversationProvider = "claude-code" | "codex"
+
+/**
+ * A whiteboard's conversation with one CLI, as main keeps it: how many questions it
+ * holds, when it began and last answered (ISO times), and the workspace its answers
+ * read — an answer from another workspace starts a new one. Never the CLI's own
+ * session id, nor where it keeps it.
+ */
+export type ConversationInfo = { turns: number; startedAt: string; lastAt: string; workspace: string }
+
 export type AnswerResult =
-  | { ok: true; text: string; files?: number }
+  // `conversation`: a CLI's answer asked with a board, which went into the board's
+  // conversation — `turns` the questions it holds now, `resumed` whether this one
+  // continued it rather than starting it.
+  | { ok: true; text: string; files?: number; conversation?: { turns: number; resumed: boolean } }
   | {
       ok: false
       error: string
@@ -206,9 +224,35 @@ type Bridge = {
     id: string,
     // `wsId` is the board's workspace, null when it has none: a CLI then answers
     // { code: "no-workspace" }, and condense, which reads no files, goes ahead anyway.
-    req: { provider: ProviderId; wsId: string | null; system: string; user: string; schema: unknown; operation?: "condense" },
+    // `boardId` is the board asking, sent with an answer (never a condense): a CLI's
+    // answer then continues the board's conversation, waiting its turn behind another
+    // on the same board. Left out, every answer stands alone.
+    req: {
+      provider: ProviderId
+      wsId: string | null
+      boardId?: string
+      system: string
+      user: string
+      schema: unknown
+      operation?: "condense"
+    },
   ): Promise<AnswerResult>
   answerStop(id: string): Promise<unknown>
+  /**
+   * A board's conversation with each CLI, null for one it has none with. `alone` names a
+   * CLI that answers each question on its own on this Mac (a Codex too old to resume one).
+   */
+  answerConversation(
+    boardId: string,
+  ): Promise<
+    | { ok: true; data: Record<ConversationProvider, ConversationInfo | null>; alone?: ConversationProvider[] }
+    | { ok: false; error: string }
+  >
+  /** New conversation: the board's next answer from `provider` (from either, left out) starts one. */
+  answerResetConversation(
+    boardId: string,
+    provider?: ConversationProvider,
+  ): Promise<{ ok: true } | { ok: false; error: string }>
   onAnswerStep(cb: (id: string, step: AnswerStep) => void): () => void
   onAnswerStatus(cb: (status: AnswerStatus) => void): () => void
   diagramsFetchImage(url: string, referrer?: string): Promise<FetchedImage>

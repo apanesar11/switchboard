@@ -13,6 +13,7 @@
 // finds neither, at once.
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -569,4 +570,754 @@ test('condense backend requests suppress API web tools without changing the save
     assert.doesNotMatch(system, /You can also open|question depends on a page/);
     assert.equal(answer.settings().web, true);
   }
+});
+
+// ---------------------------------------------------------------------------
+// one conversation per whiteboard, against stand-in CLIs
+// ---------------------------------------------------------------------------
+
+// `claude` and `codex` here are one node script (fakeCli, below) behind two shell
+// wrappers in the temp folder, put on PATH only while a test runs (withFakes). It writes
+// every launch to calls.jsonl — its argv, folder and stdin, when it started and ended —
+// and answers the way the real CLIs did when probed (2026-10-09): Claude Code's result
+// names its session; Codex's thread.started names its thread; a conversation listed in
+// control.json's `gone` is not there; `gate` holds every launch until that file exists,
+// so a test decides when an answer finishes; `unknown` is an option this Claude Code is
+// too old for; `session` is the session id its result claims; `fail` makes it fail;
+// `linger` leaves a child holding Claude Code's stdout, after it has answered and exited,
+// until that file exists; `refuse` is an option Codex's `exec resume` is too old for
+// (refused in clap's words, exit 2, as codex-cli 0.128 does `--output-schema`).
+const fakeDir = path.join(temp, 'fake');
+const fakeBin = path.join(fakeDir, 'bin');
+const WS = path.join(temp, 'ws');
+const WS_OTHER = path.join(temp, 'ws-other');
+fs.mkdirSync(fakeBin, { recursive: true });
+fs.mkdirSync(WS);
+fs.mkdirSync(WS_OTHER);
+
+function fakeCli() {
+  const fs = require('fs');
+  const path = require('path');
+  const [, , bin, ...argv] = process.argv;
+  let control = {};
+  try { control = JSON.parse(fs.readFileSync(path.join(__dirname, 'control.json'), 'utf8')); } catch (_) { /* none */ }
+  const mine = control[bin] || {};
+  const after = flag => { const at = argv.indexOf(flag); return at === -1 ? null : argv[at + 1]; };
+  const out = line => fs.writeSync(1, JSON.stringify(line) + '\n');
+  const record = (event, extra) => fs.appendFileSync(path.join(__dirname, 'calls.jsonl'),
+    JSON.stringify(Object.assign({ bin, event, argv, cwd: process.cwd() }, extra)) + '\n');
+  if (argv[0] === '--version') { fs.writeSync(1, bin === 'claude' ? '9.9.9 (Claude Code)\n' : 'codex-cli 9.9.9\n'); return; }
+  if (argv[0] === 'auth' || argv[0] === 'login') { fs.writeSync(1, bin === 'claude' ? '{"loggedIn":true}\n' : 'Logged in\n'); return; }
+  record('start', { stdin: bin === 'claude' ? fs.readFileSync(0, 'utf8') : '', entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT || null });
+  const finish = code => { record('end', { code }); process.exit(code); };
+  const answer = { parts: [{ label: 'Fictional answer', detail: '' }] };
+  const go = () => {
+    if (bin === 'claude') {
+      for (const flag of mine.unknown || []) {
+        if (argv.includes(flag)) { fs.writeSync(2, `error: unknown option '${flag}'\n`); return finish(1); }
+      }
+      const resumed = after('--resume');
+      if (mine.fail) {
+        out({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Fictional failure'] });
+        return finish(1);
+      }
+      if (resumed && (mine.gone || []).includes(resumed)) {
+        const said = 'No conversation found with session ID: ' + resumed;
+        out({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: resumed, errors: [said] });
+        fs.writeSync(2, said + '\n');
+        return finish(1);
+      }
+      const sid = mine.session || after('--session-id') || resumed || '00000000-0000-4000-8000-000000000000';
+      out({ type: 'system', subtype: 'init', session_id: sid });
+      out({ type: 'result', subtype: 'success', is_error: false, session_id: sid, structured_output: answer });
+      if (mine.linger) {
+        const wait = `const fs = require('fs'); const t0 = Date.now(); (function poll() { if (fs.existsSync(${JSON.stringify(mine.linger)}) || Date.now() - t0 > 10000) process.exit(0); setTimeout(poll, 10); })();`;
+        require('child_process').spawn(process.execPath, ['-e', wait], { stdio: ['ignore', 1, 'ignore'] }).unref();
+      }
+      return finish(0);
+    }
+    const resuming = argv.includes('resume');
+    const id = resuming ? argv[argv.indexOf('--') + 1] : null;
+    const refused = resuming && (mine.refuse || []).find(flag => argv.includes(flag));
+    if (refused) {
+      fs.writeSync(2, `error: unexpected argument '${refused}' found\n\n  tip: to pass '${refused}' as a value, use '-- ${refused}'\n\nUsage: codex exec resume --json [SESSION_ID] [PROMPT]\n\nFor more information, try '--help'.\n`);
+      return finish(2);
+    }
+    if (resuming && (mine.gone || []).includes(id)) {
+      fs.writeSync(2, `Error: thread/resume: thread/resume failed: no rollout found for thread id ${id} (code -32600)\n`);
+      return finish(1);
+    }
+    out({ type: 'thread.started', thread_id: resuming ? id : (mine.thread || '01a1223e-0000-7000-8000-000000000001') });
+    out({ type: 'turn.started' });
+    out({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: JSON.stringify(answer) } });
+    fs.writeFileSync(after('--output-last-message'), JSON.stringify(answer));
+    out({ type: 'turn.completed' });
+    return finish(0);
+  };
+  const t0 = Date.now();
+  (function poll() {
+    if (!mine.gate || fs.existsSync(mine.gate) || Date.now() - t0 > 20000) go();
+    else setTimeout(poll, 10);
+  })();
+}
+fs.writeFileSync(path.join(fakeDir, 'fake.js'), "'use strict';\n(" + fakeCli.toString() + ')();\n');
+for (const bin of ['claude', 'codex']) {
+  fs.writeFileSync(path.join(fakeBin, bin),
+    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(fakeDir, 'fake.js'))} ${bin} "$@"\n`,
+    { mode: 0o755 });
+}
+
+/** Run `fn` with the stand-ins on PATH, told `control`; PATH is emptied again after. */
+async function withFakes(control, fn) {
+  fs.writeFileSync(path.join(fakeDir, 'control.json'), JSON.stringify(control || {}));
+  fs.writeFileSync(path.join(fakeDir, 'calls.jsonl'), '');
+  process.env.PATH = fakeBin;
+  try {
+    return await fn();
+  } finally {
+    process.env.PATH = '';
+  }
+}
+
+/** Every launch the stand-ins saw, as { bin, event, argv, cwd, stdin?, code? }, in order. */
+function launches(event) {
+  const text = fs.readFileSync(path.join(fakeDir, 'calls.jsonl'), 'utf8');
+  const all = text.split('\n').filter(Boolean).map(line => JSON.parse(line));
+  return event ? all.filter(c => c.event === event) : all;
+}
+
+async function until(check, what) {
+  const t0 = Date.now();
+  while (!check()) {
+    if (Date.now() - t0 > 8000) throw new Error('timed out waiting for ' + what);
+    await new Promise(r => setTimeout(r, 10));
+  }
+}
+
+/** A store as index.js hands answer.js one, kept in a Map, and every get and set it saw. */
+function memoryStore(seed) {
+  const kept = new Map(Object.entries(seed || {}));
+  const gets = [];
+  const writes = [];
+  return {
+    kept,
+    gets,
+    writes,
+    get: async (boardId, provider) => { gets.push([boardId, provider]); return kept.get(boardId + ' ' + provider) || null; },
+    set: async (boardId, provider, entry) => {
+      writes.push([boardId, provider, entry]);
+      if (entry) kept.set(boardId + ' ' + provider, entry);
+      else kept.delete(boardId + ' ' + provider);
+      return { ok: true };
+    },
+    name: async () => 'Fictional board',
+  };
+}
+
+const value = (args, flag) => (args.indexOf(flag) === -1 ? undefined : args[args.indexOf(flag) + 1]);
+const WAIT = { kind: 'wait', text: 'Waiting for the answer before it', target: '' };
+const TURN = { kind: 'think', text: 'Thinking', target: '' };
+let seq = 0;
+
+/** Ask as index.js would: the folder and the workspace resolved, the board named. */
+function ask(provider, boardId, store, extra, steps) {
+  const req = Object.assign({ provider, wsId: 'sample-2', dir: WS, boardId, system: 'SYSTEM', user: 'USER', schema: FLOW_ANSWER_SCHEMA }, extra);
+  const id = 't-talk-' + (++seq);
+  const done = answer.start(id, req, st => { if (steps) steps.push(st); }, store ? { conversations: store } : undefined);
+  done.id = id;
+  return done;
+}
+
+function kept(store, boardId, provider) {
+  return store.kept.get(boardId + ' ' + provider) || null;
+}
+
+test('the first answer on a board starts a Claude Code conversation, and the next continues it', async () => {
+  const store = memoryStore();
+  const board = crypto.randomUUID();
+  await withFakes({}, async () => {
+    const steps = [];
+    const first = await ask('claude-code', board, store, { user: 'USER 1' }, steps);
+    assert.equal(first.ok, true, first.error);
+    assert.deepEqual(first.conversation, { turns: 1, resumed: false });
+    assert.deepEqual(steps, [], 'nothing ahead of it: no wait');
+    const [one] = launches('start');
+    assert.equal(one.cwd, WS);
+    assert.equal(one.stdin, 'USER 1');
+    const sid = value(one.argv, '--session-id');
+    assert.match(sid, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.equal(value(one.argv, '--system-prompt-snapshot'), 'off');
+    assert.equal(value(one.argv, '--name'), 'Whiteboard · Fictional board');
+    assert.equal(one.argv.includes('--no-session-persistence'), false);
+    assert.equal(one.argv.includes('--resume'), false);
+    // Kept as print mode's own session, which an interactive --continue passes over.
+    assert.equal(one.entrypoint, 'sdk-cli');
+    // Everything else as ever: read-only tools, dontAsk, nothing but the schema's answer.
+    assert.equal(value(one.argv, '--permission-mode'), 'dontAsk');
+    assert.equal(value(one.argv, '--json-schema'), JSON.stringify(FLOW_ANSWER_SCHEMA));
+    assert.ok(one.argv.includes('--strict-mcp-config') && one.argv.includes('--disable-slash-commands'));
+    const system = value(one.argv, '--append-system-prompt');
+    assert.ok(system.startsWith('SYSTEM\n\n' + answer.webPrompt(answer.settings().web, 'claude-code')));
+    assert.ok(system.endsWith('\n\n' + answer.conversationPrompt()));
+    assert.match(answer.conversationPrompt(), /other branches of the same flowchart/);
+    assert.match(answer.conversationPrompt(), /win wherever they disagree/);
+    const entry = kept(store, board, 'claude-code');
+    assert.equal(entry.id, sid);
+    assert.equal(entry.workspace, 'sample-2');
+    assert.equal(entry.dir, WS);
+    assert.equal(entry.turns, 1);
+    assert.equal(entry.startedAt, entry.lastAt);
+
+    const second = await ask('claude-code', board, store, { user: 'USER 2' });
+    assert.deepEqual(second.conversation, { turns: 2, resumed: true });
+    const two = launches('start')[1];
+    assert.equal(value(two.argv, '--resume'), sid);
+    assert.equal(value(two.argv, '--system-prompt-snapshot'), 'off');
+    assert.equal(two.argv.includes('--session-id'), false);
+    assert.equal(two.argv.includes('--name'), false);
+    assert.equal(two.argv.includes('--no-session-persistence'), false);
+    assert.equal(two.stdin, 'USER 2');
+    const after = kept(store, board, 'claude-code');
+    assert.equal(after.id, sid);
+    assert.equal(after.turns, 2);
+    assert.equal(after.startedAt, entry.startedAt, 'started when the first question was asked');
+  });
+});
+
+test('two answers on one board and CLI run one after the other; the second says it waits', async () => {
+  const store = memoryStore();
+  const board = crypto.randomUUID();
+  const gate = path.join(temp, 'gate-' + (++seq));
+  await withFakes({ claude: { gate } }, async () => {
+    const firstSteps = [];
+    const secondSteps = [];
+    const first = ask('claude-code', board, store, { user: 'FIRST' }, firstSteps);
+    await until(() => launches('start').length === 1, 'the first answer');
+    const second = ask('claude-code', board, store, { user: 'SECOND' }, secondSteps);
+    assert.deepEqual(secondSteps, [WAIT]);
+    await new Promise(r => setTimeout(r, 150));
+    assert.equal(launches('start').length, 1, 'the second waits for the first');
+    fs.writeFileSync(gate, '');
+    const [a, b] = await Promise.all([first, second]);
+    assert.deepEqual([a.conversation, b.conversation], [{ turns: 1, resumed: false }, { turns: 2, resumed: true }]);
+    assert.deepEqual(firstSteps, []);
+    // Its turn come, the wait is no longer the last word: the card stops saying it waits.
+    assert.deepEqual(secondSteps, [WAIT, TURN]);
+    assert.deepEqual(launches().map(c => c.event + ' ' + c.stdin), ['start FIRST', 'end undefined', 'start SECOND', 'end undefined']);
+    // The second continues the conversation the first started.
+    assert.equal(value(launches('start')[1].argv, '--resume'), value(launches('start')[0].argv, '--session-id'));
+  });
+});
+
+test('different boards, and the other CLI on the same board, answer side by side', async () => {
+  const store = memoryStore();
+  const one = crypto.randomUUID();
+  const two = crypto.randomUUID();
+  const gate = path.join(temp, 'gate-' + (++seq));
+  await withFakes({ claude: { gate }, codex: { gate } }, async () => {
+    const steps = [];
+    const asked = [
+      ask('claude-code', one, store, {}, steps),
+      ask('claude-code', two, store, {}, steps),
+      ask('codex', one, store, {}, steps),
+    ];
+    await until(() => launches('start').length === 3, 'three answers at once');
+    assert.deepEqual(steps, [], 'none of them waits');
+    fs.writeFileSync(gate, '');
+    for (const res of await Promise.all(asked)) assert.deepEqual(res.conversation, { turns: 1, resumed: false });
+    assert.ok(kept(store, one, 'claude-code') && kept(store, two, 'claude-code') && kept(store, one, 'codex'));
+  });
+});
+
+test('Stop while waiting answers at once, spawns nothing, and the line behind it still holds', async () => {
+  const store = memoryStore();
+  const board = crypto.randomUUID();
+  const gate = path.join(temp, 'gate-' + (++seq));
+  await withFakes({ claude: { gate } }, async () => {
+    const first = ask('claude-code', board, store, { user: 'FIRST' });
+    await until(() => launches('start').length === 1, 'the first answer');
+    const steps = [];
+    const second = ask('claude-code', board, store, { user: 'SECOND' }, steps);
+    const third = ask('claude-code', board, store, { user: 'THIRD' });
+    assert.deepEqual(steps, [WAIT]);
+    answer.stop(second.id);
+    assert.deepEqual(await second, { ok: false, code: 'stopped', error: 'Stopped' });
+    await new Promise(r => setTimeout(r, 150));
+    assert.equal(launches('start').length, 1, 'the third still waits for the first, not for the stopped one');
+    fs.writeFileSync(gate, '');
+    assert.deepEqual((await first).conversation, { turns: 1, resumed: false });
+    assert.deepEqual((await third).conversation, { turns: 2, resumed: true });
+    assert.deepEqual(launches('start').map(c => c.stdin), ['FIRST', 'THIRD'], 'the stopped one never ran');
+  });
+});
+
+test('quitting stops the answer at work and every one waiting behind it', async () => {
+  const store = memoryStore();
+  const board = crypto.randomUUID();
+  const gate = path.join(temp, 'gate-' + (++seq));
+  await withFakes({ claude: { gate } }, async () => {
+    const first = ask('claude-code', board, store, { user: 'FIRST' });
+    await until(() => launches('start').length === 1, 'the first answer');
+    const second = ask('claude-code', board, store, { user: 'SECOND' });
+    answer.stopAll();
+    assert.equal((await first).code, 'stopped');
+    assert.equal((await second).code, 'stopped');
+    // Stopping a new conversation keeps nothing.
+    await new Promise(r => setTimeout(r, 300));
+    assert.equal(launches('start').length, 1, 'the one waiting never ran');
+    assert.equal(kept(store, board, 'claude-code'), null);
+    fs.writeFileSync(gate, '');
+  });
+});
+
+test('a conversation the CLI no longer has is forgotten, and the same question starts a new one', async () => {
+  const board = crypto.randomUUID();
+  const gone = crypto.randomUUID();
+  const old = { id: gone, workspace: 'sample-2', dir: WS, startedAt: '2026-10-01T09:00:00.000Z', lastAt: '2026-10-01T09:30:00.000Z', turns: 5 };
+  const store = memoryStore({ [board + ' claude-code']: old, [board + ' codex']: Object.assign({}, old) });
+  await withFakes({ claude: { gone: [gone] }, codex: { gone: [gone], thread: '01a1223e-0000-7000-8000-00000000000a' } }, async () => {
+    const res = await ask('claude-code', board, store);
+    assert.equal(res.ok, true, res.error);
+    assert.deepEqual(res.conversation, { turns: 1, resumed: false });
+    const [tried, again] = launches('start');
+    assert.equal(value(tried.argv, '--resume'), gone);
+    const fresh = value(again.argv, '--session-id');
+    assert.ok(fresh && fresh !== gone);
+    assert.equal(kept(store, board, 'claude-code').id, fresh);
+    assert.equal(kept(store, board, 'claude-code').turns, 1);
+    assert.deepEqual(store.writes.filter(w => w[1] === 'claude-code').map(w => w[2] && w[2].id), [null, fresh]);
+
+    const viaCodex = await ask('codex', board, store);
+    assert.deepEqual(viaCodex.conversation, { turns: 1, resumed: false });
+    const [resumed, started] = launches('start').filter(c => c.bin === 'codex');
+    assert.equal(resumed.argv[3], 'resume');
+    assert.equal(started.argv.includes('resume'), false);
+    assert.equal(kept(store, board, 'codex').id, '01a1223e-0000-7000-8000-00000000000a');
+  });
+});
+
+test('a conversation had in another workspace or folder is not continued', async () => {
+  const board = crypto.randomUUID();
+  const other = crypto.randomUUID();
+  const elsewhere = crypto.randomUUID();
+  const store = memoryStore({
+    [board + ' claude-code']: { id: other, workspace: 'example-1', dir: WS, startedAt: '2026-10-01T09:00:00.000Z', lastAt: '2026-10-01T09:00:00.000Z', turns: 3 },
+    [board + ' codex']: { id: elsewhere, workspace: 'sample-2', dir: WS_OTHER, startedAt: '2026-10-01T09:00:00.000Z', lastAt: '2026-10-01T09:00:00.000Z', turns: 3 },
+  });
+  await withFakes({}, async () => {
+    assert.deepEqual((await ask('claude-code', board, store)).conversation, { turns: 1, resumed: false });
+    assert.deepEqual((await ask('codex', board, store)).conversation, { turns: 1, resumed: false });
+    const [claude, codex] = launches('start');
+    assert.equal(claude.argv.includes('--resume'), false);
+    assert.equal(claude.argv.includes(other), false);
+    assert.equal(codex.argv.includes('resume'), false);
+    assert.equal(codex.argv.includes(elsewhere), false);
+    assert.equal(kept(store, board, 'claude-code').workspace, 'sample-2');
+    assert.equal(kept(store, board, 'codex').dir, WS);
+  });
+});
+
+test('a reset while an answer is on its way: the answer lands, and nothing is written back', async () => {
+  const board = crypto.randomUUID();
+  const sid = crypto.randomUUID();
+  const old = { id: sid, workspace: 'sample-2', dir: WS, startedAt: '2026-10-01T09:00:00.000Z', lastAt: '2026-10-01T09:00:00.000Z', turns: 2 };
+  const store = memoryStore({ [board + ' claude-code']: old });
+  const gate = path.join(temp, 'gate-' + (++seq));
+  await withFakes({ claude: { gate } }, async () => {
+    const working = ask('claude-code', board, store, { user: 'AT WORK' });
+    await until(() => launches('start').length === 1, 'the answer at work');
+    const waiting = ask('claude-code', board, store, { user: 'WAITING' });
+    assert.deepEqual(await answer.resetConversation(board, 'claude-code', { conversations: store }), { ok: true });
+    assert.equal(kept(store, board, 'claude-code'), null);
+    fs.writeFileSync(gate, '');
+    const res = await working;
+    assert.equal(res.ok, true);
+    assert.equal(res.conversation, undefined, 'its conversation was forgotten while it answered');
+    // The one waiting behind it starts the board's new conversation.
+    const next = await waiting;
+    assert.deepEqual(next.conversation, { turns: 1, resumed: false });
+    const [a, b] = launches('start');
+    assert.equal(value(a.argv, '--resume'), sid);
+    assert.equal(b.argv.includes('--resume'), false);
+    assert.equal(kept(store, board, 'claude-code').id, value(b.argv, '--session-id'));
+    assert.equal(store.writes.some(w => w[2] && w[2].id === sid), false, 'the old id was never written back');
+  });
+});
+
+test('a condensation is never part of a conversation', async () => {
+  const board = crypto.randomUUID();
+  const sid = crypto.randomUUID();
+  const old = { id: sid, workspace: 'sample-2', dir: WS, startedAt: '2026-10-01T09:00:00.000Z', lastAt: '2026-10-01T09:00:00.000Z', turns: 2 };
+  const store = memoryStore({ [board + ' claude-code']: old, [board + ' codex']: old });
+  await withFakes({}, async () => {
+    for (const provider of ['claude-code', 'codex']) {
+      const res = await ask(provider, board, store, { operation: 'condense' });
+      assert.equal(res.ok, true, res.error);
+      assert.equal(res.conversation, undefined);
+    }
+    const [claude, codex] = launches('start');
+    assert.ok(claude.argv.includes('--no-session-persistence'));
+    for (const flag of ['--resume', '--session-id', '--system-prompt-snapshot', '--name']) assert.equal(claude.argv.includes(flag), false, flag);
+    assert.doesNotMatch(value(claude.argv, '--append-system-prompt'), /keeps one conversation/);
+    // Codex is asked exactly as before the conversations: nothing a Codex that has no
+    // `--ephemeral` (0.92) would refuse.
+    assert.deepEqual(codex.argv.slice(0, 9), [
+      'exec', '--json', '--sandbox', 'read-only', '--skip-git-repo-check',
+      '-c', 'web_search="disabled"', '--cd', WS,
+    ]);
+    assert.equal(codex.argv.includes('--ephemeral'), false);
+    assert.equal(codex.argv.includes('resume'), false);
+    assert.deepEqual(store.gets, []);
+    assert.deepEqual(store.writes, []);
+  });
+});
+
+test('without a board, a store, or a board id that is one, a CLI is asked exactly as before', async () => {
+  const store = memoryStore();
+  await withFakes({}, async () => {
+    const web = answer.settings().web;
+    const system = 'SYSTEM\n\n' + answer.webPrompt(web, 'claude-code');
+    const tools = web ? 'Read,Grep,Glob,WebFetch,WebSearch' : 'Read,Grep,Glob';
+    const before = [
+      '-p', '--output-format', 'stream-json', '--verbose',
+      '--json-schema', JSON.stringify(FLOW_ANSWER_SCHEMA),
+      '--tools', tools, '--allowedTools', tools,
+      '--permission-mode', 'dontAsk', '--strict-mcp-config', '--disable-slash-commands',
+      '--no-session-persistence', '--append-system-prompt', system,
+    ];
+    const results = [
+      await ask('claude-code', undefined, store),
+      await ask('claude-code', crypto.randomUUID(), null),
+      await ask('claude-code', 'not-a-uuid', store),
+      await ask('claude-code', '--resume', store),
+    ];
+    for (const res of results) assert.deepEqual(res, { ok: true, text: JSON.stringify({ parts: [{ label: 'Fictional answer', detail: '' }] }), files: 0 });
+    for (const call of launches('start')) assert.deepEqual(call.argv, before);
+
+    const codex = await ask('codex', undefined, store);
+    assert.equal(codex.ok, true);
+    const argv = launches('start').pop().argv;
+    assert.deepEqual(argv.slice(0, 7), ['exec', '--json', '--sandbox', 'read-only', '--skip-git-repo-check', '-c', web ? 'web_search="live"' : 'web_search="disabled"']);
+    assert.deepEqual(argv.slice(7, 9), ['--cd', WS]);
+    assert.equal(argv[argv.length - 1], 'SYSTEM\n\n' + answer.webPrompt(web, 'codex') + '\n\nUSER');
+    assert.deepEqual(store.gets, []);
+    assert.deepEqual(store.writes, []);
+  });
+  // The pure builders, without a turn, are what they always were.
+  const s = { claudeCodeEffort: 'own' };
+  assert.ok(answer.claudeCodeArgs(REQ, s, false).includes('--no-session-persistence'));
+  assert.equal(answer.codexArgs(REQ, false, '/ws', 's.json', 'o.json').includes('--ephemeral'), false);
+  assert.equal(answer.codexArgs(Object.assign({}, REQ, { operation: 'condense' }), true, '/ws', 's.json', 'o.json').includes('--ephemeral'), false);
+});
+
+test('the APIs answer each question on its own, a board or not', async () => {
+  fs.writeFileSync(answer.keysFile(), JSON.stringify({ version: 1, keys: { 'claude-api': { enc: 'eA==', last4: 'test' } } }));
+  const store = memoryStore();
+  const json = parts(2);
+  sent.length = 0;
+  replies = [[200, { content: [{ type: 'text', text: json }], stop_reason: 'end_turn' }]];
+  const res = await ask('claude-api', crypto.randomUUID(), store, { dir: null });
+  assert.deepEqual(res, { ok: true, text: json });
+  assert.doesNotMatch(sent[0].body.system, /keeps one conversation/);
+  assert.deepEqual(sent[0].body.messages, [{ role: 'user', content: 'USER' }]);
+  assert.deepEqual(store.gets, []);
+  assert.deepEqual(store.writes, []);
+});
+
+test('an id that is not a UUID never reaches a CLI\'s arguments, stored or claimed', async () => {
+  const evil = ['--dangerously-bypass-approvals-and-sandbox', '--resume', 'last', '; rm -rf ~', crypto.randomUUID() + ' --x'];
+  for (const id of evil) {
+    const board = crypto.randomUUID();
+    const entry = { id, workspace: 'sample-2', dir: WS, startedAt: '2026-10-01T09:00:00.000Z', lastAt: '2026-10-01T09:00:00.000Z', turns: 1 };
+    const store = memoryStore({ [board + ' claude-code']: entry, [board + ' codex']: entry });
+    await withFakes({}, async () => {
+      assert.deepEqual((await ask('claude-code', board, store)).conversation, { turns: 1, resumed: false });
+      assert.deepEqual((await ask('codex', board, store)).conversation, { turns: 1, resumed: false });
+      for (const call of launches('start')) {
+        assert.equal(call.argv.includes(id), false, id);
+        assert.equal(call.argv.includes('resume'), false);
+        assert.equal(call.argv.includes('--resume'), false);
+      }
+    });
+  }
+  // A result that claims a session id that is not one: the id passed is kept instead.
+  const board = crypto.randomUUID();
+  const store = memoryStore();
+  await withFakes({ claude: { session: '--dangerously-skip-permissions' } }, async () => {
+    await ask('claude-code', board, store);
+    assert.equal(kept(store, board, 'claude-code').id, value(launches('start')[0].argv, '--session-id'));
+  });
+  // The builders themselves refuse one too: nothing is kept rather than a bad id passed.
+  const s = { claudeCodeEffort: 'own' };
+  const claude = answer.claudeCodeArgs(REQ, s, false, { resume: true, id: '--dangerously-bypass-approvals-and-sandbox' });
+  assert.ok(claude.includes('--no-session-persistence'));
+  assert.equal(claude.includes('--dangerously-bypass-approvals-and-sandbox'), false);
+  const codex = answer.codexArgs(REQ, false, '/ws', 's.json', 'o.json', { resume: true, id: '--dangerously-bypass-approvals-and-sandbox' });
+  assert.equal(codex.includes('resume'), false);
+  assert.equal(codex.includes('--dangerously-bypass-approvals-and-sandbox'), false);
+});
+
+test('Codex: a new thread is kept by the id it names; a resume is `exec resume`, read-only twice over', async () => {
+  const board = crypto.randomUUID();
+  const thread = '01a1223e-0000-7000-8000-0000000000c1';
+  const store = memoryStore();
+  await withFakes({ codex: { thread } }, async () => {
+    const first = await ask('codex', board, store, { user: 'FIRST' });
+    assert.deepEqual(first.conversation, { turns: 1, resumed: false });
+    assert.equal(kept(store, board, 'codex').id, thread);
+    const one = launches('start')[0];
+    assert.deepEqual(one.argv.slice(0, 4), ['exec', '--json', '--sandbox', 'read-only']);
+    assert.equal(value(one.argv, '--cd'), WS);
+    assert.ok(one.argv[one.argv.length - 1].endsWith(answer.conversationPrompt() + '\n\nFIRST'));
+
+    const second = await ask('codex', board, store, { user: 'SECOND' });
+    assert.deepEqual(second.conversation, { turns: 2, resumed: true });
+    const two = launches('start')[1];
+    const web = answer.settings().web;
+    assert.deepEqual(two.argv.slice(0, 4), ['exec', '--sandbox', 'read-only', 'resume']);
+    assert.deepEqual(two.argv.slice(4, 12), [
+      '--json', '--skip-git-repo-check',
+      '-c', 'sandbox_mode="read-only"',
+      '-c', web ? 'web_search="live"' : 'web_search="disabled"',
+      '--output-schema', value(two.argv, '--output-schema'),
+    ]);
+    assert.ok(value(two.argv, '--output-last-message'));
+    const dash = two.argv.indexOf('--');
+    assert.deepEqual(two.argv.slice(dash + 1, dash + 2), [thread]);
+    assert.equal(two.argv.length, dash + 3, 'the id and the prompt, and nothing after');
+    assert.ok(two.argv[dash + 2].endsWith('\n\nSECOND'));
+    assert.equal(two.argv.includes('--cd'), false, 'resume has none: it runs where it is spawned');
+    assert.equal(two.cwd, WS);
+    assert.equal(kept(store, board, 'codex').turns, 2);
+  });
+});
+
+test('a failed or stopped turn: a continued conversation keeps its place, a new one is not kept', async () => {
+  const board = crypto.randomUUID();
+  const sid = crypto.randomUUID();
+  const old = { id: sid, workspace: 'sample-2', dir: WS, startedAt: '2026-10-01T09:00:00.000Z', lastAt: '2026-10-01T09:00:00.000Z', turns: 2 };
+  const store = memoryStore({ [board + ' claude-code']: old });
+  const gate = path.join(temp, 'gate-' + (++seq));
+  await withFakes({ claude: { gate } }, async () => {
+    const resumed = ask('claude-code', board, store);
+    await until(() => launches('start').length === 1, 'the resumed answer');
+    answer.stop(resumed.id);
+    assert.equal((await resumed).code, 'stopped');
+    assert.deepEqual(kept(store, board, 'claude-code'), old);
+    const fresh = crypto.randomUUID();
+    const started = ask('claude-code', fresh, store);
+    await until(() => launches('start').length === 2, 'the new answer');
+    answer.stop(started.id);
+    assert.equal((await started).code, 'stopped');
+    await new Promise(r => setTimeout(r, 100));
+    assert.equal(kept(store, fresh, 'claude-code'), null);
+    assert.deepEqual(store.writes, []);
+    fs.writeFileSync(gate, '');
+  });
+  await withFakes({ claude: { fail: true } }, async () => {
+    const resumed = await ask('claude-code', board, store);
+    assert.deepEqual(resumed, { ok: false, error: 'Claude Code said: Fictional failure' });
+    assert.equal(value(launches('start')[0].argv, '--resume'), sid, 'a failure is not a conversation gone: asked once');
+    assert.equal(launches('start').length, 1);
+    assert.deepEqual(kept(store, board, 'claude-code'), old);
+    const fresh = crypto.randomUUID();
+    assert.equal((await ask('claude-code', fresh, store)).ok, false);
+    assert.equal(kept(store, fresh, 'claude-code'), null);
+    assert.deepEqual(store.writes, []);
+  });
+});
+
+test('Stop after Claude Code has answered and exited, before its output closes: nothing is kept', async () => {
+  // A Stop that comes once the CLI is gone finds nothing to kill (spawnCli), so the run
+  // itself says it answered; the turn must still keep nothing the page was told is
+  // stopped, or the next answer would continue a conversation holding a question and
+  // answer the user never saw.
+  const board = crypto.randomUUID();
+  const store = memoryStore();
+  const linger = path.join(temp, 'linger-' + (++seq));
+  await withFakes({ claude: { linger } }, async () => {
+    const stopped = ask('claude-code', board, store);
+    await until(() => launches('end').length === 1, 'Claude Code to answer and exit');
+    // Its exit heard; its stdout still held open by the child it left.
+    await new Promise(r => setTimeout(r, 250));
+    answer.stop(stopped.id);
+    assert.equal((await stopped).code, 'stopped');
+    fs.writeFileSync(linger, '');
+    const next = await ask('claude-code', board, store);
+    assert.equal(next.ok, true, next.error);
+    assert.deepEqual(next.conversation, { turns: 1, resumed: false });
+    const [first, second] = launches('start');
+    assert.equal(second.argv.includes('--resume'), false, 'the stopped turn is not continued');
+    assert.notEqual(value(second.argv, '--session-id'), value(first.argv, '--session-id'));
+    assert.deepEqual(store.writes.map(([, , entry]) => entry.id), [value(second.argv, '--session-id')], 'only the next answer was kept');
+  });
+});
+
+test('a conversation\'s session is print mode\'s own, whatever entrypoint Switchboard inherited', async () => {
+  // Interactive `claude --continue` and `--resume` pass over sdk-cli sessions; one
+  // recorded under an entrypoint the app happened to inherit would be offered there.
+  const previous = process.env.CLAUDE_CODE_ENTRYPOINT;
+  process.env.CLAUDE_CODE_ENTRYPOINT = 'claude-vscode';
+  try {
+    const board = crypto.randomUUID();
+    const store = memoryStore();
+    await withFakes({}, async () => {
+      await ask('claude-code', board, store);
+      await ask('claude-code', board, store);
+      await ask('claude-code', undefined, store);
+      const [started, resumed, alone] = launches('start');
+      assert.equal(started.entrypoint, 'sdk-cli');
+      assert.equal(resumed.entrypoint, 'sdk-cli');
+      assert.ok(resumed.argv.includes('--resume'));
+      // An answer that keeps nothing is launched exactly as before.
+      assert.ok(alone.argv.includes('--no-session-persistence'));
+      assert.equal(alone.entrypoint, 'claude-vscode');
+    });
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CODE_ENTRYPOINT;
+    else process.env.CLAUDE_CODE_ENTRYPOINT = previous;
+  }
+});
+
+test('what a page may know of a conversation, and the reset that forgets one or both', async () => {
+  const board = crypto.randomUUID();
+  const entry = { id: crypto.randomUUID(), workspace: 'sample-2', dir: '/fictional/apps/sample-2', startedAt: '2026-10-01T09:00:00.000Z', lastAt: '2026-10-01T09:30:00.000Z', turns: 3 };
+  const store = memoryStore({ [board + ' claude-code']: entry, [board + ' codex']: Object.assign({}, entry, { turns: 1 }) });
+  const opts = { conversations: store };
+  const info = await answer.conversation(board, opts);
+  assert.deepEqual(info, { ok: true, data: {
+    'claude-code': { turns: 3, startedAt: entry.startedAt, lastAt: entry.lastAt, workspace: 'sample-2' },
+    codex: { turns: 1, startedAt: entry.startedAt, lastAt: entry.lastAt, workspace: 'sample-2' },
+  } });
+  assert.equal(JSON.stringify(info).includes(entry.id), false);
+  assert.equal(JSON.stringify(info).includes(entry.dir), false);
+  assert.equal(answer.publicConversation({ ...entry, id: '--evil' }), null);
+
+  // The rail's folder for the workspace now: the same, and the conversation shows; another
+  // (the config changed under the same id), and it reads as none, since the next answer
+  // starts anew there; none at all, and the answer is refused anyway, so it is left alone.
+  const folders = { 'sample-2': entry.dir };
+  const lookup = async wsId => (folders[wsId] ? { id: wsId, dir: folders[wsId] } : null);
+  assert.equal((await answer.conversation(board, { conversations: store, lookup })).data.codex.turns, 1);
+  folders['sample-2'] = '/fictional/apps/sample-2-moved';
+  assert.deepEqual((await answer.conversation(board, { conversations: store, lookup })).data, { 'claude-code': null, codex: null });
+  delete folders['sample-2'];
+  assert.equal((await answer.conversation(board, { conversations: store, lookup })).data['claude-code'].turns, 3);
+  const throwing = async () => { throw new Error('fictional lookup failure'); };
+  assert.equal((await answer.conversation(board, { conversations: store, lookup: throwing })).data['claude-code'].turns, 3);
+
+  for (const bad of ['not-a-uuid', '../store', '', null, 7]) {
+    assert.deepEqual(await answer.conversation(bad, opts), { ok: false, error: 'Invalid whiteboard id' });
+    assert.deepEqual(await answer.resetConversation(bad, 'codex', opts), { ok: false, error: 'Invalid whiteboard id' });
+  }
+  for (const provider of ['claude-api', 'openai-api', '', '__proto__', 7]) {
+    assert.equal((await answer.resetConversation(board, provider, opts)).ok, false, String(provider));
+  }
+  assert.equal((await answer.conversation(board, {})).ok, false, 'no store');
+  assert.deepEqual(store.writes, [], 'nothing refused touched the store');
+
+  assert.deepEqual(await answer.resetConversation(board, 'codex', opts), { ok: true });
+  assert.deepEqual((await answer.conversation(board, opts)).data.codex, null);
+  assert.equal((await answer.conversation(board, opts)).data['claude-code'].turns, 3);
+  assert.deepEqual(await answer.resetConversation(board, undefined, opts), { ok: true });
+  assert.deepEqual((await answer.conversation(board, opts)).data, { 'claude-code': null, codex: null });
+
+  const failing = Object.assign(memoryStore(), { set: async () => ({ ok: false, error: 'fictional disk failure' }) });
+  assert.deepEqual(await answer.resetConversation(board, 'codex', { conversations: failing }),
+    { ok: false, error: 'could not forget the conversation: fictional disk failure' });
+});
+
+test('a store that will not keep the conversation: the answer is still the answer', async () => {
+  const board = crypto.randomUUID();
+  const store = Object.assign(memoryStore(), { set: async () => ({ ok: false, error: 'fictional disk failure' }) });
+  const error = console.error;
+  const logged = [];
+  console.error = (...args) => logged.push(args.join(' '));
+  try {
+    await withFakes({}, async () => {
+      const res = await ask('claude-code', board, store);
+      assert.equal(res.ok, true, res.error);
+      assert.equal(res.conversation, undefined);
+    });
+  } finally {
+    console.error = error;
+  }
+  assert.ok(logged.some(line => /could not keep the conversation: fictional disk failure/.test(line)));
+});
+
+// Last: what it learns about an older Claude Code lasts until the app quits.
+test('a Claude Code too old for an option goes again without it, and is not asked again', async () => {
+  const board = crypto.randomUUID();
+  const store = memoryStore();
+  await withFakes({ claude: { unknown: ['--system-prompt-snapshot', '--name'] } }, async () => {
+    const res = await ask('claude-code', board, store);
+    assert.deepEqual(res.conversation, { turns: 1, resumed: false });
+    const tries = launches('start');
+    assert.equal(tries.length, 3, 'once refusing the snapshot, once the name, then the answer');
+    const last = tries[2].argv;
+    assert.equal(last.includes('--system-prompt-snapshot'), false);
+    assert.equal(last.includes('--name'), false);
+    assert.equal(kept(store, board, 'claude-code').id, value(last, '--session-id'));
+    const again = await ask('claude-code', board, store);
+    assert.deepEqual(again.conversation, { turns: 2, resumed: true });
+    assert.equal(launches('start').length, 4, 'found out once');
+    assert.equal(launches('start')[3].argv.includes('--system-prompt-snapshot'), false);
+  });
+});
+
+// Last of all: what it learns about an older Codex lasts until the app quits, too.
+test('a Codex too old to resume answers on its own at once, and every Codex answer after it', async () => {
+  const board = crypto.randomUUID();
+  const thread = '01a1223e-0000-7000-8000-0000000000c2';
+  const store = memoryStore();
+  await withFakes({ codex: { thread, refuse: ['--output-schema'] } }, async () => {
+    const first = await ask('codex', board, store, { user: 'FIRST' });
+    assert.deepEqual(first.conversation, { turns: 1, resumed: false }, 'a new thread is asked as ever');
+    assert.equal(kept(store, board, 'codex').id, thread);
+
+    // The resume is refused (codex-cli 0.128 has no --output-schema on `exec resume`):
+    // the same question goes again at once, exactly as before conversations.
+    const steps = [];
+    const second = await ask('codex', board, store, { user: 'SECOND' }, steps);
+    assert.equal(second.ok, true, second.error);
+    assert.equal(second.conversation, undefined);
+    const [, refused, alone] = launches('start');
+    assert.deepEqual(refused.argv.slice(0, 4), ['exec', '--sandbox', 'read-only', 'resume']);
+    assert.equal(launches('start').length, 3, 'refused once, then asked on its own');
+    const web = answer.settings().web;
+    assert.deepEqual(alone.argv.slice(0, 9), ['exec', '--json', '--sandbox', 'read-only', '--skip-git-repo-check', '-c', web ? 'web_search="live"' : 'web_search="disabled"', '--cd', WS]);
+    assert.equal(alone.argv.includes('resume'), false);
+    assert.equal(alone.argv[alone.argv.length - 1], 'SYSTEM\n\n' + answer.webPrompt(web, 'codex') + '\n\nSECOND', 'told nothing of a conversation');
+    assert.equal(kept(store, board, 'codex'), null, 'a thread that can never be continued is forgotten');
+    assert.deepEqual(store.writes.map(([, provider, entry]) => [provider, entry && entry.turns]), [['codex', 1], ['codex', null]]);
+
+    // From now on Codex answers each question on its own: no line, no store, no resume.
+    const other = crypto.randomUUID();
+    const before = store.gets.length;
+    const third = await ask('codex', other, store, { user: 'THIRD' });
+    assert.equal(third.ok, true, third.error);
+    assert.equal(third.conversation, undefined);
+    assert.equal(store.gets.length, before, 'the store is not asked');
+    assert.equal(launches('start')[3].argv.includes('resume'), false);
+    assert.equal(launches('start').length, 4);
+    assert.equal(kept(store, other, 'codex'), null);
+    // The page is told so, and never offered a Codex conversation to continue.
+    assert.deepEqual(await answer.conversation(board, { conversations: store }), { ok: true, data: { 'claude-code': null, codex: null }, alone: ['codex'] });
+    // Claude Code still keeps its conversations.
+    const claude = await ask('claude-code', board, store);
+    assert.deepEqual(claude.conversation, { turns: 1, resumed: false });
+    assert.equal((await answer.conversation(board, { conversations: store })).data['claude-code'].turns, 1);
+  });
+  // Nor do its answers on one board wait in line for each other any more.
+  const gate = path.join(temp, 'gate-' + (++seq));
+  await withFakes({ codex: { gate } }, async () => {
+    const steps = [];
+    const a = ask('codex', board, store, { user: 'A' });
+    const b = ask('codex', board, store, { user: 'B' }, steps);
+    await until(() => launches('start').length === 2, 'both answers at once');
+    assert.deepEqual(steps, [], 'no wait');
+    fs.writeFileSync(gate, '');
+    const both = await Promise.all([a, b]);
+    assert.deepEqual(both.map(res => [res.ok, res.conversation]), [[true, undefined], [true, undefined]]);
+  });
 });

@@ -627,21 +627,6 @@ aside .it.on .ic{color:var(--ink)}
 .gridchanges .repo .pill{max-width:38%;font-size:10px}
 .gridchanges .sumb{height:22px;padding:0 6px;gap:4px;font-size:11px}
 .gridchanges .repo .lk{margin-left:auto;max-width:100%}
-.cell.mode-whiteboard > .dgslab{flex:1;min-height:0;margin:0;border:0;border-radius:0;overflow:hidden}
-/* A whiteboard square choosing its board: the workspace picker's rows, plus a search
-   that hides rows in place (views/grid.js applyQuery) — [hidden] must beat .pick .it's
-   display:flex. The ⌄ beside "Show a whiteboard" opens it again once a board is chosen. */
-.wbpick [hidden]{display:none!important}
-.wbpick input.wbq{flex:none;height:28px;margin:0 6px 8px;padding:0 10px;border:1px solid var(--edge);
-  border-radius:var(--r-btn);background:var(--sidebar);outline:none;font:var(--fs-sm) var(--ui);color:var(--ink);
-  -webkit-user-select:text;user-select:text}
-.wbpick input.wbq:focus{border-color:var(--link);background:var(--surface)}
-.wbpick .wbgrp{display:flex;flex-direction:column;gap:2px;flex:none}
-.wbpick .it .bn{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wbpick .it .bf{flex:none;max-width:45%;font-size:var(--fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wbpick .it.on{background:var(--sel)}
-.gridmode.wbchange{min-width:16px;padding:0 1px;margin-left:-2px}
-.gridmode.wbchange .ic svg{width:11px;height:11px}
 .cellhd .x{display:inline-flex;align-items:center;justify-content:center;flex:none;
   width:22px;height:22px;border-radius:var(--r-md);color:var(--sec);font-size:15px;line-height:1}
 .cellhd .x:hover{background:var(--tint-2);color:var(--ink)}
@@ -1348,10 +1333,6 @@ aside .empty p{font-size:var(--fs-xs)}
 .dgslab::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
   box-shadow:inset 0 0 0 1px var(--line);z-index:2}
 .dgslab.blank{align-items:center;justify-content:center;background:var(--term-bg)}
-/* The slab takes focus from a press on the canvas's empty paper, and after a Grid
-   square's board is switched (views/whiteboards.js): the keyboard is then the canvas's,
-   not a control's, so no ring. */
-.dgslab:focus{outline:none}
 /* Full screen: the slab is on <body>, over the header's drag region — which Electron
    still counts underneath it. Later in the document, so this hole is punched after. */
 .dgslab.full{-webkit-app-region:no-drag}

@@ -30,7 +30,7 @@ type DocumentStore = {
 
 // One store for the whole window. A failed save stays recoverable when switching
 // boards, and two canvases showing the same document (a board and its duplicate before
-// the copy is made, or a Grid square) share one save queue instead of racing.
+// the copy is made) share one save queue instead of racing.
 const store: DocumentStore = {
   entries: new Map(), loads: new Map(), chains: new Map(), timers: new Map(), listeners: new Set(),
 }

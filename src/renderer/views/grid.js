@@ -1,14 +1,12 @@
 // SB.views.grid — four panes in user-defined views. A workspace pane can show its
-// Terminal, Changes or a whiteboard; a folder pane is a Terminal only.
+// Terminal or Changes; a folder pane is a Terminal only.
 //
 // views/terminal.js keeps one xterm and shell per workspace and moves that same
 // host here when Terminal is shown. Switching a pane never restarts its shell.
 //
-// A whiteboard pane shows any board, not only boards of its workspace: the square
-// chooses one (an in-cell picker), and views/whiteboards.js moves that board's live
-// canvas into the square, the same instance its own screen shows. Which board a square
-// shows is this Mac's arrangement, kept beside the square's mode in localStorage,
-// keyed by the square's workspace.
+// No pane shows a whiteboard. A board is not one workspace's: it can float or pin
+// terminals for any number of them, so it has a screen of its own (views/whiteboards.js)
+// rather than a square that belongs to one workspace.
 //
 // The data (views, which one is showing) belongs to app.js — SB.grid — because
 // views never write state. What lives here is only what a rebuild would otherwise
@@ -24,9 +22,8 @@ window.SB = window.SB || {};
   var h = D.h;
 
   var CELLS = 4;
-  var MODE_KEY = 'switchboard.grid.cellMode';   // each workspace's chosen grid content
-  var BOARD_KEY = 'switchboard.grid.cellBoard'; // each workspace's square's whiteboard
-  var RECENT = 12;                              // the Whiteboards screen's Recent, the same twelve
+  var MODE_KEY = 'switchboard.grid.cellMode';     // each workspace's chosen grid content
+  var OLD_BOARD_KEY = 'switchboard.grid.cellBoard'; // which board each old whiteboard square showed
 
   var editing = null;     // null | { text, fresh } — the view being made, its name as typed
   var picking = null;     // null | { viewId, index } — the square that is choosing
@@ -38,16 +35,18 @@ window.SB = window.SB || {};
   var choosing = false;   // the folder sheet is up: a second click must not raise a second one
   var pressing = false;   // a mouse button is down: what it pressed has not been clicked yet
   var released = null;    // what is waiting for that click to land
-  var boardPicking = null; // the workspace whose whiteboard square is choosing another board
-  var queries = {};       // workspace → { text, sel } — what a square's board search says
   // A workspace keeps its choice across Grid views and launches. Old saved note
   // switches are deliberately ignored: Notes is gone, so those cells open Terminal.
-  var modes = readStored(MODE_KEY);
-  var boardsFor = readStored(BOARD_KEY);
+  // Old whiteboard squares are ignored too — 'whiteboard', and the 'diagrams' saved
+  // before it: a board can hold terminals for many workspaces, so it left the Grid for
+  // a screen of its own, and those cells open Terminal. Unlike the note switches they
+  // are cleared out as well (forgetBoards), so nothing is left that could read them.
+  var modes = readModes();
+  forgetBoards();
 
-  function readStored(key) {
+  function readModes() {
     try {
-      var got = JSON.parse(window.localStorage.getItem(key) || '{}');
+      var got = JSON.parse(window.localStorage.getItem(MODE_KEY) || '{}');
       return got && typeof got === 'object' && !Array.isArray(got) ? got : {};
     } catch (e) {
       return {};
@@ -58,18 +57,22 @@ window.SB = window.SB || {};
     try { window.localStorage.setItem(MODE_KEY, JSON.stringify(modes)); } catch (e) { /* storage off */ }
   }
 
-  function saveBoards() {
-    try { window.localStorage.setItem(BOARD_KEY, JSON.stringify(boardsFor)); } catch (e) { /* storage off */ }
+  // The old whiteboard squares go from the saved modes, and the saved board each one
+  // showed goes with them. Every launch asks; only the first since finds anything.
+  function forgetBoards() {
+    var dropped = false;
+    Object.keys(modes).forEach(function (wsId) {
+      if (modes[wsId] !== 'whiteboard' && modes[wsId] !== 'diagrams') return;
+      delete modes[wsId];
+      dropped = true;
+    });
+    if (dropped) saveModes();
+    try { window.localStorage.removeItem(OLD_BOARD_KEY); } catch (e) { /* storage off */ }
   }
 
-  // 'diagrams' is what a square showing its workspace's Diagrams tab saved before
-  // whiteboards left the workspace. It reads as a whiteboard square, and is rewritten
-  // once the square has picked its board (see legacyPick).
   function modeFor(wsId) {
     if (isFolder(wsId)) return 'terminal';
-    var m = modes[wsId];
-    if (m === 'diagrams') return 'whiteboard';
-    return m === 'changes' || m === 'whiteboard' ? m : 'terminal';
+    return modes[wsId] === 'changes' ? 'changes' : 'terminal';
   }
 
   function modeButton(ws, mode, title, content) {
@@ -96,21 +99,16 @@ window.SB = window.SB || {};
   }
 
   function setMode(wsId, mode) {
-    if (isFolder(wsId) || (mode !== 'terminal' && mode !== 'changes' && mode !== 'whiteboard')) return;
+    if (isFolder(wsId) || (mode !== 'terminal' && mode !== 'changes')) return;
     if (modeFor(wsId) === mode) return;
     if (mode === 'terminal') delete modes[wsId];
     else modes[wsId] = mode;
-    if (boardPicking === wsId) boardPicking = null;
     saveModes();
     SB.render();
     setTimeout(function () {
       if (mode === 'terminal') {
         var term = SB.views.terminal;
         if (term && typeof term.focus === 'function') term.focus(wsId);
-      } else if (mode === 'whiteboard' && hasQuery(wsId)) {
-        // The square is asking which board: its search box has the keyboard, as it
-        // does after Change whiteboard, so typing narrows the list straight away.
-        focusQuery(wsId, true);
       } else {
         var cells = document.querySelectorAll('#main .cell[data-grid-ws]');
         for (var i = 0; i < cells.length; i++) {
@@ -544,9 +542,7 @@ window.SB = window.SB || {};
       h('span.sp'),
       h('div.gridmodes', { role: 'group', 'aria-label': 'Show in ' + ws.id },
         modeButton(ws, 'terminal', 'Show terminal', D.icon('term')),
-        changesButton(ws),
-        modeButton(ws, 'whiteboard', 'Show a whiteboard', D.icon('board')),
-        changeBoardButton(ws)),
+        changesButton(ws)),
       // The × only while the view is being edited (see startArrange): a square
       // stays in the mode after losing its workspace, so several can go in one visit.
       editingView(view) ? h('button.x', {
@@ -699,329 +695,10 @@ window.SB = window.SB || {};
       } else el.appendChild(D.empty('the Changes view did not load'));
       return el;
     }
-    if (mode === 'whiteboard') {
-      var wb = SB.views.whiteboards;
-      if (!wb || typeof wb.mountGrid !== 'function') {
-        el.appendChild(D.empty('the whiteboard editor did not load'));
-        return el;
-      }
-      legacyPick(wsId, index);
-      var boardId = boardOf(wsId);
-      // Choosing: asked to (Change whiteboard), nothing chosen yet, the board went (a
-      // delete — mountGrid knows), or another square of this view already shows it.
-      var choose = boardPicking === wsId || !boardId || owners[boardId] !== index;
-      if (choose || !wb.mountGrid(boardId, el)) el.appendChild(boardPicker(view, index, ws));
-      return el;
-    }
     var term = SB.views.terminal;
     if (term && typeof term.mount === 'function') term.mount(wsId, el);
     else el.appendChild(h('div.term.blank', null, 'the terminal did not load'));
     return el;
-  }
-
-  // ── whiteboard squares ────────────────────────────────────────────────────
-
-  function boardOf(wsId) {
-    return typeof boardsFor[wsId] === 'string' && boardsFor[wsId] ? boardsFor[wsId] : null;
-  }
-
-  // Which square shows which board in the view being drawn. The first square to claim a
-  // board keeps it: one board is one live canvas, which cannot be in two squares at
-  // once, so a second square holding the same board chooses again instead.
-  var owners = {};
-
-  function claimBoards(view) {
-    owners = {};
-    view.cells.forEach(function (id, i) {
-      if (!id || isFolder(id) || modeFor(id) !== 'whiteboard' || boardPicking === id) return;
-      var b = boardOf(id);
-      if (b && owners[b] === undefined) owners[b] = i;
-    });
-  }
-
-  // The boards to choose from: views/whiteboards.js reads main's list, and SB.load
-  // memoises it under a 'wb:' key, which every whiteboard change marks stale.
-  function boardIndex() {
-    var wb = SB.views.whiteboards;
-    if (!wb || typeof wb.boards !== 'function' || typeof SB.load !== 'function') {
-      return { data: null, error: 'the Whiteboards screen did not load' };
-    }
-    var entry = SB.load('wb:grid', function () {
-      return Promise.resolve(wb.boards()).then(function (data) {
-        return data ? { ok: true, data: data } : { ok: false, error: 'could not list the whiteboards' };
-      });
-    });
-    var v = entry && entry.value;
-    return {
-      data: v && v.ok === true && v.data ? v.data : null,
-      error: entry && entry.status === 'error' ? (entry.error || 'could not list the whiteboards') : null
-    };
-  }
-
-  // A square saved as 'diagrams' showed its workspace's Diagrams tab. It now shows that
-  // workspace's most recently edited board — the one its tab most likely had open — once
-  // the list has been read; with none, it chooses like any other square.
-  function legacyPick(wsId, index) {
-    if (modes[wsId] !== 'diagrams') return;
-    var got = boardIndex();
-    if (!got.data) return;
-    modes[wsId] = 'whiteboard';
-    saveModes();
-    if (boardOf(wsId)) return;
-    var pick = null;
-    got.data.boards.forEach(function (b) {
-      if (b.archivedAt || b.workspace !== wsId || owners[b.id] !== undefined) return;
-      if (!pick || String(b.updatedAt || '') > String(pick.updatedAt || '')) pick = b;
-    });
-    if (!pick) return;
-    boardsFor[wsId] = pick.id;
-    saveBoards();
-    owners[pick.id] = index;
-  }
-
-  function chooseBoard(wsId, boardId) {
-    boardsFor[wsId] = boardId;
-    saveBoards();
-    if (modes[wsId] === 'diagrams') { modes[wsId] = 'whiteboard'; saveModes(); }
-    boardPicking = null;
-    delete queries[wsId];
-    SB.render();
-  }
-
-  // The square's board, changed from inside it: the editor's quick switcher, ← / →,
-  // New whiteboard and Duplicate (views/whiteboards.js asks here before navigating, so
-  // the Grid stays put). False when no square of this view shows `fromId`, or another
-  // already shows `toId` — then the board opens on its own screen instead.
-  function replaceBoard(fromId, toId) {
-    var view = current();
-    if (!view || !fromId || !toId) return false;
-    claimBoards(view);
-    for (var i = 0; i < CELLS; i++) {
-      var id = view.cells[i];
-      if (!id || isFolder(id) || modeFor(id) !== 'whiteboard' || boardOf(id) !== fromId) continue;
-      if (owners[toId] !== undefined && owners[toId] !== i) return false;
-      boardsFor[id] = toId;
-      saveBoards();
-      SB.render();
-      return true;
-    }
-    return false;
-  }
-
-  // The square showing `boardId` goes back to choosing, that board still its choice:
-  // views/whiteboards.js asks after Back on a board that couldn't be read (a file that is
-  // not JSON, a read that failed). Such a board is not gone — the picker offers it again,
-  // and Cancel shows it again, read afresh — but drawing the square as it was would only
-  // read it into the same square and say the same thing. False when no square of this
-  // view shows it.
-  function chooseAgain(boardId) {
-    var view = current();
-    if (!view || !boardId) return false;
-    for (var i = 0; i < CELLS; i++) {
-      var id = view.cells[i];
-      if (!id || isFolder(id) || modeFor(id) !== 'whiteboard' || boardOf(id) !== boardId) continue;
-      boardPicking = id;
-      picking = null;
-      menu = null;
-      SB.render();
-      setTimeout(focusQuery.bind(null, id, true), 0);
-      return true;
-    }
-    return false;
-  }
-
-  function queryOf(wsId) {
-    var cells = document.querySelectorAll('#main input[data-grid-query]');
-    for (var i = 0; i < cells.length; i++) if (cells[i].getAttribute('data-grid-query') === wsId) return cells[i];
-    return null;
-  }
-
-  function hasQuery(wsId) { return !!queryOf(wsId); }
-
-  // app.js asks on a whiteboard change (not a save) whether to redraw the Grid: yes
-  // while a square on screen is choosing a board, so its list has what was just made,
-  // renamed, archived or deleted.
-  function choosingBoard() {
-    return !!document.querySelector('#main .gridbd .wbpick');
-  }
-
-  function focusQuery(wsId, selectAll) {
-    var input = queryOf(wsId);
-    if (!input) return;
-    try { input.focus({ preventScroll: true }); } catch (_) { input.focus(); }
-    var q = queries[wsId];
-    if (selectAll) input.select();
-    else if (q && q.sel) { try { input.setSelectionRange(q.sel[0], q.sel[1]); } catch (_) { /* not a text field */ } }
-  }
-
-  // The head's control for choosing another board, beside "Show a whiteboard", while
-  // the square shows one.
-  function changeBoardButton(ws) {
-    if (modeFor(ws.id) !== 'whiteboard' || !boardOf(ws.id) || boardPicking === ws.id) return null;
-    return h('button.gridmode.wbchange', {
-      type: 'button',
-      title: 'Change whiteboard',
-      'aria-label': 'Change the whiteboard ' + ws.id + ' shows',
-      onClick: function () {
-        boardPicking = ws.id;
-        picking = null;
-        menu = null;
-        SB.render();
-        setTimeout(function () { focusQuery(ws.id, true); }, 0);
-      }
-    }, D.icon('chevD'));
-  }
-
-  // The search hides rows in place rather than rendering: a render rebuilds all four
-  // squares, terminals included, and this runs on every keystroke.
-  function applyQuery(box, text) {
-    var needle = String(text || '').trim().toLowerCase();
-    var any = false;
-    Array.prototype.forEach.call(box.querySelectorAll('.wbgrp'), function (group) {
-      var shown = 0;
-      Array.prototype.forEach.call(group.querySelectorAll('[data-wb-pick]'), function (btn) {
-        var hit = !needle || String(btn.getAttribute('data-find') || '').indexOf(needle) !== -1;
-        btn.hidden = !hit;
-        if (hit) shown++;
-      });
-      group.hidden = !shown;
-      if (shown) any = true;
-    });
-    var none = box.querySelector('.wbnomatch');
-    if (none) {
-      none.hidden = any || !needle;
-      none.textContent = 'No whiteboard matches “' + String(text || '').trim() + '”';
-    }
-  }
-
-  function queryField(wsId, q, box) {
-    function keep() { q.text = input.value; q.sel = [input.selectionStart, input.selectionEnd]; }
-    function first() { return box.querySelector('[data-wb-pick]:not([hidden])'); }
-    var input = h('input.wbq', {
-      type: 'search',
-      value: q.text,
-      placeholder: 'Search whiteboards',
-      'aria-label': 'Search whiteboards for ' + wsId,
-      spellcheck: 'false',
-      autocomplete: 'off',
-      dataset: { gridQuery: wsId },
-      onInput: function () { keep(); applyQuery(box, input.value); },
-      onKeyup: keep,
-      onMouseup: keep,
-      onKeydown: function (e) {
-        if (e.isComposing) return;
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          var top = first();
-          if (top) top.click();
-        } else if (e.key === 'ArrowDown') {
-          var next = first();
-          if (next) { e.preventDefault(); next.focus(); }
-        } else if (e.key === 'Escape' && boardPicking === wsId) {
-          e.preventDefault();
-          e.stopPropagation();
-          boardPicking = null;
-          SB.render();
-        }
-      }
-    });
-    if (q.sel) {
-      try { input.setSelectionRange(q.sel[0], q.sel[1]); } catch (_) { /* not a text field */ }
-    }
-    return input;
-  }
-
-  // What a square chooses from: boards that read the square's workspace first, then
-  // Recent (the twelve edited last), then every folder, then No folder — each board
-  // once, in the first group that has it. Archived boards are not offered, nor boards
-  // another square of this view already shows.
-  function boardGroups(data, wsId, taken) {
-    var folders = {};
-    data.folders.forEach(function (f) { folders[f.id] = f; });
-    var live = data.boards.filter(function (b) { return !b.archivedAt; });
-    var recent = {};
-    live.slice(0, RECENT).forEach(function (b) { recent[b.id] = true; });
-    var offered = live.filter(function (b) { return !taken[b.id]; });
-    var used = {};
-    var groups = [];
-    function take(title, list, byFolder) {
-      list = list.filter(function (b) { return !used[b.id]; });
-      list.forEach(function (b) { used[b.id] = true; });
-      if (list.length) groups.push({ title: title, list: list, byFolder: !!byFolder });
-    }
-    take('For ' + wsId, offered.filter(function (b) { return b.workspace === wsId; }));
-    take('Recent', offered.filter(function (b) { return recent[b.id]; }));
-    data.folders.forEach(function (f) {
-      take(f.name, offered.filter(function (b) { return b.folderId === f.id; }), true);
-    });
-    take('No folder', offered.filter(function (b) { return !b.folderId || !folders[b.folderId]; }), true);
-    return { groups: groups, folders: folders, live: live.length };
-  }
-
-  // ↑/↓ walk the boards the search left showing; ↑ from the first goes back to the
-  // search box (↓ from the box comes to the first — queryField).
-  function pickKeys(e) {
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    var box = e.currentTarget;
-    var at = e.target instanceof Element ? e.target.closest('[data-wb-pick]') : null;
-    if (!at || !box.contains(at)) return;
-    var items = Array.prototype.slice.call(box.querySelectorAll('[data-wb-pick]')).filter(function (b) {
-      return !b.hidden && !(b.parentNode && b.parentNode.hidden);
-    });
-    var i = items.indexOf(at);
-    if (i === -1) return;
-    e.preventDefault();
-    var next = e.key === 'ArrowDown' ? items[Math.min(items.length - 1, i + 1)] : (i > 0 ? items[i - 1] : box.querySelector('input[data-grid-query]'));
-    if (next) next.focus();
-  }
-
-  function boardPicker(view, index, ws) {
-    var box = h('div.pick.wbpick', { onKeydown: pickKeys });
-    var q = queries[ws.id] || (queries[ws.id] = { text: '', sel: null });
-    var currentBoard = boardOf(ws.id);
-    var changing = boardPicking === ws.id && !!currentBoard;
-    box.appendChild(h('div.pt', null, 'Which whiteboard?'));
-    box.appendChild(queryField(ws.id, q, box));
-    var cancel = changing ? h('button.btn.sm', {
-      type: 'button',
-      onClick: function () { boardPicking = null; delete queries[ws.id]; SB.render(); }
-    }, 'Cancel') : null;
-    var got = boardIndex();
-    if (!got.data) {
-      box.appendChild(h('p.sec', null, got.error || 'Reading your whiteboards…'));
-      if (cancel) box.appendChild(cancel);
-      return box;
-    }
-    var taken = {};
-    Object.keys(owners).forEach(function (id) { if (owners[id] !== index) taken[id] = true; });
-    var made = boardGroups(got.data, ws.id, taken);
-    if (!made.live) {
-      box.appendChild(h('p.sec', null, 'no whiteboards yet'));
-      box.appendChild(h('button.btn.sm', {
-        type: 'button',
-        onClick: function () { SB.go({ view: 'whiteboards' }); }
-      }, 'Open Whiteboards'));
-      return box;
-    }
-    if (!made.groups.length) box.appendChild(h('p.sec', null, 'every whiteboard is already in this view'));
-    made.groups.forEach(function (g) {
-      var group = h('div.wbgrp', null, h('div.grp', null, g.title));
-      g.list.forEach(function (b) {
-        var folder = made.folders[b.folderId];
-        var where = folder ? folder.name : 'No folder';
-        group.appendChild(h('button.it' + (b.id === currentBoard ? '.on' : ''), {
-          type: 'button',
-          title: b.name + ' · ' + where,
-          dataset: { wbPick: b.id, find: (String(b.name || '') + ' ' + (folder ? folder.name : '')).toLowerCase() },
-          onClick: function () { chooseBoard(ws.id, b.id); }
-        }, h('span.bn', null, b.name), h('span.sp'), g.byFolder ? null : h('span.bf.sec', null, where)));
-      });
-      box.appendChild(group);
-    });
-    box.appendChild(h('p.sec.wbnomatch', { hidden: true }));
-    applyQuery(box, q.text);
-    if (cancel) box.appendChild(cancel);
-    return box;
   }
 
   function body(state, view) {
@@ -1033,7 +710,6 @@ window.SB = window.SB || {};
       }));
       return bd;
     }
-    claimBoards(view);
     var grid = h('div.grid');
     for (var i = 0; i < CELLS; i++) grid.appendChild(cell(state, view, i));
     bd.appendChild(grid);
@@ -1056,7 +732,7 @@ window.SB = window.SB || {};
     // bailed is a keyboard that jumps into a square minutes later.
     var just = wanted;
     wanted = null;
-    if (!view || editing || picking || boardPicking || menu !== null) return;
+    if (!view || editing || picking || menu !== null) return;
     // Being edited, the terminals take no focus at all. A square that was just filled
     // hands it to Done: the picker's row is gone, and restoring by position would put
     // the keyboard on whatever sits there now — the new square's ×, as likely as not.
@@ -1074,8 +750,8 @@ window.SB = window.SB || {};
       var main = document.getElementById('main');
       var active = document.activeElement;
       if (!main || (active && active !== document.body && main.contains(active))) return;
-      // Focus an actual terminal. Changes and a whiteboard have their own controls and
-      // should not steal focus just because their workspace is first in the view.
+      // Focus an actual terminal. Changes has its own controls and should not steal
+      // focus just because its workspace is first in the view.
       for (var i = 0; i < CELLS; i++) {
         if (view.cells[i] && land(view.cells[i])) return;
       }
@@ -1090,23 +766,14 @@ window.SB = window.SB || {};
     // a square choosing, an open menu, an armed Delete — is stale. The old tree is
     // still in #main while the new one is built (app.js renderMain), so this asks
     // whether the Grid was the screen before this rebuild.
-    if (!document.querySelector('#main .gridhd')) {
-      editing = null; picking = null; armed = null; menu = null; arranging = null; boardPicking = null; queries = {};
-    }
+    if (!document.querySelector('#main .gridhd')) { editing = null; picking = null; armed = null; menu = null; arranging = null; }
     // Whatever was mid-flight for a view that is no longer on screen is stale.
     if (picking && (!view || picking.viewId !== view.id)) picking = null;
     if (armed && (!view || armed !== view.id)) armed = null;
     if (menu && (!view || menu !== view.id)) menu = null;
     if (arranging && (!view || arranging.id !== view.id)) arranging = null;
-    if (boardPicking && (!view || view.cells.indexOf(boardPicking) === -1)) boardPicking = null;
-
-    // A square's board search keeps the keyboard across the rebuild, wherever the
-    // positional restore in app.js lands: put back once the new tree is in place.
-    var searching = document.activeElement && document.activeElement.getAttribute
-      ? document.activeElement.getAttribute('data-grid-query') : null;
 
     var frag = D.frag(header(view), body(state, view));
-    if (searching) Promise.resolve().then(function () { focusQuery(searching, false); });
     if (editing && editing.fresh) {
       editing.fresh = false;
       setTimeout(focusInput, 0);       // once — a later rebuild must not select-all mid-word
@@ -1126,9 +793,6 @@ window.SB = window.SB || {};
   SB.views = SB.views || {};
   SB.views.grid = {
     render: render,
-    showsTerminal: function (wsId) { return modeFor(wsId) === 'terminal'; },
-    replaceBoard: replaceBoard,
-    chooseAgain: chooseAgain,
-    choosingBoard: choosingBoard
+    showsTerminal: function (wsId) { return modeFor(wsId) === 'terminal'; }
   };
 })(window.SB);

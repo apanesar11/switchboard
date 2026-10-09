@@ -6,9 +6,9 @@
 // Each is still the workspace's own shell — the same pane views/terminal.js keeps for
 // the Terminal tab and the Grid, moved here with place(), never a second xterm (a
 // second one would steal the tmux client and repaint garbage, §6 R8). place() yields:
-// a board takes the host only when nothing else on screen holds it, so a Grid square
-// and a board panel for one workspace never bounce it between them on every render;
-// the panel that lost shows a stand-in instead.
+// a board takes the host only when nothing else on screen holds it, so two hosts for
+// one workspace never bounce it between them on every render; the panel that lost
+// shows a stand-in instead.
 //
 // A layer belongs to one board's slab (views/whiteboards.js creates it beside the
 // canvas). Its three layers are siblings of .dgcanvas, never inside the React tree:
@@ -334,9 +334,8 @@ window.SB = window.SB || {};
 
     // The bottom of the canvas bar (switcher, New whiteboard, Full screen, Actions), in
     // slab pixels: the top of the React Flow canvas, else (no canvas drawn yet) just
-    // under the Actions button — the bar wraps onto a second line in a narrow Grid
-    // square, and Actions is on its last. Null while neither is on the page: the
-    // board is still loading.
+    // under the Actions button — should the bar wrap onto a second line, Actions is on
+    // its last. Null while neither is on the page: the board is still loading.
     function barBottom() {
       if (!slab) return null;
       var at = slab.getBoundingClientRect();
@@ -360,7 +359,7 @@ window.SB = window.SB || {};
     }
 
     // A panel put on a slab whose bar is not drawn yet (a board restored with its
-    // terminals while it loads, often in a Grid square) is fitted again once it is.
+    // terminals while it loads) is fitted again once it is.
     function refitSoon() {
       if (refitTimer || destroyed) return;
       refitTimer = setTimeout(function () {
@@ -1909,8 +1908,8 @@ window.SB = window.SB || {};
     if (slab) {
       ensureLayers();
       if (typeof ResizeObserver === 'function') {
-        // The window, the Grid square or full screen changed the slab: keep every
-        // panel inside it. DOM only; the panel's own observer refits its terminal.
+        // The window or full screen changed the slab: keep every panel inside it. DOM
+        // only; the panel's own observer refits its terminal.
         observer = new ResizeObserver(function () {
           if (destroyed) return;
           floats().forEach(function (t) { if (t.panel && t.panel.isConnected) applyRect(t); });

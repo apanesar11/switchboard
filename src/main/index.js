@@ -1326,7 +1326,7 @@ function handleWb(channel, fn) {
 }
 
 // Every write's { reason, boardId?, folderId? }, for the screens that show the store:
-// the home list, an open board's switcher and breadcrumb, a Grid square's picker.
+// the home list, an open board's switcher and breadcrumb.
 whiteboards.onChange(change => send('sb:evt:wbChanged', change));
 
 handleWb('sb:wb:list', () => whiteboards.list());
@@ -1408,7 +1408,8 @@ handle('sb:diagrams:dirty', count => {
 // the stored choice and the keys; a CLI runs in the folder of the whiteboard's workspace,
 // which is resolved HERE from the workspace id through the rail's own list
 // (workspaces.lookup) — never a path the page hands over, and never dirOf(), which would
-// take one.
+// take one. A CLI's answers on one board are one conversation with it, which answer.js
+// runs and the board's file keeps (whiteboards.js), through the store below.
 // ---------------------------------------------------------------------------
 
 /** After any change, every window hears the new status: the menu and Settings agree. */
@@ -1416,6 +1417,30 @@ function broadcastAnswer(status) {
   if (status && status.ok) send('sb:evt:answerStatus', status);
   return status;
 }
+
+/**
+ * Where answer.js keeps a board's conversations: the board's own file. A read that fails
+ * throws, so answer.js can tell "none" from "could not read"; its writes answer { ok }.
+ * `name` is what a new Claude Code session is called after. Each waits for the migration,
+ * like every sb:wb:* handler.
+ */
+const answerConversations = {
+  async get(boardId, provider) {
+    await wbReady();
+    const res = await whiteboards.conversation(boardId, provider);
+    if (!res.ok) throw new Error(res.error);
+    return res.data;
+  },
+  async set(boardId, provider, entry) {
+    await wbReady();
+    return whiteboards.setConversation(boardId, provider, entry);
+  },
+  async name(boardId) {
+    await wbReady();
+    const res = await whiteboards.get(boardId);
+    return res.ok ? res.data.name : null;
+  },
+};
 
 handle('sb:answer:status', opts => answer.status(opts || {}));
 handle('sb:answer:setSettings', async patch => broadcastAnswer(await answer.setSettings(patch)));
@@ -1433,9 +1458,21 @@ handle('sb:answer:start', async (id, req) => {
       if (!res.ok) console.error('[switchboard] could not remember the workspace:', res.error);
     });
   }
-  return answer.start(id, Object.assign({}, r, { dir: where.dir }), step => send('sb:evt:answerStep', id, step));
+  return answer.start(id, Object.assign({}, r, { dir: where.dir, wsId: where.wsId }),
+    step => send('sb:evt:answerStep', id, step), { conversations: answerConversations });
 });
 handle('sb:answer:stop', id => answer.stop(id));
+// A board's conversations as the page may see them — how many questions, since when,
+// in which workspace; never a session id or a folder, and none whose workspace has moved
+// to another folder since (the next answer starts anew there) — and the reset that
+// forgets one (or both, with no provider). answer.js refuses a board id that is not a UUID, and a
+// provider other than the two CLIs, before the store is touched.
+handle('sb:answer:conversation', boardId => answer.conversation(boardId, {
+  conversations: answerConversations,
+  lookup: wsId => workspaces.lookup(wsId),
+}));
+handle('sb:answer:resetConversation', (boardId, provider) =>
+  answer.resetConversation(boardId, provider, { conversations: answerConversations }));
 
 // The renderer answering flushDiagrams(). The generation prevents a late answer to a
 // timed-out flush from satisfying a later close or quit.

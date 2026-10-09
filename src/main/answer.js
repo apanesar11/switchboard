@@ -29,6 +29,15 @@
 // path the page hands over. A condensation reads no files at all, so it needs no
 // workspace: without one a CLI runs it in the system's temp folder.
 //
+// A CLI's answers on one whiteboard are one conversation (2026-10-09): every question
+// asked on the board, from any box, continues the same Claude Code session or Codex
+// thread, so the CLI asked about one branch already knows what it read and said for the
+// others. Only a board with no conversation yet starts one. The APIs still take each
+// question on its own, and a condensation is never part of a conversation. Where a
+// conversation is kept is the caller's — index.js hands start() a store with
+// whiteboards.js behind it — and the section "one conversation per whiteboard" below
+// says the rest.
+//
 // Nothing throws. Every export resolves to a value; a failure is
 // `{ ok: false, error: '<human sentence>', code? }`, where `code` is what the renderer
 // needs to offer the one action that fixes it: 'missing' (not installed), 'signed-out',
@@ -379,6 +388,12 @@ async function status(opts) {
 
 const runs = new Map();            // request id → { stop() }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value) {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
+
 function errorText(raw) {
   const text = String(raw || '').trim();
   if (!text) return '';
@@ -459,14 +474,18 @@ async function resolveAnswerDir(req, lookup) {
 }
 
 /**
- * start(id, req, onStep) → { ok, text } — the answer's JSON, for the renderer to read
- * into boxes — or { ok:false, error, code }.
+ * start(id, req, onStep, opts) → { ok, text, conversation? } — the answer's JSON, for the
+ * renderer to read into boxes — or { ok:false, error, code }.
  *
- * req: { provider, dir, system, user, schema, operation? }. `dir` is the workspace folder,
- * resolved by index.js with resolveAnswerDir(); a CLI runs there and nowhere else. A
- * condensation without one runs in the temp folder, since it reads nothing.
+ * req: { provider, dir, wsId, system, user, schema, operation?, boardId? }. `dir` is the
+ * workspace folder and `wsId` the workspace it is, both resolved by index.js with
+ * resolveAnswerDir(); a CLI runs there and nowhere else. A condensation without one runs
+ * in the temp folder, since it reads nothing. `boardId` is the whiteboard asking, and
+ * with `opts.conversations` — the store a board's conversations are kept in, { get, set,
+ * name? } (conversationFor says when it is used) — a CLI's answer is a turn of that
+ * board's conversation, and `conversation: { turns, resumed }` says which.
  */
-function start(id, req, onStep) {
+function start(id, req, onStep, opts) {
   const key = String(id || '');
   if (!key) return Promise.resolve({ ok: false, error: 'the request came without an id' });
   if (runs.has(key)) return Promise.resolve({ ok: false, error: 'that answer is already being asked for' });
@@ -485,10 +504,16 @@ function start(id, req, onStep) {
   // Web access: the tools go to whoever answers here, so what it is told about the web
   // is added here too — the prompt and the tools never disagree.
   const web = r.operation !== 'condense' && webFor(provider, s);
-  const ask = Object.assign({}, r, { system: r.system + '\n\n' + webPrompt(web, provider, r.operation) });
+  const talk = conversationFor(provider, r, opts);
+  const alone = Object.assign({}, r, { system: r.system + '\n\n' + webPrompt(web, provider, r.operation) });
+  // A turn of a conversation is also told it is one, beside what it is told about the web —
+  // and keeps the question as it is asked on its own, for a Codex that cannot resume.
+  const ask = talk ? Object.assign({}, alone, { system: alone.system + '\n\n' + conversationPrompt() }) : alone;
+  if (talk) talk.alone = alone;
 
   let job;
-  if (provider === 'claude-code') job = askClaudeCode(ask, s, web, step);
+  if (talk) job = converse(talk, ask, s, web, step);
+  else if (provider === 'claude-code') job = askClaudeCode(ask, s, web, step);
   else if (provider === 'codex') job = askCodex(ask, web, step);
   else if (provider === 'claude-api') job = askClaudeApi(ask, s, web);
   else job = askOpenAi(ask, s, web, step);
@@ -509,7 +534,7 @@ function stop(id) {
   return { ok: true };
 }
 
-/** Everything still asking — the quit path, so no CLI outlives the app. */
+/** Everything still asking, or waiting its turn to — the quit path, so no CLI outlives the app. */
 function stopAll() {
   runs.forEach(job => { try { job.stop(); } catch (_) { /* gone */ } });
 }
@@ -639,8 +664,19 @@ function cliDir(r) {
  * runs a command — and with Web access, its two web tools too. A tool left out of
  * --tools is one it never sees: leaving it out of --allowedTools alone would not do,
  * since dontAsk still lets WebFetch open the documentation sites Claude Code trusts.
+ *
+ * Without `turn` nothing is kept. With one — a turn of the board's conversation,
+ * { resume, id, name?, snapshot? } — the session is kept so the next question can
+ * continue it: a new one under the id chosen here (--session-id) and named after the
+ * board, so wherever it is listed it reads as the board's (askClaudeCode says where it
+ * is not), or the kept one (--resume). Either
+ * way --system-prompt-snapshot off: Claude Code otherwise records the system prompt on a
+ * conversation's first request and sends that record on every resume, and ours changes
+ * from one question to the next (Web access, Subtext). The rest — the tools, dontAsk —
+ * is given at every launch, a resume included. An id that is not a UUID is never
+ * passed — it would be an argument of its own — and the turn keeps nothing instead.
  */
-function claudeCodeArgs(r, s, web) {
+function claudeCodeArgs(r, s, web, turn) {
   const tools = r.operation === 'condense' ? '' : (web ? 'Read,Grep,Glob,WebFetch,WebSearch' : 'Read,Grep,Glob');
   const args = [
     '-p',
@@ -652,23 +688,54 @@ function claudeCodeArgs(r, s, web) {
     '--permission-mode', 'dontAsk',
     '--strict-mcp-config',
     '--disable-slash-commands',
-    '--no-session-persistence',
-    '--append-system-prompt', r.system,
   ];
+  const talk = turn && isUuid(turn.id) ? turn : null;
+  if (!talk) {
+    args.push('--no-session-persistence');
+  } else {
+    if (talk.snapshot !== false) args.push('--system-prompt-snapshot', 'off');
+    if (talk.resume) {
+      args.push('--resume', talk.id.toLowerCase());
+    } else {
+      args.push('--session-id', talk.id.toLowerCase());
+      if (typeof talk.name === 'string' && talk.name) args.push('--name', talk.name);
+    }
+  }
+  args.push('--append-system-prompt', r.system);
   if (s.claudeCodeEffort && s.claudeCodeEffort !== 'own') args.push('--effort', s.claudeCodeEffort);
   return args;
 }
 
-function askClaudeCode(r, s, web, step) {
+/**
+ * Ask Claude Code. With `turn` (claudeCodeArgs says what it is) the answer is the same,
+ * and what the conversation needs to know is left on the turn itself: `session`, the
+ * session id the result names; `gone`, a resume of a conversation Claude Code no longer
+ * has; `unknown`, an option a conversation adds that this Claude Code is too old to know.
+ *
+ * A kept session lies beside the user's own, in Claude Code's folder for the workspace,
+ * so a turn is recorded as print mode's (CLAUDE_CODE_ENTRYPOINT=sdk-cli — what `-p` takes
+ * when nothing says otherwise, said here whatever Switchboard was started from): an
+ * interactive `claude --continue` or `claude --resume` in the workspace passes over those,
+ * so a whiteboard's conversation never comes back in place of the user's own (probed
+ * 2026-10-09, Claude Code 2.1.296: "filtered from /resume: entrypoint=sdk-cli"). Only a
+ * `claude -p --continue`, print mode itself, would pick it, and a Claude Code from before
+ * that filter (2.1.83 has none) would offer it too. The session is not moved to a folder
+ * of Switchboard's own to keep it out of the way: run anywhere but the workspace, Claude
+ * Code no longer reads the workspace's .claude/settings.json, so a `deny` there (a Read
+ * of `.env`, say) would stop holding — probed the same day with `--add-dir`, and with
+ * that file handed over as `--settings`.
+ */
+function askClaudeCode(r, s, web, step, turn) {
   const dir = cliDir(r);
   if (!dir) return { done: Promise.resolve({ ok: false, error: 'This workspace has no folder to read' }), stop: () => {} };
-  const args = claudeCodeArgs(r, s, web);
+  const args = claudeCodeArgs(r, s, web, turn);
 
   let result = null;
   let files = 0;
   const run = spawnCli('claude', args, {
     cwd: dir,
     input: r.user,
+    env: turn ? { CLAUDE_CODE_ENTRYPOINT: 'sdk-cli' } : undefined,
     onLine: line => {
       let ev;
       try { ev = JSON.parse(line); } catch (_) { return; }
@@ -687,10 +754,17 @@ function askClaudeCode(r, s, web, step) {
   });
 
   const done = run.done.then(exit => {
+    if (turn && result && typeof result.session_id === 'string') turn.session = result.session_id;
     if (exit.missing) return { ok: false, code: 'missing', error: "Claude Code isn't installed on this Mac" };
     if (exit.stopped === 'stopped') return { ok: false, code: 'stopped', error: 'Stopped' };
     if (exit.stopped === 'timeout') return { ok: false, code: 'timeout', error: 'Claude Code was still going after 5 minutes, so it was stopped' };
     if (exit.error) return { ok: false, error: 'Claude Code could not start: ' + exit.error.message };
+    if (turn && (!result || result.is_error)) {
+      const raw = ((result && result.errors) || []).join(' ') + ' ' + exit.err;
+      if (turn.resume && GONE_RE['claude-code'].test(raw)) turn.gone = true;
+      const unknown = !result && UNKNOWN_OPTION_RE.exec(exit.err);
+      if (unknown && args.indexOf(unknown[1]) !== -1) turn.unknown = unknown[1];
+    }
     if (result && !result.is_error && result.structured_output) {
       return { ok: true, text: JSON.stringify(result.structured_output), files };
     }
@@ -710,16 +784,40 @@ function askClaudeCode(r, s, web, step) {
  * and on by default ("cached", OpenAI's index) since Codex 0.92, so Web access off has
  * to say "disabled", and on says "live" so it can open the page a box links to. A
  * Codex too old to know the key ignores it.
+ *
+ * With `turn` — { resume: true, id }, a kept thread of the board's conversation — it is
+ * `codex exec resume` instead, which has no --cd (it runs where it is spawned, the same
+ * folder) and keeps no sandbox of its own: a resumed thread takes whatever config.toml
+ * says, full access included (probed 2026-10-09), so read-only is said twice: as exec's
+ * own --sandbox, ahead of the subcommand — the flag a new thread is given — and as
+ * `-c sandbox_mode`. Each was seen to hold a resumed turn read-only on its own. The id
+ * and the prompt follow `--`, so neither can be read as an option, and an id that is not
+ * a UUID is never passed: that turn starts a thread instead.
  */
-function codexArgs(r, web, dir, schemaFile, outFile) {
+function codexArgs(r, web, dir, schemaFile, outFile, turn) {
   // `codex exec` has no separate system prompt: the instructions lead the prompt.
   const prompt = r.system + '\n\n' + r.user;
+  const search = web && r.operation !== 'condense' ? 'web_search="live"' : 'web_search="disabled"';
+  if (turn && turn.resume && isUuid(turn.id)) {
+    return [
+      'exec',
+      '--sandbox', 'read-only',
+      'resume',
+      '--json',
+      '--skip-git-repo-check',
+      '-c', 'sandbox_mode="read-only"',
+      '-c', search,
+      '--output-schema', schemaFile,
+      '--output-last-message', outFile,
+      '--', turn.id.toLowerCase(), prompt,
+    ];
+  }
   return [
     'exec',
     '--json',
     '--sandbox', 'read-only',
     '--skip-git-repo-check',
-    '-c', web && r.operation !== 'condense' ? 'web_search="live"' : 'web_search="disabled"',
+    '-c', search,
     '--cd', dir,
     '--output-schema', schemaFile,
     '--output-last-message', outFile,
@@ -742,14 +840,20 @@ function webStep(action, query) {
   return q ? { kind: 'web', text: 'Searched the web for', target: clip(q, 60) } : null;
 }
 
-function askCodex(r, web, step) {
+/**
+ * Ask Codex. With `turn` (codexArgs says what it is), what the conversation needs is left
+ * on it: `thread`, the thread id `thread.started` names; `gone`, a resume of a thread
+ * Codex no longer has; `cantResume`, a resume this Codex is too old to take
+ * (CODEX_REFUSED_RE).
+ */
+function askCodex(r, web, step, turn) {
   const dir = cliDir(r);
   if (!dir) return { done: Promise.resolve({ ok: false, error: 'This workspace has no folder to read' }), stop: () => {} };
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'switchboard-codex-'));
   const schemaFile = path.join(tmp, 'schema.json');
   const outFile = path.join(tmp, 'answer.json');
   fs.writeFileSync(schemaFile, JSON.stringify(r.schema));
-  const args = codexArgs(r, web, dir, schemaFile, outFile);
+  const args = codexArgs(r, web, dir, schemaFile, outFile, turn);
 
   let lastMessage = '';
   let failure = '';
@@ -760,7 +864,9 @@ function askCodex(r, web, step) {
       let ev;
       try { ev = JSON.parse(line); } catch (_) { return; }
       const item = ev.item || null;
-      if (item && (ev.type === 'item.started' || ev.type === 'item.completed')) {
+      if (ev.type === 'thread.started' && typeof ev.thread_id === 'string') {
+        if (turn) turn.thread = ev.thread_id;
+      } else if (item && (ev.type === 'item.started' || ev.type === 'item.completed')) {
         if (item.type === 'command_execution' && ev.type === 'item.started') {
           files++;
           step({ kind: 'run', text: 'Running', target: clip(String(item.command || '').replace(/^bash -lc /, ''), 70) });
@@ -794,6 +900,8 @@ function askCodex(r, web, step) {
     try { text = fs.readFileSync(outFile, 'utf8'); } catch (_) { text = ''; }
     fs.rm(tmp, { recursive: true, force: true }, () => {});
     if (!text.trim()) text = lastMessage;
+    if (turn && turn.resume && exit.code !== 0 && GONE_RE.codex.test(failure + ' ' + exit.err)) turn.gone = true;
+    if (turn && turn.resume && exit.code === 2 && CODEX_REFUSED_RE.test(exit.err)) turn.cantResume = true;
     if (exit.missing) return { ok: false, code: 'missing', error: "Codex isn't installed on this Mac" };
     if (exit.stopped === 'stopped') return { ok: false, code: 'stopped', error: 'Stopped' };
     if (exit.stopped === 'timeout') return { ok: false, code: 'timeout', error: 'Codex was still going after 5 minutes, so it was stopped' };
@@ -804,6 +912,380 @@ function askCodex(r, web, step) {
     return { ok: false, error: said ? 'Codex said: ' + said : `Codex stopped without answering (exit ${exit.code})` };
   });
   return { done, stop: run.stop };
+}
+
+// ── one conversation per whiteboard ─────────────────────────────────────────
+//
+// A CLI's answer on a whiteboard continues the board's conversation with that CLI, so
+// every branch explored on the board is context for the next question. The board keeps,
+// per CLI, { id, workspace, dir, startedAt, lastAt, turns } — whiteboards.js, through the
+// store index.js hands start() — and an answer continues that conversation only when
+// the id is a UUID (it goes into the CLI's arguments) and it was had in this workspace's
+// folder; anything else starts a new one, kept in its place once it has answered. A turn
+// that fails or is stopped changes nothing: a new conversation is not kept, a continued
+// one keeps its place. One the CLI no longer has (cleaned out, deleted by hand) is
+// forgotten, and the same question starts a new one at once. A Codex too old to resume a
+// thread (before 0.132) is found out by its first resume, which is asked again at once on
+// its own; from then until the app quits its answers each stand alone, as an API's do.
+//
+// A conversation takes one question at a time, so the answers on one board and CLI wait
+// in line, in the order they were asked — a lane each — while other boards and the other
+// CLI answer meanwhile. One that has to wait says so (a 'wait' step); Stop takes it out
+// of the line without anything spawned, and its 5 minutes start only when its CLI does.
+
+// What each CLI says when asked to continue a conversation it does not have (probed
+// 2026-10-09: Claude Code 2.1.292 exits 1, and codex-cli 0.160.0 exits 1 before asking).
+const GONE_RE = {
+  'claude-code': /No conversation found with session ID/i,
+  codex: /no rollout found for thread id/i,
+};
+
+// A Claude Code too old for an option a conversation adds says so in commander's words —
+// "error: unknown option '--name'" — and the turn goes again without it. Remembered until
+// the app quits, so it is found out once; nothing that matters is lost: a Claude Code
+// without the snapshot never recorded the system prompt in the first place.
+const UNKNOWN_OPTION_RE = /unknown option '(--system-prompt-snapshot|--name)'/;
+const claudeLacks = new Set();
+
+// A Codex too old to continue a thread the way a turn asks refuses the resume's
+// arguments in clap's words, exit 2, before it asks anything: `exec resume` took
+// --output-schema only in 0.132 (probed 2026-10-09: 0.114 and 0.128 say "error:
+// unexpected argument '--output-schema' found"), and one older still has no `exec
+// resume` to hand them to. Such a Codex answers as it did before conversations — each
+// question on its own, in no line, kept nowhere — from then until the app quits.
+const CODEX_REFUSED_RE = /unexpected argument '[^']*' found/;
+let codexCantResume = false;
+
+/** The CLIs that answer each question on their own on this Mac, conversations or not. */
+function cliAlone() {
+  return codexCantResume ? ['codex'] : [];
+}
+
+const CONVERSATION_PROVIDERS = ['claude-code', 'codex'];
+const WAIT_STEP = { kind: 'wait', text: 'Waiting for the answer before it', target: '' };
+// What an answer that waited says once its turn comes, before its CLI has done anything
+// to show: the card reads the last step as what is happening now, and a wait left last
+// would go on saying "waiting" while the CLI thinks over the question.
+const TURN_STEP = { kind: 'think', text: 'Thinking', target: '' };
+
+// `${boardId} ${provider}` → { key, tail, waiting, generation, clearing }. `tail` settles
+// when the last answer in line is done, `waiting` counts the answers in line (the one at
+// work included), `generation` moves with every reset so a turn under way when the
+// conversation was forgotten never writes it back, and `clearing` is a reset's write,
+// which the next turn waits for before it reads. A lane goes once it is idle.
+const lanes = new Map();
+
+function laneFor(boardId, provider) {
+  const key = boardId + ' ' + provider;
+  let lane = lanes.get(key);
+  if (!lane) {
+    lane = { key, tail: Promise.resolve(), waiting: 0, generation: 0, clearing: null };
+    lanes.set(key, lane);
+  }
+  return lane;
+}
+
+function idle(lane) {
+  if (!lane.waiting && !lane.clearing && lanes.get(lane.key) === lane) lanes.delete(lane.key);
+}
+
+function stoppedAnswer() {
+  return { ok: false, code: 'stopped', error: 'Stopped' };
+}
+
+/**
+ * What a CLI is told on every turn of a conversation, beside webPrompt: that the board's
+ * questions all come to it, and which of what it saw before still holds.
+ */
+function conversationPrompt() {
+  return 'This whiteboard keeps one conversation with you: every question asked on it, from any box, ' +
+    'comes to you here in turn. Earlier questions in it may be on other branches of the same flowchart, ' +
+    'and the person may have edited, moved or deleted boxes since you saw them. The boxes sent with this ' +
+    'question are the flowchart as it is now, and they win wherever they disagree with an earlier turn. ' +
+    'Use what you have already read and learned in this conversation rather than reading it again, and ' +
+    "don't repeat an answer already hanging off the question.";
+}
+
+/**
+ * The conversation an ask is a turn of, or null for none — asked exactly as it always
+ * was. Only Claude Code and Codex (not a Codex found too old to resume: cliAlone), only
+ * an answer (a condensation reads nothing and is told to use only what it is sent), only
+ * from a board named by its id, in a workspace that resolved to a folder, and only when
+ * start() was handed somewhere to keep it.
+ */
+function conversationFor(provider, r, opts) {
+  const store = opts && typeof opts === 'object' ? opts.conversations : null;
+  if (CONVERSATION_PROVIDERS.indexOf(provider) === -1 || r.operation === 'condense') return null;
+  if (cliAlone().indexOf(provider) !== -1) return null;
+  if (!isUuid(r.boardId)) return null;
+  if (!store || typeof store.get !== 'function' || typeof store.set !== 'function') return null;
+  const workspace = typeof r.wsId === 'string' ? r.wsId.trim() : '';
+  if (!workspace || typeof r.dir !== 'string' || !r.dir) return null;
+  const boardId = r.boardId.toLowerCase();
+  return { store, boardId, provider, workspace, dir: r.dir, lane: laneFor(boardId, provider) };
+}
+
+/** The kept conversation, or null — a store that fails reads as none, and a new one starts. */
+async function keptConversation(store, boardId, provider) {
+  try {
+    const entry = await store.get(boardId, provider);
+    return entry && typeof entry === 'object' ? entry : null;
+  } catch (err) {
+    console.error('[switchboard] answer: could not read the conversation:', (err && err.message) || err);
+    return null;
+  }
+}
+
+/** Keep (or with null forget) a conversation: { ok } or { ok:false, error }, never a throw. */
+async function keepConversation(store, boardId, provider, entry) {
+  try {
+    const res = await store.set(boardId, provider, entry);
+    if (res && res.ok === false) return { ok: false, error: String(res.error || 'it was refused') };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+}
+
+/** A new conversation's turn: Claude Code takes the id chosen here; Codex names its own. */
+async function newTurn(talk) {
+  if (talk.provider !== 'claude-code') return { resume: false, id: null };
+  return { resume: false, id: crypto.randomUUID(), name: await sessionName(talk) };
+}
+
+/** "Whiteboard · <its name>", what the session is called wherever it is listed, or null. */
+async function sessionName(talk) {
+  if (typeof talk.store.name !== 'function') return null;
+  let name = null;
+  try { name = await talk.store.name(talk.boardId); } catch (_) { name = null; }
+  const clean = typeof name === 'string' ? name.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim() : '';
+  return clean ? 'Whiteboard · ' + clean.slice(0, 120) : null;
+}
+
+/**
+ * Ask `r` as the board's next turn: in line behind every answer on the same board and
+ * CLI asked before it, then continued or started (conversationTurn). Stop while it
+ * waits answers at once and spawns nothing, and the answers behind it still wait for the
+ * one at work, never for it.
+ */
+function converse(talk, r, s, web, step) {
+  const { lane } = talk;
+  const ctl = { stopped: false, run: null, waited: lane.waiting > 0 };
+  let leave;
+  const left = new Promise(resolve => { leave = resolve; });
+  if (ctl.waited) step(Object.assign({}, WAIT_STEP));
+  lane.waiting++;
+  const turn = lane.tail.then(() => (ctl.stopped ? stoppedAnswer() : conversationTurn(talk, r, s, web, step, ctl)));
+  const settled = turn.then(() => {}, () => {});
+  lane.tail = settled;
+  settled.then(() => { lane.waiting--; idle(lane); });
+  return {
+    done: Promise.race([turn, left]),
+    stop: () => {
+      ctl.stopped = true;
+      leave(stoppedAnswer());
+      if (ctl.run) ctl.run.stop();
+    },
+  };
+}
+
+/** Once it is this answer's turn: continue the kept conversation, or start one, and keep it. */
+async function conversationTurn(talk, r, s, web, step, ctl) {
+  const { store, boardId, provider, lane } = talk;
+  if (ctl.waited) step(Object.assign({}, TURN_STEP));
+  // Found too old to resume while this answer waited: it goes on its own too.
+  if (cliAlone().indexOf(provider) !== -1) return askAlone(talk, s, web, step, ctl);
+  // Read only now: the answer ahead in line may have just started the conversation. A
+  // reset meanwhile is waited for, and the conversation read again after it.
+  let generation;
+  let saved;
+  do {
+    generation = lane.generation;
+    if (lane.clearing) await lane.clearing;
+    saved = await keptConversation(store, boardId, provider);
+  } while (generation !== lane.generation);
+  // Continued only in the folder it was had in: a conversation about another workspace's
+  // code would answer about the wrong code.
+  const resume = !!(saved && isUuid(saved.id) && saved.workspace === talk.workspace && saved.dir === talk.dir);
+  let turn = resume ? { resume: true, id: saved.id.toLowerCase() } : await newTurn(talk);
+  let res = await askTurn(provider, r, s, web, step, turn, ctl);
+  if (turn.cantResume && !ctl.stopped) {
+    // A Codex too old to resume (CODEX_REFUSED_RE): the board's thread, which can never
+    // be continued here, is forgotten, and the question asked again at once on its own,
+    // as it was before conversations — as is every Codex answer after it.
+    codexCantResume = true;
+    if (generation === lane.generation) {
+      const forgot = await keepConversation(store, boardId, provider, null);
+      if (!forgot.ok) console.error('[switchboard] answer: could not forget a conversation Codex cannot resume:', forgot.error);
+    }
+    return askAlone(talk, s, web, step, ctl);
+  }
+  if (turn.resume && turn.gone && !ctl.stopped) {
+    if (generation === lane.generation) {
+      const forgot = await keepConversation(store, boardId, provider, null);
+      if (!forgot.ok) console.error('[switchboard] answer: could not forget a conversation that is gone:', forgot.error);
+    }
+    turn = await newTurn(talk);
+    res = await askTurn(provider, r, s, web, step, turn, ctl);
+  }
+  if (ctl.stopped) return stoppedAnswer();
+  if (!res.ok) return res;
+  // The id the CLI says it used: Claude Code's result names its session, Codex's
+  // thread.started its thread. A Codex that named none has nothing to continue.
+  const id = provider === 'claude-code'
+    ? (isUuid(turn.session) ? turn.session : turn.id)
+    : (isUuid(turn.thread) ? turn.thread : (turn.resume ? turn.id : null));
+  // Reset while it answered: the answer lands, the conversation stays forgotten.
+  if (!id || generation !== lane.generation) return res;
+  const at = new Date().toISOString();
+  const before = turn.resume && Number.isSafeInteger(saved.turns) && saved.turns > 0 ? saved.turns : 0;
+  const entry = {
+    id: id.toLowerCase(),
+    workspace: talk.workspace,
+    dir: talk.dir,
+    startedAt: turn.resume && typeof saved.startedAt === 'string' ? saved.startedAt : at,
+    lastAt: at,
+    turns: before + 1,
+  };
+  const kept = await keepConversation(store, boardId, provider, entry);
+  if (!kept.ok) {
+    // The answer is still the answer; the next one starts a conversation of its own.
+    console.error('[switchboard] answer: could not keep the conversation:', kept.error);
+    return res;
+  }
+  return Object.assign({}, res, { conversation: { turns: entry.turns, resumed: turn.resume } });
+}
+
+/**
+ * The question asked on its own, as start() asks one that is no turn of a conversation
+ * (its prompt without conversationPrompt): nothing read from the board, nothing kept.
+ */
+async function askAlone(talk, s, web, step, ctl) {
+  const res = await askTurn(talk.provider, talk.alone, s, web, step, { resume: false, id: null }, ctl);
+  return ctl.stopped ? stoppedAnswer() : res;
+}
+
+/**
+ * One CLI run of a turn. Stop before it spawns spawns nothing; Claude Code refusing an
+ * option a conversation adds goes again without it (UNKNOWN_OPTION_RE), a new session
+ * under a new id.
+ */
+async function askTurn(provider, r, s, web, step, turn, ctl) {
+  for (;;) {
+    if (ctl.stopped) return stoppedAnswer();
+    let run;
+    if (provider === 'claude-code') {
+      turn.snapshot = !claudeLacks.has('--system-prompt-snapshot');
+      if (claudeLacks.has('--name')) turn.name = null;
+      run = askClaudeCode(r, s, web, step, turn);
+    } else {
+      run = askCodex(r, web, step, turn);
+    }
+    ctl.run = run;
+    const res = await run.done;
+    ctl.run = null;
+    if (!res.ok && turn.unknown && !ctl.stopped) {
+      claudeLacks.add(turn.unknown);
+      turn.unknown = null;
+      if (!turn.resume) turn.id = crypto.randomUUID();
+      continue;
+    }
+    return res;
+  }
+}
+
+/** The store and the board an IPC call names, or the error to answer with. */
+function conversationTarget(boardId, opts) {
+  const store = opts && typeof opts === 'object' ? opts.conversations : null;
+  if (!isUuid(boardId)) return { error: 'Invalid whiteboard id' };
+  if (!store || typeof store.get !== 'function' || typeof store.set !== 'function') {
+    return { error: 'there is nowhere to keep conversations' };
+  }
+  return { store, boardId: boardId.toLowerCase() };
+}
+
+/** A kept conversation as the page may see it: how long and where — never its id or folder. */
+function publicConversation(entry) {
+  if (!entry || typeof entry !== 'object' || !isUuid(entry.id)) return null;
+  if (!Number.isSafeInteger(entry.turns) || entry.turns < 1) return null;
+  return {
+    turns: entry.turns,
+    startedAt: typeof entry.startedAt === 'string' ? entry.startedAt : '',
+    lastAt: typeof entry.lastAt === 'string' ? entry.lastAt : '',
+    workspace: typeof entry.workspace === 'string' ? entry.workspace : '',
+  };
+}
+
+/**
+ * conversation(boardId, { conversations, lookup? }) → { ok, data: { 'claude-code', codex },
+ * alone? } — each CLI's conversation on the board as publicConversation() shows it, or
+ * null. With `lookup` (workspaces.lookup, as resolveAnswerDir takes it), one had in a
+ * folder its workspace is no longer reads as none: the next answer would start a new one
+ * there. `alone` lists a CLI that answers each question on its own on this Mac — a Codex
+ * too old to resume (cliAlone) — whose conversation reads as none; it is left out when
+ * there is no such CLI.
+ */
+async function conversation(boardId, opts) {
+  const target = conversationTarget(boardId, opts);
+  if (target.error) return { ok: false, error: target.error };
+  try {
+    const data = {};
+    const alone = cliAlone();
+    for (const provider of CONVERSATION_PROVIDERS) {
+      if (alone.indexOf(provider) !== -1) {
+        data[provider] = null;
+        continue;
+      }
+      const entry = await target.store.get(target.boardId, provider);
+      data[provider] = (await movedAway(entry, opts)) ? null : publicConversation(entry);
+    }
+    return alone.length ? { ok: true, data, alone } : { ok: true, data };
+  } catch (err) {
+    return { ok: false, error: `could not read the whiteboard's conversations: ${(err && err.message) || err}` };
+  }
+}
+
+/**
+ * Whether a kept conversation's workspace now has another folder — the rail's config
+ * changed under the same id — so conversationTurn would not continue it. A workspace that
+ * resolves to nothing says nothing here: the answer is refused for it before it is asked.
+ */
+async function movedAway(entry, opts) {
+  const lookup = opts && typeof opts === 'object' && typeof opts.lookup === 'function' ? opts.lookup : null;
+  if (!lookup || !entry || typeof entry !== 'object' || typeof entry.workspace !== 'string') return false;
+  let ws = null;
+  try { ws = await lookup(entry.workspace); } catch (_) { return false; }
+  return !!(ws && typeof ws.dir === 'string' && ws.dir && ws.dir !== entry.dir);
+}
+
+/**
+ * resetConversation(boardId, provider?, { conversations }) → { ok } — the board forgets
+ * its conversation with `provider`, or with both CLIs when it is left out, and its next
+ * answer starts a new one. An answer already on its way still lands; it just is not
+ * written back. The lane's generation moves first, at once, and the next turn in line
+ * waits for the write before it reads.
+ */
+async function resetConversation(boardId, provider, opts) {
+  const target = conversationTarget(boardId, opts);
+  if (target.error) return { ok: false, error: target.error };
+  if (provider !== undefined && provider !== null && CONVERSATION_PROVIDERS.indexOf(provider) === -1) {
+    return { ok: false, error: 'that provider keeps no conversation' };
+  }
+  const which = provider ? [provider] : CONVERSATION_PROVIDERS;
+  const results = await Promise.all(which.map(p => {
+    const lane = laneFor(target.boardId, p);
+    lane.generation++;
+    const write = keepConversation(target.store, target.boardId, p, null);
+    const clearing = write.then(() => {});
+    lane.clearing = clearing;
+    clearing.then(() => {
+      if (lane.clearing === clearing) lane.clearing = null;
+      idle(lane);
+    });
+    return write;
+  }));
+  const failed = results.find(res => !res.ok);
+  return failed ? { ok: false, error: `could not forget the conversation: ${failed.error}` } : { ok: true };
 }
 
 // ── an API ──────────────────────────────────────────────────────────────────
@@ -1044,6 +1526,8 @@ module.exports = {
   stop,
   stopAll,
   resolveAnswerDir,
+  conversation,
+  resetConversation,
   // For the tests.
   PROVIDERS,
   OPENAI_MODELS,
@@ -1054,6 +1538,8 @@ module.exports = {
   keysFile,
   webPrompt,
   webStep,
+  conversationPrompt,
+  publicConversation,
   claudeCodeArgs,
   codexArgs,
   claudeApiBody,

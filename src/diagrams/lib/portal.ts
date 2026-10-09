@@ -1,6 +1,7 @@
-// Radix content stays in the editor instance's own scoped CSS root. Grid may show
-// several React roots at once — one per whiteboard — so a module-global portal would
-// send every picker and dialog to whichever board was mounted most recently.
+// Radix content stays in the editor instance's own scoped CSS root. Several React
+// roots live at once — one per open whiteboard, kept mounted while off screen — so a
+// module-global portal would send every picker and dialog to whichever board was
+// mounted most recently.
 import { createContext, createElement, useContext, type ReactNode } from "react"
 
 const PortalContext = createContext<HTMLElement | null>(null)

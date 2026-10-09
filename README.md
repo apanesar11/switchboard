@@ -105,7 +105,8 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   runs inside tmux on the app's own private server, so the next launch brings every
   terminal back where it was, Claude mid-turn and all; `exit` ends one for good. That
   needs tmux (`brew install tmux`). Without it, quitting hangs the shells up the way
-  closing a terminal window does, and `claude --continue` picks the conversation back up.
+  closing a terminal window does, and `claude --continue` picks the conversation back up
+  (yours: it passes over ✦ Answer's conversations about that workspace).
 - **Editor** — the fourth tab, for when you want to look at or fix a file without
   opening another app: something like Sublime Text, with no extensions and no setup.
   The tree on the left has a folder for each repo, lists what `git` would plus the
@@ -220,7 +221,15 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   of answering. The CLIs can only
   read: Claude Code gets nothing but its read and search tools (and, with Web access, its
   web fetch and search), and Codex runs in its read-only sandbox. Install and sign in to the CLI you use on each Mac; Switchboard finds
-  it, and picks the first one that can answer. Two switches under the chevron, and in
+  it, and picks the first one that can answer. With a CLI, every answer on one whiteboard
+  continues one conversation with it, whichever box asks, so it already knows the branches
+  you have explored there; only a whiteboard it has never answered on starts one. The
+  **Conversation** row in the same menu says how many questions it holds, and **New
+  conversation** makes the next answer start afresh. Answers on one whiteboard take turns —
+  the card says so while one waits — and a copy of a whiteboard, or one given another
+  workspace, starts a conversation of its own. The APIs and ✦ Condense take each question
+  on its own, and so does a Codex older than 0.132, which can't continue one — the row
+  says so. Two switches under the chevron, and in
   Settings: **Web access** (on) lets whichever answers open a link in the question or
   search the web, only when the question needs it; **Subtext** (off) adds a line of detail
   under each answer box.
@@ -240,8 +249,8 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   documents and pictures along — a document the move missed is brought over the first
   time you open it, and nothing is ever half-copied. The old folder was renamed
   `~/.switchboard/diagrams-before-whiteboards`, and nothing was deleted. A Grid square
-  that showed a workspace's diagrams now shows that workspace's most recently edited
-  whiteboard, when it has one.
+  that showed a workspace's diagrams opens its Terminal now: whiteboards have a screen of
+  their own.
 - **Databases** — save multiple named Neon/PostgreSQL or MongoDB connections for each
   workspace. Choose a connection, then a table, view or collection to fetch its records;
   Refresh (or ⌘R) reads them again. Click a row to see every field, including nested
@@ -274,14 +283,12 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   one (Add workspace) — click another tab to edit that one too, and Done to finish. It
   is the only place a square's × shows, so a slip of the hand cannot empty one. The bar
   beside the ⋯ is this session's Claude usage. Each workspace square switches between
-  **Terminal**, **Changes**, and **Show a whiteboard** using the buttons in its header.
-  Changes shows the workspace's repository summary, with compact green `+` and red `−`
-  counts in its button. A whiteboard square shows any whiteboard you pick there — the
-  ones whose ✦ Answer reads that workspace first, then your recent ones, then each
-  folder, with a search box — as the same live board its own screen shows, with its
-  switcher, full screen and terminals; the chevron beside the buttons picks another. One
-  whiteboard is in one square at a time. The Terminal is the same shell and scrollback
-  as the workspace tab, and keeps running while Changes or a whiteboard is shown. A
+  **Terminal** and **Changes** using the buttons in its header. Changes shows the
+  workspace's repository summary, with compact green `+` and red `−` counts in its button.
+  A square never shows a whiteboard: one whiteboard can hold terminals for any number of
+  workspaces, so it has a screen of its own, and a square that used to show one opens
+  Terminal. The Terminal is the same shell and scrollback as the workspace tab, and keeps
+  running while Changes is shown. A
   square can also hold **any folder** rather than a workspace: the picker's
   first row, **Choose a folder…**, opens the Mac's folder chooser, and the square becomes
   a shell in that folder — the apps folder itself, a repo outside it, anything — on no
@@ -359,12 +366,17 @@ the app; it reads the files in your repos through `git` and the file system, and
 writes, moves or bins one only when you ask it to — a save, a new file or folder, a
 rename, a delete. Whiteboards are files of its own too, in
 `~/.switchboard/whiteboards/`: `store.json` (your folders, the workspaces you used last
-and the one-time notice), `boards/` (one JSON file per whiteboard), `documents/` (the
+and the one-time notice), `boards/` (one JSON file per whiteboard, with its ✦ Answer
+conversations), `documents/` (the
 Markdown documents on them) and `images/` (their pictures, kept once each). A folder is
 an entry in `store.json`, not a directory, so moving a whiteboard or renaming a folder
 moves no file. ✦ Answer runs `claude` or `codex` in the folder of the whiteboard's
 workspace with read-only tools, or calls the Anthropic or OpenAI API directly with a key
-you entered. A whiteboard's Google Images panel is Google's own page, in a session of
+you entered. A CLI keeps a whiteboard's conversation where it keeps its own: a Claude
+Code session named `Whiteboard · <its name>` with the workspace's own sessions — kept as
+a print-mode session, which `claude --continue` and `claude --resume` there pass over,
+so yours always come back first (an older Claude Code may offer it too) — or a Codex
+thread; the whiteboard's file holds only which one, never the conversation itself. A whiteboard's Google Images panel is Google's own page, in a session of
 its own, and fetches a picture you add from it from wherever that picture lives; it
 loads nothing until you open it. Database browsing connects directly to the database
 URI you supply, from the main process; credentials never return to the renderer.

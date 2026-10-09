@@ -893,7 +893,7 @@ window.SB = window.SB || {};
     if (!wsId) return;
     var want = !!on;
     // The Grid only reads a terminal's bell while that square shows Terminal; Changes
-    // and a whiteboard leave its output hidden, so a hidden terminal's bell stays unread.
+    // leaves its output hidden, so a hidden terminal's bell stays unread.
     // A whiteboard's own terminal panels are read only while the keyboard is in one:
     // several can float over a board at once, and the blue dot on a panel that is merely
     // open is exactly how the user learns which of them Claude has finished in.
@@ -2004,23 +2004,12 @@ window.SB = window.SB || {};
 
   // Main says a whiteboard or folder changed (sb:evt:wbChanged) — after every write,
   // the editor's autosave included, which is many a minute while a board is being drawn.
-  // Every 'wb:' load goes stale QUIETLY, and only a screen showing the list is redrawn
-  // for it: the Whiteboards screen, and the Grid while one of its squares is choosing a
-  // board (a board made, renamed, archived or deleted meanwhile belongs in that list).
-  // Never for a save there: a render for an autosave would rebuild the Grid's four
-  // squares (their terminals re-parented, focus restored) to re-sort a list by a minute.
-  // Whoever shows the list next revalidates it then. An open board learns of its own
-  // writes from the editor.
-  function handleWhiteboards(change) {
+  // Every 'wb:' load goes stale QUIETLY, and only the screen showing the list, the
+  // Whiteboards screen, is redrawn for it. Whoever shows the list next revalidates it
+  // then. An open board learns of its own writes from the editor.
+  function handleWhiteboards() {
     markStale('wb:');
-    if (state.route.view === 'whiteboards') { schedule(); return; }
-    if (state.route.view !== 'grid' || (change && change.reason === 'save')) return;
-    var grid = SB.views.grid;
-    var choosing = false;
-    if (grid && typeof grid.choosingBoard === 'function') {
-      try { choosing = !!grid.choosingBoard(); } catch (err) { console.error('[switchboard] grid choosingBoard:', err); }
-    }
-    if (choosing) schedule();
+    if (state.route.view === 'whiteboards') schedule();
   }
 
   function subscribe() {

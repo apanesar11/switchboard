@@ -43,6 +43,11 @@
 // row, kept on the board by the host) — taken at the moment of asking, and written
 // on each box the answer adds (`answeredIn`, the small tag under its corner). A CLI
 // with no workspace to read is told so before anything is asked.
+// Switchboard: a CLI's answers on a whiteboard are one conversation, which main keeps
+// for the board and resumes for every answer after the first — so it knows the
+// branches already explored. The who-answers menu says how far it has got and offers
+// New conversation; a CLI's answer asked while another of the board's is on its way
+// waits its turn, and the card over the strip says so.
 // Switchboard: a workspace's terminal can be pinned to the board as a node of its
 // own ("terminal"). The node is only a frame — header, buttons, a dark body — and
 // the host lays the live terminal over its body itself, from the geometry this
@@ -159,6 +164,7 @@ import {
   RiTerminalBoxLine,
   RiText,
   RiTextBlock,
+  RiTimeLine,
   RiZoomInLine,
   type RemixiconComponentType,
 } from "@remixicon/react"
@@ -246,16 +252,20 @@ import {
 // and kept by main, rather than the admin's OpenAI model in localStorage.
 import {
   AnswerError,
+  refreshBoardConversation,
   requestFlowAnswer,
   requestFlowCondense,
+  resetBoardConversation,
   updateAnswerSettings,
   useAnswerStatus,
+  useBoardConversation,
 } from "@/lib/diagrams/ai-client"
 import { inspectFlowCondenseSelection, replaceFlowSelection } from "@/lib/diagrams/condense"
 import type {
   AnswerSettings,
   AnswerStatus,
   AnswerStep,
+  ConversationProvider,
   ProviderId,
   ProviderStatus,
   WorkspaceChoices,
@@ -1585,7 +1595,10 @@ type Props = {
   shown?: boolean
   /** Changes when the pane is resized from outside (full screen), to re-fit. */
   fitKey: string
-  /** Switchboard: which whiteboard this is — identity only, for keys and logs. */
+  /**
+   * Switchboard: which whiteboard this is — for keys and logs, and the conversation a
+   * CLI's answers on it continue (main keeps it by this id).
+   */
   boardId: string
   /** The diagram's name — part of what ✦ Answer tells the model. */
   diagramName?: string
@@ -1944,8 +1957,8 @@ function FlowEditorCanvas({
     const terminals = nodesRef.current.filter(isTerminal)
     if (terminals.length === 0) return []
     const pane = paneBounds()
-    // Hidden (a board not on screen, a Grid square folded away): nowhere to lay a
-    // terminal, so none is live until the pane is back.
+    // Hidden (a board not on screen): nowhere to lay a terminal, so none is live
+    // until the pane is back.
     const laidOut = pane !== null && pane.width > 0 && pane.height > 0
     const [x, y, zoom] = store.getState().transform
     const { hidden } = foldOf(nodesRef.current, edgesRef.current)
@@ -2036,7 +2049,7 @@ function FlowEditorCanvas({
   }, [computeSlots])
 
   // What moves a slot: the view panning or zooming (and the pane React Flow draws
-  // in), the pane changing size or place (full screen, a Grid square, the window),
+  // in), the pane changing size or place (full screen, the window),
   // the canvas's own floating UI opening or closing over it, and its chrome (the
   // panels a slot's holes are cut for) coming, going or changing size. The nodes
   // and the rail's workspaces are watched below, with the render that changes them.
@@ -3286,6 +3299,11 @@ function FlowEditorCanvas({
     // Still this answer's to act on — not stopped, nor the editor gone.
     const live = () => askRef.current.get(serial)?.controller === controller
     const startedAt = Date.now()
+    // Switchboard: when its CLI began. An answer that waited its turn behind another on
+    // the board (a "wait" step, then the turn's first) is timed from the turn, so the
+    // note says how long the CLI took rather than the line.
+    let turnAt = startedAt
+    let waiting = false
     setAnswered(null)
     setFailure(null)
     setSteps((all) => ({ ...all, [serial]: [] }))
@@ -3308,6 +3326,8 @@ function FlowEditorCanvas({
         {
           provider,
           wsId: answerWorkspace,
+          // Switchboard: a CLI's answer continues this whiteboard's conversation.
+          boardId,
           question: {
             question,
             detail: box.detail?.trim() || undefined,
@@ -3328,6 +3348,11 @@ function FlowEditorCanvas({
         // What a CLI is doing, a line at a time, for the card over the strip. The last
         // few are all it shows.
         (step) => {
+          if (step.kind === "wait") waiting = true
+          else if (waiting) {
+            waiting = false
+            turnAt = Date.now()
+          }
           if (live()) {
             setSteps((all) => ({ ...all, [serial]: [...(all[serial] ?? []).slice(-49), step] }))
           }
@@ -3338,7 +3363,7 @@ function FlowEditorCanvas({
       setAnswerNote({
         by: provider.name,
         files: provider.kind === "cli" ? files : null,
-        seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
+        seconds: Math.max(1, Math.round((Date.now() - turnAt) / 1000)),
       })
       addAnswers(node.id, parts, workspace)
     } catch (err) {
@@ -4224,8 +4249,10 @@ function FlowEditorCanvas({
     onAnswerWorkspaceChange(wsId)
   }
 
-  // What the who-answers menu shows and changes about the board's workspace.
+  // What the who-answers menu shows and changes about the board's workspace — and
+  // which board it is, for its conversation.
   const answerWorkspaceBar = {
+    boardId,
     workspace: answerWorkspace,
     workspaceGone: answerWorkspaceGone,
     choices,
@@ -4468,9 +4495,11 @@ function FlowEditorCanvas({
       if (event.target instanceof Element && event.target.closest("[data-flow-document-panel]")) return
       const shortcuts = shortcutsRef.current
       const inField = isTextField(event.target)
+      // Switchboard: and anything else in an open menu or panel, which keeps its own
+      // keys — the Conversation row holds the focus once New conversation goes.
       const inControl =
         event.target instanceof Element &&
-        Boolean(event.target.closest("button, a, [role=button], [role=radio], [role=menuitem]"))
+        Boolean(event.target.closest("button, a, [role=button], [role=radio], [role=menuitem], [data-flow-popover]"))
       const plain = !event.metaKey && !event.ctrlKey && !event.altKey
 
       if (event.key === "Tab" && plain && !event.isComposing) {
@@ -4537,9 +4566,10 @@ function FlowEditorCanvas({
     function onSelectionKey(event: KeyboardEvent) {
       if (event.metaKey || event.ctrlKey || event.altKey) return
       if (isTextField(event.target) || !onCanvas(event.target)) return
+      // As onKeyDown's: a control, or anywhere in an open menu or panel.
       const inControl =
         event.target instanceof Element &&
-        Boolean(event.target.closest("button, a, [role=button], [role=radio], [role=menuitem]"))
+        Boolean(event.target.closest("button, a, [role=button], [role=radio], [role=menuitem], [data-flow-popover]"))
       const shortcuts = shortcutsRef.current
       const direction = ARROW_DIRECTIONS[event.key]
       if (direction) {
@@ -4884,7 +4914,7 @@ function FlowEditorCanvas({
             <Controls showInteractive={false} position="bottom-right" />
 
             {/* Switchboard: centred for real. React Flow lifts a centred panel by the
-                15px margin !my-0 takes away, which on a short canvas (a Grid square)
+                15px margin !my-0 takes away, which on a short canvas (a small window)
                 pushed the rail's first tool off the top. */}
             <Panel position="center-left" className="!my-0 !ml-4 ![transform:translateY(-50%)]">
               <ToolRail
@@ -5708,6 +5738,8 @@ type AiBar = {
   hasQuestion: boolean
   /** Switchboard: who can answer on this Mac, and the settings — null until main has said. */
   status: AnswerStatus | null
+  /** Switchboard: the whiteboard, whose conversation the Conversation row shows. */
+  boardId: string
   /** Switchboard: the workspace a CLI reads for this whiteboard, for "Reads sample-2 first". */
   workspace: string | null
   /** Switchboard: that workspace has left the rail. */
@@ -5789,6 +5821,7 @@ function AiControls({ ai }: { ai: AiBar }) {
           <AiSettingsMenu
             condensing={condensing}
             status={ai.status}
+            boardId={ai.boardId}
             workspace={ai.workspace}
             workspaceGone={ai.workspaceGone}
             choices={ai.choices}
@@ -5928,10 +5961,12 @@ function MenuSwitch({
 // things.
 // Switchboard: and which workspace a CLI reads — the whiteboard's own, kept with the
 // whiteboard rather than on this Mac — in a row of its own, whose Change… opens a
-// short picker beside the menu.
+// short picker beside the menu; and, under Web access, the whiteboard's conversation
+// with the CLI picked (ConversationRow).
 function AiSettingsMenu({
   status,
   condensing = false,
+  boardId,
   workspace,
   workspaceGone: gone,
   choices,
@@ -5944,6 +5979,7 @@ function AiSettingsMenu({
 }: {
   status: AnswerStatus | null
   condensing?: boolean
+  boardId: string
   workspace: string | null
   workspaceGone: boolean
   choices: WorkspaceChoices | null
@@ -6093,6 +6129,7 @@ function AiSettingsMenu({
                 on={settings.web}
                 onToggle={() => onChange({ web: !settings.web })}
               />
+              <ConversationRow boardId={boardId} provider={current} workspace={workspace} />
             </div>
           ) : null}
         </div>
@@ -6133,7 +6170,7 @@ function AiSettingsMenu({
         <span>
           {condensing
             ? "Uses the selected nodes and their parent. Undo restores the discussion."
-            : "A box for each part an answer has. Workspace is kept with this whiteboard; the rest on this Mac."}
+            : "A box for each part an answer has. Workspace and conversation are kept with this whiteboard; the rest on this Mac."}
         </span>
         {onOpenSettings ? (
           <button
@@ -6170,6 +6207,101 @@ function AiSettingsMenu({
       ) : null}
     </div>
   )
+}
+
+// Switchboard: under Web access, the whiteboard's conversation with the CLI picked.
+// Every answer from it on this whiteboard continues one conversation (main keeps it;
+// ai-client.ts asks), so it knows the branches already explored: the row says how
+// many questions it holds, and New conversation lets the next answer start afresh.
+// An answer from another workspace starts a new one, so the row says that instead
+// when the board's workspace has changed since. An API's answers each stand alone —
+// the row stays, dimmed, saying so, as the Workspace row does, so the menu keeps its
+// height as the way to answer changes — and so do a CLI's that main says can't keep
+// one (a Codex too old to resume). One line of hint in every case: the menu is placed
+// once, as it opens, for the height it has then.
+function ConversationRow({
+  boardId,
+  provider,
+  workspace,
+}: {
+  boardId: string
+  provider: ProviderStatus | null
+  /** The board's workspace now, which the next answer reads. */
+  workspace: string | null
+}) {
+  const conversations = useBoardConversation(boardId)
+  const rowRef = useRef<HTMLDivElement | null>(null)
+  // What main says now, each time the menu opens — and again when the board's workspace
+  // changes in it: main forgets the conversations then, so a change and a change back
+  // leaves none to continue.
+  useEffect(() => {
+    void refreshBoardConversation(boardId)
+  }, [boardId, workspace])
+  // Main couldn't say — a build without conversations: nothing to show.
+  if (conversations === null || !provider) return null
+  const cli: ConversationProvider | null =
+    provider.id === "claude-code" || provider.id === "codex" ? provider.id : null
+  const alone = cli !== null && conversations?.alone?.includes(cli) === true
+  const info = cli && conversations && !alone ? conversations[cli] : null
+  const moved = info !== null && info.workspace !== workspace
+  const about = `Every ${provider.name} answer on this whiteboard continues one conversation, so it knows the branches already explored.`
+  const started = info ? shortDate(info.startedAt) : null
+  const hint = !cli || alone
+    ? "Each answer stands alone"
+    : conversations === undefined
+      ? "Checking…"
+      : !info
+        ? "The next answer starts it"
+        : moved
+          ? "Workspace changed · the next starts anew"
+          : `${info.turns === 1 ? "1 question" : `${info.turns} questions`} so far · the next continues it`
+  const title = !cli
+    ? "The Claude API and OpenAI API see only the whiteboard, so each answer stands alone."
+    : alone
+      ? `${provider.name} on this Mac is too old to continue a conversation, so each answer stands alone. Update it to keep one.`
+      : info && moved
+        ? `${about} This one was in ${info.workspace}; the next answer reads ${workspace ?? "no workspace"}, so it starts a new one.`
+        : info
+          ? `${about}${started ? ` Started ${started}.` : ""}`
+          : about
+  return (
+    <div
+      ref={rowRef}
+      tabIndex={-1}
+      title={title}
+      className={cx("rounded-lg px-2 py-1 outline-none", (!cli || alone) && "opacity-60")}
+    >
+      <span className="flex items-baseline gap-3">
+        <span className="min-w-0 flex-1 truncate text-gray-200">Conversation</span>
+        {cli && info && !moved ? (
+          <button
+            type="button"
+            title="The next answer starts a new conversation, without this one's questions"
+            onClick={(event) => {
+              // The button goes as the row changes: keep the keyboard in the menu.
+              if (document.activeElement === event.currentTarget) rowRef.current?.focus({ preventScroll: true })
+              void resetBoardConversation(boardId, cli).then((result) => {
+                if (!result.ok) toast({ title: "Couldn't start a new conversation", description: result.error, variant: "error" })
+              })
+            }}
+            className={cx(
+              "shrink-0 rounded px-0.5 text-xs font-medium text-violet-300 hover:text-violet-200",
+              focusRing,
+            )}
+          >
+            New conversation
+          </button>
+        ) : null}
+      </span>
+      <span className="block truncate text-[11px] leading-4 text-gray-400">{hint}</span>
+    </div>
+  )
+}
+
+/** "3 Oct" — or null for a time that isn't one. */
+function shortDate(iso: string): string | null {
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString(undefined, { day: "numeric", month: "short" })
 }
 
 /**
@@ -6386,12 +6518,15 @@ const DONE_TEXT: Record<AnswerStep["kind"], string> = {
   write: "Wrote the answer",
   fetch: "Opened",
   web: "Searched the web for",
+  wait: "Waited its turn",
   other: "",
 }
 
 // Switchboard: the card over the strip while a CLI answers — the last few things it
 // did, the one it is doing now, and that it can only read. An API gets it too, once it
-// has gone on the web.
+// has gone on the web. A CLI's answer asked while another of the board's is on its way
+// waits for it first (main's "wait" step, for as long as that takes): the board's
+// conversation takes one question at a time.
 function AnswerActivity({
   asking,
   steps,
@@ -6405,7 +6540,8 @@ function AnswerActivity({
   const seconds = useSeconds(asking.startedAt)
   const shown = steps.slice(-4)
   const reads = steps.filter((step) => step.kind === "read").length
-  const done = steps.filter((step) => step.kind !== "think").length
+  const done = steps.filter((step) => step.kind !== "think" && step.kind !== "wait").length
+  const waiting = steps[steps.length - 1]?.kind === "wait"
   return (
     <div
       data-canvas-overlay
@@ -6416,7 +6552,9 @@ function AnswerActivity({
         <span className="truncate">
           {asking.mode === "condense"
             ? `${asking.name} is condensing ${asking.selectedIds?.length ?? 0} nodes`
-            : asking.cli ? `${asking.name} is reading ${asking.workspace ?? "the workspace"}` : `${asking.name} is looking it up`}
+            : asking.cli
+              ? `${asking.name} is ${waiting ? "waiting to read" : "reading"} ${asking.workspace ?? "the workspace"}`
+              : `${asking.name} is looking it up`}
         </span>
         <span className="ml-auto font-medium tabular-nums text-gray-500" aria-hidden="true">
           {seconds}s
@@ -6445,7 +6583,9 @@ function AnswerActivity({
                   now ? "text-gray-900 dark:text-gray-50" : "text-gray-600 dark:text-gray-400",
                 )}
               >
-                {now ? (
+                {now && step.kind === "wait" ? (
+                  <RiTimeLine className="size-3.5 shrink-0 text-violet-500" aria-hidden="true" />
+                ) : now ? (
                   <RiLoader4Line className="size-3.5 shrink-0 animate-spin text-violet-500" aria-hidden="true" />
                 ) : (
                   <RiCheckLine className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
@@ -6469,6 +6609,8 @@ function AnswerActivity({
             : ""}
         {asking.mode === "condense"
           ? "The original discussion stays until its summary is ready. You can undo the replacement."
+          : waiting
+          ? "Answers on one whiteboard take turns, so each continues its conversation."
           : !asking.cli
           ? "It sees only the whiteboard, and the web when the question needs it."
           : asking.web
@@ -6888,7 +7030,7 @@ function ToolRail({
   // place can be swapped before clicking the canvas.
   const [helpOpen, setHelpOpen] = useState(false)
   // Switchboard: how much height the canvas gives the rail. Only a change of it
-  // re-renders the rail; a Grid square or a short window is where it runs short.
+  // re-renders the rail; a short window is where it runs short.
   const fit = railFit(useStore((state) => state.height))
   // In two columns, what a tool opens sits beside the whole rail (its wrapper is
   // not positioned then) rather than over the tool in the next column.
@@ -7020,8 +7162,8 @@ function ToolRail({
 /**
  * Switchboard: how the tool rail fits the canvas's height — at full size; with
  * smaller tools packed closer ("compact"); or, shorter still, in two columns —
- * rather than running off the top and bottom of a short canvas (a Grid square,
- * a small window), where its first tools would be out of reach.
+ * rather than running off the top and bottom of a short canvas (a small window),
+ * where its first tools would be out of reach.
  */
 type RailFit = "full" | "compact" | "columns"
 const RailFitContext = createContext<RailFit>("full")

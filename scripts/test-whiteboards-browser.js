@@ -20,8 +20,13 @@
 // in the same node (and Undo of each); the pinned node in the board file; Float back
 // to the same spot; Undo of the Float putting the node back with a grid that fits it,
 // and Redo floating it where its text was; Markdown and box labels keeping ⌘A as
-// Select All; full screen; a Grid square showing any whiteboard and its terminal; the
-// exit footer and retry inside a panel; and no renderer errors along the way.
+// Select All; full screen; a Grid square offering Terminal and Changes only, a square
+// saved as a whiteboard opening Terminal on the same shell, and the old whiteboard
+// squares cleared from localStorage; the exit footer and retry inside a panel; ✦ Answer's
+// Conversation row (its count from the REAL store through answer.js, New conversation
+// from the keyboard keeping Tab and Enter in the menu, a workspace changed and changed
+// back leaving nothing to continue, a CLI that answers on its own); and no renderer
+// errors along the way.
 //
 // SWITCHBOARD_WHITEBOARD_CAPTURE=<dir> saves screenshots of each stage there;
 // SWITCHBOARD_WHITEBOARD_DEBUG=1 prints each stage and the renderer's errors as they come.
@@ -73,6 +78,20 @@ if (!process.versions.electron) {
   const otherId = 'second-workspace';
   const dirs = { [wsId]: path.join(temp, 'project-a'), [otherId]: path.join(temp, 'project-b') };
   let window, clipboard = '', refuse = false;
+  // ✦ Answer: who can answer (none, until the Conversation row's turn), and the board's
+  // conversations through the REAL answer.js and whiteboard store, as index.js wires them.
+  const answer = require('../src/main/answer');
+  let answerStatus = { ok: true, settings: {}, providers: [], keysSafe: {} };
+  let alone = null;
+  const resets = [];
+  const conversationStore = {
+    async get(boardId, provider) {
+      const res = await whiteboards.conversation(boardId, provider);
+      if (!res.ok) throw new Error(res.error);
+      return res.data;
+    },
+    set: (boardId, provider, entry) => whiteboards.setConversation(boardId, provider, entry),
+  };
   const opens = [];
   const closes = [];
   const resizes = [];
@@ -89,7 +108,16 @@ if (!process.versions.electron) {
   handle('grid:list', () => ({ views: [{ id: 'example-grid', name: 'Example grid', cells: [wsId, otherId, null, null] }] }));
   handle('grid:save', views => ({ views }));
   handle('usage:get', () => ({ ok: false, configured: false }));
-  handle('answer:status', () => ({ ok: true, settings: {}, providers: [], keysSafe: {} }));
+  handle('answer:status', () => answerStatus);
+  handle('answer:conversation', async boardId => {
+    const res = await answer.conversation(boardId, { conversations: conversationStore, lookup: id => (dirs[id] ? workspace(id) : null) });
+    // A CLI this Mac has too old to keep one: what answer.js says once a resume is refused.
+    return alone && res.ok ? { ...res, data: { ...res.data, [alone]: null }, alone: [alone] } : res;
+  });
+  handle('answer:resetConversation', (boardId, provider) => {
+    resets.push([boardId, provider]);
+    return answer.resetConversation(boardId, provider, { conversations: conversationStore });
+  });
   handle('diagrams:dirty', () => ({}));
   handle('diagrams:flushed', () => ({}));
   handle('clipboard:write', text => { clipboard = text; return { ok: true }; });
@@ -220,8 +248,7 @@ if (!process.versions.electron) {
         { id: 'brief', label: 'Example brief', shape: 'document', documentId: doc.data.id, position: { x: 340, y: 130 } },
       ], edges: [{ from: 'start', to: 'brief' }] } });
       assert.equal(first.ok, true, first.error);
-      // A second board that reads the OTHER workspace, so the Grid's picker can show a
-      // square is not limited to boards of its own workspace.
+      // A second board that reads the OTHER workspace: the home lists both.
       const second = await whiteboards.create({ folderId: folder.data.id, name: 'Second flow', workspace: otherId, spec: { kind: 'flow', nodes: [
         { id: 'other', label: 'Another step', position: { x: 60, y: 130 } },
       ], edges: [] } });
@@ -231,6 +258,21 @@ if (!process.versions.electron) {
 
       await window.loadFile(path.join(repo, 'src/renderer/index.html'));
       await until('SB.state.booted && SB.state.workspaces.length === 2');
+
+      mark('Grid squares saved before the Grid lost its whiteboards');
+      // What a square showing a whiteboard saved ('whiteboard', and 'diagrams' from
+      // before Whiteboards), the board it showed, and a Changes square beside them.
+      // grid.js reads them as it loads, so they go in first and the page loads again —
+      // before any terminal is open, so no shell is asked for twice.
+      const oldModes = { [wsId]: 'whiteboard', [otherId]: 'diagrams', 'example-elsewhere': 'changes' };
+      await run(`localStorage.setItem('switchboard.grid.cellMode', ${q(JSON.stringify(oldModes))}); localStorage.setItem('switchboard.grid.cellBoard', ${q(JSON.stringify({ [wsId]: boardId }))});`);
+      await window.loadFile(path.join(repo, 'src/renderer/index.html'));
+      await until('SB.state.booted && SB.state.workspaces.length === 2');
+      await check('old whiteboard squares are cleared from storage', async () => {
+        assert.deepEqual(JSON.parse(await run(`localStorage.getItem('switchboard.grid.cellMode')`)), { 'example-elsewhere': 'changes' });
+        assert.equal(await run(`localStorage.getItem('switchboard.grid.cellBoard')`), null);
+      });
+      assert.deepEqual(opens, [], 'loading the page twice opened no shell');
 
       mark("the Terminal tab first: its shell is the one a board's panel must show");
       await run(`SB.go({view:'workspace',wsId:${q(wsId)},tab:'terminal'})`);
@@ -728,35 +770,36 @@ if (!process.versions.electron) {
       await run('originalTerm.clearSelection()');
       assert.deepEqual(opens.filter(id => id === wsId), [wsId]);
 
-      mark('a Grid square in whiteboard mode');
+      mark('a Grid square: Terminal and Changes, and no whiteboard');
       await run('SB.go({view:"grid"})');
       await until('!!document.querySelector(".gridbd")');
-      const modeButton = `[data-grid-ws="${wsId}"] [data-grid-mode="whiteboard"]`;
-      assert.match(await run(`document.querySelector(${q(modeButton)}).title`), /^Show a whiteboard/);
-      await run(`document.querySelector(${q(modeButton)}).click()`);
-      await until(`!!document.querySelector(${q('[data-grid-ws="' + wsId + '"] .wbpick [data-wb-pick="' + boardId + '"]')})`);
-      // Any board, not only the ones that read this square's workspace.
-      assert.equal(await run(`!!document.querySelector(${q('[data-grid-ws="' + wsId + '"] .wbpick [data-wb-pick="' + second.data.id + '"]')})`), true);
-      await run(`document.querySelector(${q('[data-grid-ws="' + wsId + '"] .wbpick [data-wb-pick="' + boardId + '"]')}).click()`);
-      await until(`!!document.querySelector(${q('[data-grid-ws="' + wsId + '"] ' + canvas + ' [data-id=start]')})`);
-      // The board brings its floating terminal into the square: the same xterm again.
-      await until(`!!document.querySelector(${q('[data-grid-ws="' + wsId + '"] ' + panel(wsId) + ' .xterm')})`);
-      assert.equal(await run(`SB.views.terminal.xterm(${q(wsId)}) === originalTerm && !!originalHost.closest(${q(panel(wsId))})`), true);
-      await capture('grid-whiteboard');
-      await run('originalTerm.focus()');
-      await until(`!!document.activeElement.closest(${q(panel(wsId))})`);
-      menuA();
-      await until(`!document.querySelector(${q('[data-grid-ws="' + wsId + '"] ' + panel(wsId))})`);
-      await run(`document.querySelector(${q('[data-grid-ws="' + wsId + '"] [data-grid-mode=terminal]')}).click()`);
-      await until(`originalHost.closest(${q('[data-grid-ws="' + wsId + '"]')}) && !originalHost.closest(".wbterm")`);
+      const square = id => `[data-grid-ws="${id}"]`;
+      await check('a Grid square offers Terminal and Changes only', async () => {
+        for (const id of [wsId, otherId]) {
+          const modes = await run(`Array.from(document.querySelectorAll(${q(square(id) + ' .cellhd .gridmodes button')})).map(b => b.getAttribute('data-grid-mode'))`);
+          assert.deepEqual(modes, ['terminal', 'changes'], id);
+          const titles = await run(`Array.from(document.querySelectorAll(${q(square(id) + ' .cellhd button')})).map(b => b.title).join(' | ')`);
+          assert.doesNotMatch(titles, /whiteboard/i, id);
+        }
+        assert.equal(await run('!!document.querySelector(".gridbd .dgslab, .gridbd .wbpick, .gridbd [data-wb-terminal]")'), false);
+      });
+      // Both squares were saved as whiteboards (see the start): they open Terminal, and
+      // the first holds the Terminal tab's own xterm — the shell is not asked for again.
+      await until(`originalHost.closest(${q(square(wsId))}) && !originalHost.closest(".wbterm")`);
+      await check('a square saved as a whiteboard opens Terminal', async () => {
+        for (const id of [wsId, otherId]) {
+          assert.equal(await run(`document.querySelector(${q(square(id))}).classList.contains('mode-terminal')`), true, id);
+          assert.equal(await run(`document.querySelector(${q(square(id) + ' [data-grid-mode=terminal]')}).getAttribute('aria-pressed')`), 'true', id);
+        }
+      });
+      await capture('grid');
       assert.deepEqual(opens.filter(id => id === wsId), [wsId], 'Grid and board share one shell');
       assert.equal(shells.state(wsId).startedAt, startedAt);
 
       mark('exit and retry inside a panel');
       await run(`SB.go({view:'whiteboard',board:${q(boardId)}})`);
       await until(`!!document.querySelector(${q('#main ' + canvas + ' [data-id=start]')})`);
-      assert.equal(await run(`!!document.querySelector(${q(panel(wsId))})`), false, 'the panels stay hidden after ⌘A in the Grid');
-      menuA();
+      // The panel stayed open while the Grid had the shell, and takes it back.
       await until(`!!document.querySelector(${q(panel(wsId) + ' .xterm')})`);
       await shells.close(wsId);
       await until(`!!document.querySelector(${q(panel(wsId) + ' .exit')})`);
@@ -771,6 +814,123 @@ if (!process.versions.electron) {
       await run('SB.termTheme.set("dark")');
       await capture('dark-terminal');
       assert.deepEqual(closes, [], 'no whiteboard control closes a shell');
+
+      mark("✦ Answer's Conversation row");
+      // Claude Code ready to answer, as main announces it; a conversation of twelve
+      // questions kept in the board's own file.
+      const cliStatus = provider => ({ ok: true, keysSafe: true,
+        settings: { provider, chosen: provider, split: 'auto', context: true, web: false, subtext: true,
+          claudeCodeEffort: 'own', claudeApiModel: 'claude-sonnet-5-5', openaiModel: 'gpt-6-luna', openaiEffort: 'medium' },
+        providers: [
+          { id: 'claude-code', name: 'Claude Code', kind: 'cli', ready: true, state: 'ready', line: 'Installed · signed in', installed: true, signedIn: true,
+            efforts: [{ id: 'own', name: 'Its own' }, { id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], effort: 'own' },
+          { id: 'codex', name: 'Codex', kind: 'cli', ready: true, state: 'ready', line: 'Installed · signed in', installed: true, signedIn: true },
+        ] });
+      answerStatus = cliStatus('claude-code');
+      window.webContents.send('sb:evt:answerStatus', answerStatus);
+      const talk = turns => ({ id: '3f9c2a10-5b7d-4e8f-9a1b-2c3d4e5f6a70', workspace: wsId, dir: dirs[wsId],
+        startedAt: '2026-10-01T09:00:00.000Z', lastAt: '2026-10-01T09:30:00.000Z', turns });
+      assert.equal(boardFile(boardId).workspace, wsId);
+      assert.equal((await whiteboards.setConversation(boardId, 'claude-code', talk(12))).ok, true);
+      const popover = canvas + ' [data-flow-popover]';
+      const rowText = () => run(`(Array.from(document.querySelectorAll(${q(popover + ' div[tabindex="-1"]')})).find(e => e.textContent.startsWith('Conversation'))?.innerText || '').replace(/\\n+/g, ' | ')`);
+      const nodeCount = () => run(`document.querySelectorAll(${q(canvas + ' .react-flow__node')}).length`);
+      // Main's side, or the page's text, as it settles: `ready` is asked for 2s.
+      const waitFor = async (ready, what) => {
+        for (let i = 0; i < 100; i++) { if (await ready()) return; await sleep(20); }
+        throw new Error('Timed out waiting for ' + what);
+      };
+      const rowSays = text => waitFor(async () => (await rowText()) === text, 'the row to say ' + text).catch(async () => {
+        assert.equal(await rowText(), text);
+      });
+      const key = keyCode => {
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode });
+        if (keyCode === 'Space') window.webContents.sendInputEvent({ type: 'char', keyCode: ' ' });
+        window.webContents.sendInputEvent({ type: 'keyUp', keyCode });
+      };
+      // The box selected (as a click does it), then the chevron beside ✦ Answer. Its label
+      // was being edited (Select All, above): Done first, so its bar is the box's own.
+      const openAnswerMenu = async () => {
+        await run(`document.querySelector(${q(canvas + ' [aria-label="Done · Enter"]')})?.click()`);
+        await until(`!document.querySelector(${q(canvas + ' [aria-label="Done · Enter"]')})`);
+        await run(`(() => { const box = document.querySelector(${q(canvas + ' .react-flow__node[data-id="start"]')}); const r = box.getBoundingClientRect(); const o = { bubbles: true, cancelable: true, view: window, clientX: r.x + 8, clientY: r.y + 8, button: 0, pointerId: 1, isPrimary: true }; for (const [E, type] of [[PointerEvent, 'pointerdown'], [MouseEvent, 'mousedown'], [PointerEvent, 'pointerup'], [MouseEvent, 'mouseup'], [MouseEvent, 'click']]) box.dispatchEvent(new E(type, o)); })()`);
+        await until(`!!document.querySelector(${q(canvas + ' [aria-label="Who answers"]')})`);
+        await run(`document.querySelector(${q(canvas + ' [aria-label="Who answers"]')}).click()`);
+        await until(`!!document.querySelector(${q(popover)})`);
+      };
+      const closeAnswerMenu = async () => {
+        await run(`document.querySelector(${q(canvas + ' [aria-label="Who answers"]')}).click()`);
+        await until(`!document.querySelector(${q(popover)})`);
+      };
+      const pickWorkspace = async id => {
+        await run(`Array.from(document.querySelectorAll(${q(popover + ' button')})).find(b => b.textContent.trim() === 'Change…').click()`);
+        await until(`!!document.querySelector(${q(popover + ' [data-workspace-picker] [role=option]')})`);
+        await run(`Array.from(document.querySelectorAll(${q(popover + ' [data-workspace-picker] [role=option]')})).find(o => o.textContent.includes(${q(id)})).click()`);
+        await until(`!document.querySelector(${q(popover + ' [data-workspace-picker]')})`);
+        await waitFor(() => boardFile(boardId).workspace === id, 'the board to read ' + id);
+      };
+      await openAnswerMenu();
+      await check('the row counts the questions the board keeps', async () => {
+        await rowSays('Conversation | New conversation | 12 questions so far · the next continues it');
+      });
+      await capture('answer-conversation');
+
+      // Change… to the other workspace and back, in the open menu: main forgot the
+      // conversation at the first change, so there is none to continue after the second.
+      await pickWorkspace(otherId);
+      await pickWorkspace(wsId);
+      await check('a workspace changed and changed back leaves nothing to continue', async () => {
+        assert.equal(boardFile(boardId).conversations, undefined);
+        await rowSays('Conversation | The next answer starts it');
+      });
+      await closeAnswerMenu();
+
+      // New conversation from the keyboard: the button goes, the row keeps the focus, and
+      // the keys that follow are the menu's — Tab no longer adds a box, Enter no longer
+      // edits the selected one.
+      assert.equal((await whiteboards.setConversation(boardId, 'claude-code', talk(3))).ok, true);
+      await openAnswerMenu();
+      await rowSays('Conversation | New conversation | 3 questions so far · the next continues it');
+      const boxesBefore = await nodeCount();
+      await run(`Array.from(document.querySelectorAll(${q(popover + ' button')})).find(b => b.textContent.trim() === 'New conversation').focus()`);
+      key('Space');
+      await check('New conversation from the keyboard forgets it and keeps the focus in the menu', async () => {
+        await waitFor(() => resets.length > 0, 'the reset');
+        assert.deepEqual(resets, [[boardId, 'claude-code']]);
+        await rowSays('Conversation | The next answer starts it');
+        await waitFor(() => boardFile(boardId).conversations === undefined, 'the board file to forget it');
+        assert.equal(await run(`!!document.activeElement.closest(${q(popover)})`), true);
+      });
+      key('Enter');
+      await frames();
+      key('Tab');
+      await frames();
+      await sleep(300);
+      await check('Enter and Tab after it stay in the menu', async () => {
+        assert.equal(await nodeCount(), boxesBefore, 'Tab added no box');
+        assert.equal(await run(`!!document.querySelector(${q(popover)})`), true, 'the menu is still open');
+        assert.equal(await run('document.activeElement.isContentEditable'), false, 'Enter started no edit');
+        assert.equal(await run(`!!document.activeElement.closest(${q(popover)}) && document.activeElement.matches('button, [role=radio]')`), true,
+          await run('document.activeElement.outerHTML.slice(0, 120)'));
+      });
+      await closeAnswerMenu();
+
+      // A CLI too old to keep a conversation here (main says it is alone): its answers
+      // each stand alone, and there is nothing to start anew.
+      alone = 'codex';
+      answerStatus = cliStatus('codex');
+      window.webContents.send('sb:evt:answerStatus', answerStatus);
+      assert.equal((await whiteboards.setConversation(boardId, 'codex', talk(2))).ok, true);
+      await openAnswerMenu();
+      await check('a CLI that answers on its own says so', async () => {
+        await rowSays('Conversation | Each answer stands alone');
+      });
+      await closeAnswerMenu();
+      alone = null;
+      await whiteboards.setConversation(boardId, 'codex', null);
+      answerStatus = { ok: true, settings: {}, providers: [], keysSafe: {} };
+      window.webContents.send('sb:evt:answerStatus', answerStatus);
+      assert.equal(boardFile(boardId).workspace, wsId);
 
       await check('the renderer logged no errors', async () => {
         assert.deepEqual(errors, []);
@@ -797,7 +957,7 @@ if (!process.versions.electron) {
         assert.doesNotMatch(await run(`document.querySelector(${q(canvas + ' .react-flow__background circle')})?.getAttribute('r') || ''`), /NaN/);
       });
 
-      console.log('PASS — Whiteboards: rail screen and home, open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid square, exit and retry' +
+      console.log('PASS — Whiteboards: rail screen and home, open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid squares without whiteboards (old ones open Terminal), exit and retry, ✦ Answer\'s Conversation row (New conversation from the keyboard, a workspace changed and back, a CLI on its own)' +
         (known.length ? ` (${known.length} known bug${known.length === 1 ? '' : 's'}: ${known.join('; ')})` : ''));
     } catch (error) {
       await capture('failure').catch(() => {});

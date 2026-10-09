@@ -12,7 +12,8 @@
 //     store.json           folders, the workspace used last, the recent workspaces, the
 //                          one-time migration notice and the migration's own record
 //     boards/<id>.json     one whiteboard: { id, name, kind, folderId, workspace,
-//                          createdAt, updatedAt, archivedAt, migratedFrom?, spec }
+//                          createdAt, updatedAt, archivedAt, migratedFrom?,
+//                          conversations?, spec }
 //     documents/<id>.md    every whiteboard's Markdown documents, keyed by document id
 //     images/<sha>.<ext>   pictures, stored once by content and named in a spec as
 //                          sbimg://image/<file> — the scheme index.js serves from here
@@ -22,6 +23,16 @@
 // folder name is only ever data, never a path. A board also names the workspace ✦ Answer
 // reads for it; that is a rail workspace id, resolved to a folder by index.js and nowhere
 // else, so nothing stored here can point a CLI at an arbitrary path.
+//
+// A board also keeps ✦ Answer's conversations (answer.js says what they are): for each
+// CLI that has answered on it, the session or thread that every later answer continues,
+// as { id, workspace, dir, startedAt, lastAt, turns }. They sit beside the spec, never in
+// it — the spec is the admin's format — and they are bookkeeping, not an edit: writing
+// one leaves updatedAt alone and tells no screen. The id goes into a CLI's arguments, so
+// an entry is read back only when the id is a UUID and the rest is what answer.js could
+// have written; anything else reads as no conversation. A copy of a board starts
+// conversations of its own, and a board given another workspace forgets its own, since
+// they read the old one.
 //
 // The renderer validates a spec with the admin's own parser before it asks for a write
 // (lib/diagrams/validate.ts in the bundle); this module checks only what it has to in
@@ -117,6 +128,9 @@ const LEGACY_ROOT_RE = /^diagrams(?:-before-whiteboards(?:-\d+)?)?$/;
 
 const STORE_CHAIN = 'store';
 const NO_FOLDER = 'No folder';
+// The CLIs ✦ Answer keeps a conversation with (answer.js); a board keeps one of each.
+const CONVERSATION_PROVIDERS = ['claude-code', 'codex'];
+const CONVERSATION_DIR_MAX = 4096;
 
 let seq = 0;
 const chains = new Map();          // chain key → the promise the next job waits on
@@ -326,6 +340,36 @@ function checkSpec(spec) {
 
 function duplicateNameError(name, folder) {
   return `A whiteboard named “${name}” is already in “${folder ? folder.name : NO_FOLDER}” — pick another name`;
+}
+
+/**
+ * One CLI's conversation as a board keeps it, or null when it is not one answer.js could
+ * have written: the id a UUID (it becomes a CLI argument, so nothing else is ever handed
+ * back), the workspace an id as cleanWorkspace() takes it, the folder an absolute path,
+ * both times dates, and at least one question asked.
+ */
+function cleanConversation(raw) {
+  if (!isObject(raw) || !isUuid(raw.id)) return null;
+  const workspace = cleanWorkspace(raw.workspace);
+  if (!workspace || workspace !== raw.workspace) return null;
+  const dir = raw.dir;
+  if (typeof dir !== 'string' || !path.isAbsolute(dir) || dir.length > CONVERSATION_DIR_MAX) return null;
+  if (/[\u0000-\u001f\u007f]/.test(dir)) return null;
+  for (const at of [raw.startedAt, raw.lastAt]) {
+    if (typeof at !== 'string' || Number.isNaN(Date.parse(at))) return null;
+  }
+  if (!Number.isSafeInteger(raw.turns) || raw.turns < 1) return null;
+  return { id: raw.id.toLowerCase(), workspace, dir, startedAt: raw.startedAt, lastAt: raw.lastAt, turns: raw.turns };
+}
+
+/** A row's conversations, one per CLI, each null when there is none worth reading. */
+function conversationsOf(row) {
+  const raw = isObject(row) && isObject(row.conversations) ? row.conversations : {};
+  const out = {};
+  for (const provider of CONVERSATION_PROVIDERS) {
+    out[provider] = Object.prototype.hasOwnProperty.call(raw, provider) ? cleanConversation(raw[provider]) : null;
+  }
+  return out;
 }
 
 // ── store.json ──────────────────────────────────────────────────────────────
@@ -984,7 +1028,8 @@ function rename(id, name) {
 /**
  * The workspace ✦ Answer reads for this board, or null for none. Not an edit of the
  * board, so updatedAt stays; a workspace (not null) also becomes the one used last and
- * goes to the front of the recent list.
+ * goes to the front of the recent list. A real change forgets the board's conversations:
+ * they read the old workspace, and the next answer starts one in the new.
  */
 function setWorkspace(id, wsId) {
   if (!boardFile(id)) return Promise.resolve({ ok: false, error: 'Invalid whiteboard id' });
@@ -1003,6 +1048,7 @@ function setWorkspace(id, wsId) {
       const changed = cleanWorkspace(row.workspace) !== workspace;
       if (changed) {
         row.workspace = workspace;
+        delete row.conversations;
         await writeRow(row);
       }
       if (workspace) {
@@ -1053,7 +1099,9 @@ function move(id, folderId) {
 /**
  * A copy in the same folder with the same workspace, active, named "X copy" (then
  * "X copy 2", …). Every Markdown document the spec names is copied to a new file and the
- * copy points at that, so editing one board's document never edits the other's.
+ * copy points at that, so editing one board's document never edits the other's. The
+ * copy has no conversations: two boards continuing one CLI session would each find the
+ * other's questions in it.
  */
 function duplicate(id) {
   if (!boardFile(id)) return Promise.resolve({ ok: false, error: 'Invalid whiteboard id' });
@@ -1083,6 +1131,7 @@ function duplicate(id) {
         spec,
       });
       delete copy.migratedFrom;
+      delete copy.conversations;
       await writeRow(copy);
       if (touchFolder(store, folderId)) await saveStoreQuietly(loaded, 'mark the folder touched');
       emit('duplicate', copy.id, folderId);
@@ -1170,6 +1219,68 @@ function remove(id) {
     } catch (err) {
       if (err && err.code === 'ENOENT') return { ok: false, error: 'Whiteboard not found' };
       return { ok: false, error: `could not delete that whiteboard: ${why(err)}` };
+    }
+  });
+}
+
+// ── ✦ Answer's conversations ────────────────────────────────────────────────
+
+/** One CLI's conversation on a board: { ok, data } with the entry, or null for none. */
+async function conversation(id, provider) {
+  if (CONVERSATION_PROVIDERS.indexOf(provider) === -1) return { ok: false, error: 'that provider keeps no conversation' };
+  const all = await conversations(id);
+  return all.ok ? { ok: true, data: all.data[provider] } : all;
+}
+
+/** Both CLIs' conversations on a board: { ok, data: { 'claude-code', codex } }, each null for none. */
+async function conversations(id) {
+  const file = boardFile(id);
+  if (!file) return { ok: false, error: 'Invalid whiteboard id' };
+  try {
+    const row = await readBoardFile(file);
+    if (!row) return { ok: false, error: 'Whiteboard not found' };
+    if (row.broken) return { ok: false, error: 'That whiteboard file is not valid JSON' };
+    return { ok: true, data: conversationsOf(row) };
+  } catch (err) {
+    return { ok: false, error: `could not read that whiteboard: ${why(err)}` };
+  }
+}
+
+/**
+ * Keep `entry` as the board's conversation with `provider`, or forget it (null). On the
+ * store chain like every board write, reading the row again inside it, so it can never
+ * undo an autosave nor be undone by one. Not an edit of the board: updatedAt stays and no
+ * change is emitted, so an open editor never reloads for it. Answers the entry kept.
+ */
+function setConversation(id, provider, entry) {
+  if (!boardFile(id)) return Promise.resolve({ ok: false, error: 'Invalid whiteboard id' });
+  if (CONVERSATION_PROVIDERS.indexOf(provider) === -1) {
+    return Promise.resolve({ ok: false, error: 'that provider keeps no conversation' });
+  }
+  let next = null;
+  if (entry !== null && entry !== undefined) {
+    next = cleanConversation(entry);
+    if (!next) return Promise.resolve({ ok: false, error: 'that is not a conversation ✦ Answer could have kept' });
+  }
+  return serialStore(async () => {
+    try {
+      const found = await rowFor(id);
+      if (found.error) return { ok: false, error: found.error };
+      const { row } = found;
+      const kept = conversationsOf(row);
+      kept[provider] = next;
+      // Only the entries worth reading go back: anything malformed is dropped on the way.
+      const out = {};
+      for (const p of CONVERSATION_PROVIDERS) if (kept[p]) out[p] = kept[p];
+      const want = Object.keys(out).length ? out : undefined;
+      // Already so (forgetting one there is none of, say): no write at all.
+      if (JSON.stringify(want) === JSON.stringify(row.conversations)) return { ok: true, data: next };
+      if (want) row.conversations = want;
+      else delete row.conversations;
+      await writeRow(row);
+      return { ok: true, data: next };
+    } catch (err) {
+      return { ok: false, error: `could not keep that whiteboard's conversation: ${why(err)}` };
     }
   });
 }
@@ -1863,6 +1974,9 @@ module.exports = {
   duplicate,
   setArchived,
   remove,
+  conversation,
+  conversations,
+  setConversation,
   createFolder,
   renameFolder,
   removeFolder,

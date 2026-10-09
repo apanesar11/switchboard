@@ -386,8 +386,8 @@ Optional configuration fields:
   `links` override matching repo links. No command or port inventory ships by default.
 - `terminal.appearance`, `sidebar.visible`, and `grid.views` store UI preferences.
   Each grid view has an `id`, `name`, and four `cells` (workspace IDs, absolute folder
-  paths, or null). Which whiteboard a Grid square shows is not here: it is this Mac's
-  arrangement, in localStorage (§4.10).
+  paths, or null). Whether a Grid square shows Terminal or Changes is not here: it is
+  this Mac's choice, in localStorage (§4.10).
 - `answer` is the ✦ Answer block (§4.18): who answers, the models and efforts, Web
   access and Subtext. Never a key — those are in `keys.json`.
 
@@ -744,7 +744,9 @@ Markdown documents, arranged by hand, Tab for the next box — in the admin's ow
 saved as you go. A whiteboard belongs to no workspace: boards live in folders the user
 makes, and each board names the one workspace its ✦ Answer reads (§4.18). Terminals float
 over a board or are pinned to it — any number, one per workspace — and each is still that
-workspace's own shell (R8, R15). The renderer side is R15; who answers ✦ Answer is §4.18.
+workspace's own shell (R8, R15). Since a board is not one workspace's, it is not in the
+Grid either (2026-10-09): it has its own screen, never a square (§4.10). The renderer
+side is R15; who answers ✦ Answer is §4.18.
 What the user reads says whiteboard; the internal names — `src/diagrams`, `SBDiagrams`,
 `DiagramsPage`, `build:diagrams`, `test:diagrams` and the `sb:diagrams:*` channels kept
 below — stay as they were.
@@ -796,7 +798,7 @@ Rename** (`RenameDiagramDialog.tsx`) writes the name and nothing else. And the i
 tool is a menu — a file, or **Google Images** (G): Google's own results in a panel docked
 on the canvas's right, whose pictures drag straight onto it (below). The tool rail fits
 the canvas's height (`data-rail-fit`): at full size, `compact` (28px tools packed closer),
-or in two `columns` on a canvas shorter still — a Grid square, a small window — where
+or in two `columns` on a canvas shorter still — a small window — where
 what a tool opens sits beside the whole rail rather than over the next column; it never
 runs off the canvas with its first tools out of reach. Full screen re-frames the drawing
 by hand, not with `fitView`'s d3 transition, which measures the pane a frame or two late
@@ -830,8 +832,10 @@ whiteboards/
   store.json          { version: 1, folders: [Folder], lastWorkspace, recentWorkspaces,
                         notice: { boards, folders, dismissed } | null, migration: {…} | null }
   boards/<id>.json    one board: the admin's row { id, name, kind, createdAt, updatedAt,
-                      archivedAt, spec } minus the product, plus folderId, workspace and,
-                      on a migrated one, migratedFrom: { legacyKey, workspace }
+                      archivedAt, spec } minus the product, plus folderId, workspace,
+                      on a migrated one, migratedFrom: { legacyKey, workspace }, and once
+                      a CLI has answered on it, conversations: { 'claude-code'?, codex? },
+                      each { id, workspace, dir, startedAt, lastAt, turns } (§4.18)
   documents/<id>.md   every board's Markdown documents, keyed by document id
   images/<sha>.<ext>  pictures, kept once by content (below)
 ```
@@ -868,9 +872,9 @@ empty folder, the user asked to delete.
 | `sb.whiteboardsCreate(req)` | `sb:wb:create` | `req = { folderId, name, spec, workspace? }` → `{ ok, data: Whiteboard + spec }`. `folderId` null is No folder; `workspace` left out starts the board with the workspace a new board starts with (below), null with none. A name already in that folder: `A whiteboard named “X” is already in “F” — pick another name` |
 | `sb.whiteboardsSaveSpec(id, spec)` | `sb:wb:saveSpec` | the autosave: `{ ok, data: Whiteboard }` — the spec only, never the name; `updatedAt` moves |
 | `sb.whiteboardsRename(id, name)` | `sb:wb:rename` | `{ ok, data: Whiteboard }` — the name only, unique in its folder; `updatedAt` moves |
-| `sb.whiteboardsSetWorkspace(id, wsId)` | `sb:wb:setWorkspace` | `{ ok, data: Whiteboard }` — the workspace ✦ Answer reads for it, or null. Not an edit of the board: `updatedAt` stays. A workspace (not null) also becomes the one used last and leads the recent ones |
+| `sb.whiteboardsSetWorkspace(id, wsId)` | `sb:wb:setWorkspace` | `{ ok, data: Whiteboard }` — the workspace ✦ Answer reads for it, or null. Not an edit of the board: `updatedAt` stays. A workspace (not null) also becomes the one used last and leads the recent ones. A real change forgets the board's ✦ Answer conversations (§4.18): they read the old workspace |
 | `sb.whiteboardsMove(id, folderId)` | `sb:wb:move` | `{ ok, data: Whiteboard }` — into a folder, or No folder (null); `updatedAt` stays. Refused onto a name that folder already has: `A whiteboard named “X” is already in “F” — rename it first` |
-| `sb.whiteboardsDuplicate(id)` | `sb:wb:duplicate` | `{ ok, data: Whiteboard + spec }` — beside it, in the same folder with the same workspace, active, named `X copy` (then `X copy 2`, …). Every document its spec names is copied to a new file — read from the old tree when only it has one (below) — and the copy points at that |
+| `sb.whiteboardsDuplicate(id)` | `sb:wb:duplicate` | `{ ok, data: Whiteboard + spec }` — beside it, in the same folder with the same workspace, active, named `X copy` (then `X copy 2`, …). Every document its spec names is copied to a new file — read from the old tree when only it has one (below) — and the copy points at that. The copy has no ✦ Answer conversations: two boards continuing one CLI session would each find the other's questions in it |
 | `sb.whiteboardsArchive(id, archived)` | `sb:wb:archive` | `{ ok, data: Whiteboard }` — `updatedAt` does not move, so archiving reshuffles nothing |
 | `sb.whiteboardsDelete(id)` | `sb:wb:delete` | `{ ok, data: { id } }` — for good, the board's own file and nothing else; the confirmation dialog is the gate |
 | `sb.whiteboardsCreateFolder(name)` | `sb:wb:createFolder` | `{ ok, data: Folder }`, or `A folder named “F” already exists` |
@@ -1013,12 +1017,11 @@ real `~/.switchboard`.
 
 **The bundle's seam is one board.** `window.SBDiagrams.create(element, props)` makes an
 editor for exactly `props.boardId` and never opens another on its own. Props: `boardId`;
-`active` (false while off screen, or while another Grid square has the keyboard);
+`active` (false while off screen);
 `onOpenSettings`; `onOpenBoard(id)` (the quick switcher, ← / →, New whiteboard and
-Duplicate — the host changes the route); `onClosed(folderId, info?)` (after Delete, and
-Back on a board that no longer exists or can't be read — `info.missing` true only for one
-that is gone, deleted or not found, false for one that merely couldn't be read and may
-open again; only `missing` lets the host refuse the board from then on);
+Duplicate — the host changes the route); `onClosed(folderId)` (after Delete, and Back on
+a board that no longer exists or can't be read — the host lets the canvas go and shows
+the list it was in; one that merely couldn't be read opens again from there once fixed);
 `onBoardChange(board, folder)` (after the load and every
 write — the host's breadcrumb and status line); `onDirty(count)`;
 `onFullscreenChange(open)`; `terminals` (the host's list, `{ wsId, open, minimized,
@@ -1049,8 +1052,8 @@ global adds `flush()` (every board, parked ones included), `refreshAnswers(fresh
 
 `DiagramsPage.tsx` is that one board. It fetches the board first and draws it without
 waiting for the folder list. A board that has gone says `This whiteboard no longer
-exists`, with Back (`onClosed(…, { missing: true })`); one that cannot be read, `This
-whiteboard can't be opened` over main's reason, with Back (`{ missing: false }`) and
+exists`, with Back (`onClosed(…)`); one that cannot be read, `This
+whiteboard can't be opened` over main's reason, with Back and
 **Try again**, which reads it again — as does the board coming back on screen still in
 that state — so a file fixed by hand opens without a restart while the host keeps the
 canvas. A spec that no longer parses still opens, so Rename, Move, Archive and Delete
@@ -1282,7 +1285,9 @@ main's own, and runs `fetchImage` itself, with Node's fetch standing in for the 
 Condense uses the same provider and request lifecycle, with `operation: 'condense'`
 on `sb.answerStart`. Main validates this operation and disables web access regardless
 of saved Answer settings. Claude Code receives no built-in tools; Codex keeps its
-read-only sandbox with web search disabled. Every provider is instructed to condense
+read-only sandbox with web search disabled, asked exactly as before the conversations
+(no `--ephemeral`, which a Codex as old as 0.92 refuses). A condensation is never part of
+a board's conversation. Every provider is instructed to condense
 only the supplied discussion, without researching new facts. A condensation reads no
 file, so it never needs a workspace: a CLI condenses in the board's workspace folder
 when it has one, and in the system's temp folder when it has none or that one has left
@@ -1295,8 +1300,8 @@ of four, chosen per Mac — the user has Claude Code on one laptop and Codex on 
 
 | provider | what it is | sees |
 |---|---|---|
-| `claude-code` | `claude -p` in the board's workspace folder, `--tools Read,Grep,Glob` (plus `WebFetch,WebSearch` with Web access) and nothing else, `--permission-mode dontAsk`, prompt on stdin, `--json-schema` for the answer, `--output-format stream-json` for the steps | the code of the board's workspace |
-| `codex` | `codex exec --json --sandbox read-only -c web_search="live"\|"disabled" --cd <folder> --output-schema … --output-last-message …` | the code of the board's workspace |
+| `claude-code` | `claude -p` in the board's workspace folder, `--tools Read,Grep,Glob` (plus `WebFetch,WebSearch` with Web access) and nothing else, `--permission-mode dontAsk`, prompt on stdin, `--json-schema` for the answer, `--output-format stream-json` for the steps; `--no-session-persistence`, or for an answer a turn of the board's conversation (below) | the code of the board's workspace |
+| `codex` | `codex exec --json --sandbox read-only -c web_search="live"\|"disabled" --cd <folder> --output-schema … --output-last-message …`; for an answer after the board's first, `exec resume` (below) | the code of the board's workspace |
 | `claude-api` | the Messages API, the answer as structured output (`output_config.format`, the schema) — not a forced tool call, which Opus 5.5, Sonnet 5.5 and Fable 5.1 refuse with a 400 — plus `web_search_20250305` / `web_fetch_20250910` with Web access, a paused turn (`pause_turn`) sent back to carry on | only the whiteboard |
 | `openai-api` | the Responses API with the admin's json_schema format, streamed, the admin's models and probed efforts, plus `{type:'web_search'}` with Web access | only the whiteboard |
 
@@ -1336,13 +1341,17 @@ reads the model and effort from the stored settings, never from the request.
 | `sb.answerSetSettings(patch)` | `sb:answer:setSettings` | the status, after merging `{ provider, split, context, web, subtext, claudeCodeEffort, claudeApiModel, openaiModel, openaiEffort }` |
 | `sb.answerSetKey(provider, key)` | `sb:answer:setKey` | the status — after the provider accepted the key (`GET /v1/models`); a refused key is never stored and answers `{ ok:false, error, code:'bad-key' }` |
 | `sb.answerRemoveKey(provider)` | `sb:answer:removeKey` | the status |
-| `sb.answerStart(id, req)` | `sb:answer:start` | `{ ok, text, files? }` — the answer's JSON, which the bundle reads into boxes — or `{ ok:false, error, code }`, `code` one of `missing`, `signed-out`, `no-key`, `bad-key`, `timeout`, `stopped`, `no-workspace`. `req`: `{ provider, wsId, system, user, schema, operation? }` — `wsId` is the board's workspace, or null; `operation: 'condense'` for ✦ Condense |
-| `sb.answerStop(id)` | `sb:answer:stop` | `{ ok }` — the CLI's whole process group, or the request |
+| `sb.answerStart(id, req)` | `sb:answer:start` | `{ ok, text, files?, conversation? }` — the answer's JSON, which the bundle reads into boxes, and for a CLI's turn of the board's conversation `{ turns, resumed }` (how many questions it holds now, and whether this one continued it) — or `{ ok:false, error, code }`, `code` one of `missing`, `signed-out`, `no-key`, `bad-key`, `timeout`, `stopped`, `no-workspace`. `req`: `{ provider, wsId, system, user, schema, operation?, boardId? }` — `wsId` is the board's workspace, or null; `operation: 'condense'` for ✦ Condense; `boardId` the board asking, sent with an answer and never with a condense |
+| `sb.answerStop(id)` | `sb:answer:stop` | `{ ok }` — the CLI's whole process group, or the request; an answer still waiting its turn leaves the line, nothing spawned |
+| `sb.answerConversation(boardId)` | `sb:answer:conversation` | `{ ok, data: { 'claude-code', codex }, alone? }`, each null or `{ turns, startedAt, lastAt, workspace }` — never the session id nor the folder, and null for one whose workspace has another folder now; `alone: ['codex']` once Codex has been found too old to resume (its entry then null); `{ ok:false, error }` for a board id that is not a UUID |
+| `sb.answerResetConversation(boardId, provider?)` | `sb:answer:resetConversation` | `{ ok }` — the board forgets its conversation with `provider` (`'claude-code'` or `'codex'`), or with both when it is left out, and its next answer starts one; any other provider is refused |
 
 `sb:evt:answerStep` carries `(id, { kind, text, target })` for every tool call a CLI
 makes — "Reading lib/diagrams/ai.ts", "Opening example.com/docs" — which the canvas shows
 in a card over its strip, so a minute's wait never looks stuck. The OpenAI API reports its
-finished web searches the same way, and gets the card once it has one. `sb:evt:answerStatus` goes out after every change,
+finished web searches the same way, and gets the card once it has one. An answer waiting
+its turn behind another on the same board says so first, with a `wait` step (below).
+`sb:evt:answerStatus` goes out after every change,
 wherever it was made, so the ✦ Answer menu and the Settings screen never disagree.
 
 **Which workspace a CLI reads is the board's** (2026-10-08, with Whiteboards). A
@@ -1361,8 +1370,8 @@ Boxes already answered keep their tag.` With an API selected the row is dimmed a
 `Claude API and OpenAI API see only the whiteboard`; while condensing it is not there.
 Each provider's line says what it would do — a CLI `Reads sample-2 first, then answers`
 (or `Pick a workspace to read`), an API `<model> · sees only the whiteboard · fast` — and
-the menu's footer `A box for each part an answer has. Workspace is kept with this
-whiteboard; the rest on this Mac.`
+the menu's footer `A box for each part an answer has. Workspace and conversation are
+kept with this whiteboard; the rest on this Mac.`
 
 The workspace is taken when the box asks, not when the answer lands, and every box the
 answer adds carries it as `answeredIn`: the small tag hanging under the box's corner (a
@@ -1388,6 +1397,111 @@ Terminal opens a terminal floating over the board, in the workspace the answer w
 read. A CLI ask whose workspace resolved makes that the workspace used last and puts it
 first in the recent ones (`whiteboards.noteWorkspace(wsId, { last: true })`, not
 awaited), so the next new board starts with it.
+
+**A CLI's answers on one whiteboard are one conversation** (2026-10-09, the user's ask:
+"I want the CLI to continue the existing conversation", one per chart). Every ✦ Answer
+from Claude Code or Codex on a board, from any box, continues one Claude Code session or
+Codex thread kept for that board, so the CLI asked about one branch already knows what it
+read and said for the others; only a board with no conversation with that CLI yet starts
+one. The APIs still take each question on its own, and a condensation is never part of a
+conversation. The editor sends the board's id with an answer (`boardId`, never with a
+condense), and `answer.start()` makes it a turn only for a CLI, an answer, a board id
+that is a UUID and a workspace that resolved to a folder — anything else is asked exactly
+as before.
+
+The board keeps one entry per CLI in its own file (`conversations`, §4.17): `{ id,
+workspace, dir, startedAt, lastAt, turns }`, written by `whiteboards.setConversation()` on
+the store's chain. It is bookkeeping, not an edit: `updatedAt` stays and no `wbChanged`
+goes out, so an open editor never reloads for it. The id goes into a CLI's arguments, so
+an entry is read back only when the id is a UUID and the rest is what `answer.js` could
+have written; anything else reads as no conversation and is dropped on the next write.
+An answer continues the kept one only when it was had in the same workspace and the same
+folder — one about another workspace's code would answer about the wrong code — and
+otherwise starts a new one, kept in its place once it has answered. A turn that fails or
+is stopped changes nothing: a new one is not kept, a continued one keeps its place. One
+the CLI no longer has (cleaned out, deleted by hand: Claude Code's `No conversation found
+with session ID`, Codex's `no rollout found for thread id`) is forgotten, and the same
+question goes again as a new one in the same job. A duplicate starts with none, a real
+workspace change forgets them, and a deleted board takes them with its file.
+
+| CLI | the first answer on a board | every answer after it |
+|---|---|---|
+| `claude-code` | the flags above without `--no-session-persistence`, plus `--session-id <a UUID chosen here>`, `--name "Whiteboard · <board name>"` (what the session is called wherever it is listed) and `--system-prompt-snapshot off`, with `CLAUDE_CODE_ENTRYPOINT=sdk-cli` (below) | `--resume <id>` and `--system-prompt-snapshot off`, the same entrypoint; the tools, dontAsk and the schema are given at every launch |
+| `codex` | `codex exec` as above; the id is the one `thread.started` names | `codex exec --sandbox read-only resume --json --skip-git-repo-check -c sandbox_mode="read-only" -c web_search=… --output-schema … --output-last-message … -- <id> <prompt>`, spawned in the folder (`resume` has no `--cd`) |
+
+`--system-prompt-snapshot off` because Claude Code otherwise records the system prompt —
+`--append-system-prompt` included — on a conversation's first request and sends that
+record on every resume, whatever later launches pass, and ours changes from one question
+to the next (Web access, Subtext): probed, a resume without it answered from the first
+turn's prompt. A Claude Code too old for `--system-prompt-snapshot` or `--name` (commander's
+`unknown option`) is asked once more without it, and that is remembered until the app
+quits. Read-only twice for Codex because `codex exec resume` keeps no sandbox of its own:
+a resumed thread takes whatever `config.toml` says, `danger-full-access` included, which
+a probe saw write a file. So it gets exec's own `--sandbox read-only` ahead of the
+subcommand and `-c sandbox_mode="read-only"`, each seen to hold a resumed turn read-only
+on its own; the id and the prompt follow `--`, and an id that is not a UUID is never
+passed. Each turn is also told it is one (`conversationPrompt()`): its earlier questions
+may be on other branches, boxes may have been edited, moved or deleted since, and the
+boxes sent now win wherever they disagree with an earlier turn.
+
+A Codex too old for that resume refuses it in clap's words, exit 2, before it asks
+anything: `exec resume` takes `--output-schema` only from 0.132 — codex-cli 0.92, 0.114
+and 0.128 all say `error: unexpected argument '--output-schema' found` (probed with the
+real binaries, a scratch `CODEX_HOME`). The first refused resume (`CODEX_REFUSED_RE`) is
+how it is found out: that board's thread, which can never be continued here, is
+forgotten, and the same question is asked again at once on its own — the prompt without
+`conversationPrompt()`, kept nowhere — exactly as before conversations. From then until
+the app quits every Codex answer is asked that way, in no line (`cliAlone()`), and
+`answerConversation` lists Codex under `alone`, so the menu says its answers stand
+alone. An answer already waiting behind the refused one goes on its own too.
+
+A Claude Code session is kept where Claude Code keeps the workspace's own
+(`~/.claude/projects/<the folder's slug>/`), so every turn is recorded as print mode's:
+`CLAUDE_CODE_ENTRYPOINT=sdk-cli`, what `-p` takes when nothing says otherwise, set on the
+turn whatever the app was started from. An interactive `claude --continue` or `claude
+--resume` in that folder passes over such sessions, so a board's conversation never
+comes back in place of the user's own coding session — probed 2026-10-09 with 2.1.296
+(its debug log: `filtered from /resume: entrypoint=sdk-cli`; `--continue` said `No
+conversation found to continue`), while a session recorded under an inherited
+`claude-vscode` was taken by `--continue`. `claude -p --continue`, itself print mode,
+would pick it, and so would a Claude Code from before that filter (2.1.83 has none). The
+session is not moved to a folder of the app's own, with `--add-dir` for the workspace,
+to keep it out of the way: run from anywhere else, Claude Code no longer reads the
+workspace's `.claude/settings.json`, and a `deny` there stops holding — probed, a
+`Read(./secret.txt)` deny refused the read with the workspace as the folder and let it
+through from another one with `--add-dir`, even with that file handed over as
+`--settings`.
+
+A conversation takes one question at a time, so the answers on one board and CLI wait in
+line in the order they were asked — a lane each, in memory only — while other boards and
+the other CLI answer meanwhile. One that has to wait sends `{ kind: 'wait', text:
+'Waiting for the answer before it', target: '' }`, then `{ kind: 'think', text:
+'Thinking' }` once its turn comes, so the card never goes on saying it waits. Stop takes
+it out of the line at once, spawning nothing and holding up nobody behind it; its 5
+minutes start only when its CLI does; `stopAll()` stops the waiting ones too. The card
+shows a wait with a clock rather than a spinner — `Claude Code is waiting to read
+sample-2`, `Answers on one whiteboard take turns, so each continues its conversation.` —
+and `Waited its turn` once it is over; the strip's note afterwards (`read 6 files in
+41s`) is timed from the turn, not the line.
+
+The who-answers menu says where it has got to in a row under Web access, **Conversation**
+(`ConversationRow`, the height of a switch row, not there while condensing): with a CLI
+that has one, `3 questions so far · the next continues it` and **New conversation**
+(`answerResetConversation(boardId, cli)`), after which the next answer starts afresh; with
+none, `The next answer starts it`; while main's word on a workspace changed in the open
+menu is on its way, `Workspace changed · the next starts anew`; with an API, or a CLI main
+lists as `alone` (a Codex too old to resume), dimmed, `Each answer stands alone`, so the
+menu keeps its height as the provider changes. It asks main as the menu opens, when the
+board's workspace changes in it — main forgets the conversations then, so a change and a
+change back leaves none to continue — and after every CLI answer (`ai-client.ts`:
+`useBoardConversation`, `refreshBoardConversation`, `resetBoardConversation`, each
+board's newest word winning over an older reply). New conversation leaves the focus on
+the row, still in the menu, and the canvas's keys pass by anything in an open menu or
+panel (`[data-flow-popover]` beside the controls in FlowEditor's `inControl`): Tab moves
+on through the menu rather than adding a box, Enter edits nothing. Main never hands the page a session id or a folder, and reports
+none for a conversation whose workspace now resolves to another folder, since the next
+answer would start anew there. A reset while that CLI's answer is on its way lets the
+answer land and writes nothing back: each lane has a generation that a reset moves.
 
 **Keys never touch config.json.** `safeStorage` (the Keychain) encrypts them into
 `<config dir>/keys.json` (mode 0600) beside the last four characters, which are all the
@@ -1418,7 +1532,8 @@ sb.onDiagramsFlush((id) => {})       // 'sb:evt:diagramsFlush' — save every bo
                                      // answer sb:diagrams:flushed with the same `id`; §4.17
 sb.onWhiteboardsChanged((change) => {}) // 'sb:evt:wbChanged' — {reason, boardId?, folderId?} after
                                      // every write to the whiteboards store; §4.17, R2
-sb.onAnswerStep((id, step) => {})    // 'sb:evt:answerStep' — what a CLI answering a box is doing; §4.18
+sb.onAnswerStep((id, step) => {})    // 'sb:evt:answerStep' — what a CLI answering a box is doing, or
+                                     // that it waits its turn on the board (kind 'wait'); §4.18
 sb.onAnswerStatus((status) => {})    // 'sb:evt:answerStatus' — who can answer, after any change; §4.18
 sb.onOpenSettings(() => {})          // 'sb:evt:openSettings' — App ▸ Settings… (⌘,)
 sb.onDiagramsImageOffer((offer) => {}) // 'sb:evt:diagramsImageOffer' — {guestId, url, fallback, referrer}:
@@ -1646,26 +1761,21 @@ puts that workspace in the square, not a second shell in its folder under anothe
 A folder that has since gone shows the shell's own sentence with Try again, and Edit
 takes it out.
 
-**A workspace square shows Terminal, Changes, or a whiteboard.** The three mode buttons
-live in its 30px header. Changes uses the workspace page's repository summary and shows
-compact green addition and red deletion counts in its button. **Show a whiteboard**
-(`data-grid-mode="whiteboard"`) shows any board — a square is no longer limited to its
-workspace's — and the board's live canvas is the very one its own screen shows, moved
-into the square (`SB.views.whiteboards.mountGrid`), with its quick switcher, full-screen
-control and terminals. With no board chosen yet the square is a picker with a search
-box: the boards whose workspace is the square's first, then Recent, then each folder,
-then No folder, each board once; archived boards and boards another square of this view
-already shows are left out, since one board is one canvas and cannot be in two squares.
-A chevron beside the mode buttons (**Change whiteboard**) picks again. A board switched
-from inside its square (its switcher, ← / →, New whiteboard, Duplicate) keeps the
-keyboard there; Back on one that can't be read sends its square back to choosing with
-the board still offered, and Delete or one that has gone, without it (R10). The chosen
-mode is stored per workspace in localStorage (`switchboard.grid.cellMode`) and follows
-it across Grid views; the chosen board likewise (`switchboard.grid.cellBoard`), keyed by
-the square's workspace. `GridView` is untouched. A square saved as `diagrams` — its
-workspace's Diagrams tab, before Whiteboards — reads as a whiteboard square and takes
-that workspace's most recently edited board. Older saved Notes choices are ignored;
-those squares start on Terminal. Folder squares remain Terminal-only.
+**A workspace square shows Terminal or Changes.** The two mode buttons live in its 30px
+header. Changes uses the workspace page's repository summary and shows compact green
+addition and red deletion counts in its button. The chosen mode is stored per workspace
+in localStorage (`switchboard.grid.cellMode`) and follows it across Grid views;
+`GridView` is untouched. Folder squares remain Terminal-only.
+
+**No square shows a whiteboard** (2026-10-09, the user's ask: "Let's get rid of that
+feature"). A square could once show any board, its live canvas moved in from the board's
+own screen — but a board is not one workspace's: it floats or pins terminals for any
+number of them (§4.17), so a square that belongs to one workspace was the wrong home for
+it. A board has its own screen and full screen, and nothing else. Squares saved before
+— `whiteboard`, and `diagrams` from the workspace's old Diagrams tab — open Terminal,
+and grid.js clears them out of `switchboard.grid.cellMode` as it loads, with the board
+each one showed (`switchboard.grid.cellBoard`, removed outright). Older saved Notes
+choices are ignored the same way, and those squares start on Terminal too.
 
 `views/terminal.js` keeps one xterm and one shell per workspace. `mount(wsId, into)`
 moves that same host into a route's screen — a Grid square or the workspace's own
@@ -1673,21 +1783,20 @@ Terminal tab — and takes it unconditionally, as the only screen on show; nothi
 duplicated and nothing restarts when a square changes mode. Measured: the host element
 in the square is the host element on the Terminal tab, the marker typed in one is in the
 other, and the shell's `startedAt` is unchanged across the round trip. A whiteboard's
-terminals take the same host with `place()`, which yields to whoever has it (R8): a
-board in one square and a Terminal square for the same workspace are on screen together,
-and two hosts that both took it on every render would bounce it between them. Taking a
+terminals take the same host with `place()`, which yields to whoever has it on screen
+(R8): two hosts that both took it on every render would bounce it between them. Taking a
 workspace out of a square — only from the `⋯`'s Edit, R10 — leaves its shell running.
 
 Three rules in `app.js` follow from that:
 
 * `retirePanes()` keeps a workspace shell for any square in the current view, including
-  one showing Changes or a whiteboard, and for any terminal a whiteboard on screen is
+  one showing Changes, and for any terminal a whiteboard on screen is
   showing (`SB.views.whiteboards.terminalShown`). It walks the folder ids main's shell
   states carry as well as the rail's workspaces, so a folder square's pane is retired
   like any other once its shell has exited and it has left its square.
 * A bell is read only while that workspace's Terminal is visible: `bell()` ignores
   a Terminal-mode Grid square and `renderMain()` clears its bell, as on the workspace's
-  Terminal tab. Changes and whiteboard squares keep unread bells until Terminal is shown.
+  Terminal tab. A Changes square keeps unread bells until Terminal is shown.
   A whiteboard's terminals are read only while the keyboard is in one
   (`SB.views.whiteboards.terminalFocused`): several can be open over a board at once,
   and the blue dot on a panel that is merely open is how the user learns which of them
@@ -1946,7 +2055,8 @@ half-drawn TUI. `closeAll()` at quit *detaches* (SIGHUP to the client, which tmu
 as detach); `close()` is `kill-session`. A client that ends unasked means the session is
 gone — the user typed `exit`, and tmux prints `[exited]` first — or it was detached
 under us, in which case it just gets a new client. Without tmux, everything is the old
-way: a bare `zsh -l`, hung up at quit, and `claude --continue` resumes.
+way: a bare `zsh -l`, hung up at quit, and `claude --continue` resumes — the user's own
+session, never a whiteboard's ✦ Answer conversation in the same folder (§4.18).
 
 Things the config gets right that took measuring: the server exits the moment it has
 no sessions (`exit-empty`), so `-f` rides on EVERY command — the one that happens to
@@ -2013,7 +2123,11 @@ are refused, and that a folder the Trash will not take is left alone.
 ### M10 `whiteboards.js`
 The Whiteboards store (§4.17), which replaced the per-workspace `diagrams.js`: `list()`,
 `get(id)`, `create(req)`, `saveSpec`, `rename`, `setWorkspace`, `move`, `duplicate`,
-`setArchived`, `remove`; `createFolder`, `renameFolder`, `removeFolder`;
+`setArchived`, `remove`; `conversation(id, provider)`, `conversations(id)` and
+`setConversation(id, provider, entry | null)` — ✦ Answer's conversation with each CLI,
+kept in the board file beside the spec (§4.18), written on the same chain without
+touching `updatedAt` or telling any screen, dropped by `duplicate()` and by a real
+`setWorkspace()` change, and never in a summary or `get()`; `createFolder`, `renameFolder`, `removeFolder`;
 `dismissNotice()`, `noteWorkspace(wsId, {last})`, `workspaceChoices()`;
 `createDocument`, `getDocument`, `saveDocument`; `saveImage(bytes, type)`,
 `imagePath(name)` (synchronous, for the `sbimg` handler), `getImagePath(src)` and
@@ -2036,15 +2150,26 @@ workspace a new board starts with as workspaces leave the rail, every migration 
 (a clash, a stop part way and the resume, a run that renamed the tree and stopped before
 saying so, an unreadable file, a hash that names no workspace, a second run, a copy a
 crash cut short, a disk without hard links, a document brought in from the old tree on
-its first open) — with the stylesheet scoping from `build-diagrams.js`.
+its first open), the conversations (kept across saves, renames, moves and archiving,
+dropped by a duplicate and a workspace change, a malformed entry read as none, an
+autosave racing a conversation write) — with the stylesheet scoping from
+`build-diagrams.js`.
 
 ### M11 `answer.js`
 ✦ Answer (§4.18): `status({fresh})`, `settings()`, `setSettings(patch)`, `setKey`,
-`removeKey`, `start(id, req, onStep)`, `stop(id)`, `stopAll()`, and
+`removeKey`, `start(id, req, onStep, opts)`, `stop(id)`, `stopAll()`,
+`conversation(boardId, { conversations, lookup? })`, `resetConversation(boardId,
+provider?, { conversations })`, and
 `resolveAnswerDir(req, lookup)` → `{ ok, dir, wsId }` or `{ ok:false, code:'no-workspace',
 error }` — the folder a CLI answer runs in, from the board's workspace through the rail's
 own `lookup`; an API gets `dir: null` without one, and a condensation the temp folder
-when there is no workspace (`cliDir()`). The provider catalogue —
+when there is no workspace (`cliDir()`). `opts.conversations` is where a board's
+conversations are kept — `{ get, set, name? }`, which `index.js` builds on
+`whiteboards.conversation` / `setConversation` / `get` — and with it a CLI's answer that
+names its board is a turn of that board's conversation (`conversationFor`, `converse`,
+`conversationTurn`): one lane per board and CLI, in memory, so the answers on it take
+turns, and a generation per lane that a reset moves, so a turn already on its way never
+writes back a conversation just forgotten. The provider catalogue —
 the admin's OpenAI models with their probed efforts, the Claude models, Claude Code's
 `--effort` levels — is here and only here; the menu and the Settings screen draw what
 `status()` says. Each provider is one function that turns `{ system, user, schema }` into
@@ -2056,9 +2181,28 @@ act on. Each provider's request is built by a pure function (`claudeCodeArgs`,
 (`claudeAnswerText`, `readOpenAiStream`), so `scripts/test-answer.js` (`npm run
 test:diagrams`) checks them with Electron stubbed — Web access and Subtext included, with
 the bundle's prompt and answer reading beside them, and `resolveAnswerDir` for a CLI, an
-API, a condensation, a path handed over as an id and a lookup that throws. The live paths were checked against
-Claude Code and the OpenAI API; the Claude API (no key on hand) and Codex (not installed)
-only against their documentation.
+API, a condensation, a path handed over as an id and a lookup that throws — and the
+conversations against stand-in `claude` and `codex` scripts on `PATH`: a start and its
+resume, the line on one board (its `wait`, Stop while waiting, quitting), boards and CLIs
+side by side, a conversation gone, another workspace or folder, a reset mid-answer, a
+condensation, no board, an id that is not a UUID, Codex's resume, a failed or stopped
+turn, a Stop that comes after Claude Code has answered and exited but before its output
+closes (a child still holds it, so the run itself says it answered — nothing is kept),
+the print-mode entrypoint whatever the app inherited, what the page may see, a store
+that will not keep it, a Claude Code too old for an option, and a Codex too old to
+resume (refused once, asked again on its own, and every Codex answer after it on its own
+and in no line). The live paths were checked against Claude Code and the OpenAI API, and
+the Claude API (no key on hand) only against its documentation. The conversations were
+probed live on 2026-10-09 against Claude Code 2.1.292 and codex-cli 0.160.0: a resume
+of an id either CLI does not have exits 1 with the sentences `GONE_RE` reads;
+`--session-id` is the session the result names; `--name` works with `-p`; without
+`--system-prompt-snapshot off` a resume answered from the first turn's system prompt;
+a resumed Codex thread without a sandbox
+flag ran with `config.toml`'s full access and wrote a file, while either read-only form
+held it; and two real Claude Code turns on one board remembered the first's answer. The
+same day, codex-cli 0.92, 0.114 and 0.128 refused the resume's `--output-schema` (exit 2),
+and Claude Code 2.1.296's interactive `--continue` and `--resume` passed over a print-mode
+session in its folder (§4.18).
 
 ### M12 `images.js`
 Google Images beside a whiteboard, main's half (§4.17): `hardenWebview(webPreferences,
@@ -2216,11 +2360,8 @@ id; a `whiteboard` route without one is the Whiteboards screen. `normalize()`,
 `{view:'workspace', tab:'diagrams'}`, lands on the Whiteboards screen rather than on the
 first tab, and `rememberScreen()` keeps an open board as `whiteboards`, so the window
 comes back to the list in the board's folder. `sb:evt:wbChanged` marks every `wb:` load
-stale without a render and redraws only when the Whiteboards screen is up, or on the
-Grid for a change that is not a `save` while a square is choosing a board
-(`SB.views.grid.choosingBoard()`), so its list has the board just made or renamed: an
-autosave is a write too, many a minute, and a render for it would rebuild the Grid's
-four squares for a list nobody is looking at. `SB.ensureScanned(wsId)` scans a workspace
+stale without a render and redraws only when the Whiteboards screen is up — the one
+screen that shows the list; whoever shows it next revalidates it then. `SB.ensureScanned(wsId)` scans a workspace
 once, if nothing has asked yet — for a terminal panel's branch and the pickers, which
 can name a workspace no route has visited.
 
@@ -2320,9 +2461,9 @@ either.
 
 **One pane, many hosts, one holder.** The Terminal tab, a Grid square and a whiteboard's
 terminals all show the SAME pane — one xterm and one shell per workspace (a second xterm
-would steal the tmux client and repaint garbage) — and with several boards and a Grid on
-screen together, more than one place can want it at once. So the pane records who holds
-it: `owner` is null for a route host, which takes it with `mount()`, and `'wb:<boardId>'`
+would steal the tmux client and repaint garbage) — and more than one of them can ask for
+it: the route's own screen, and the terminal layer of every board kept open, each placing
+it again as it comes back on screen. So the pane records who holds it: `owner` is null for a route host, which takes it with `mount()`, and `'wb:<boardId>'`
 for a board's terminal layer (R15), which takes it with
 `place(wsId, into, { owner, fixed?, fontSize?, force? })` → whether `into` now holds it.
 `place()` YIELDS: it takes the host only when nothing on screen has it, when it is
@@ -2386,27 +2527,14 @@ fires no click at all (measured: a render in that gap and the segment pressed ne
 switched). So `whenReleased()` holds the decision until the mouseup and runs it a tick
 after, behind the click the press became.
 Body: four `.cell`s — a filled workspace has a 30px strip (its name, which opens its
-Terminal tab; its run dot; Terminal, Changes and Show a whiteboard mode buttons, and
-beside them, while a board is showing, the chevron that changes it; and, only while the
-view is being edited, a `×` to take it out) over the selected content. Terminal uses
-`terminal.mount()`, Changes reuses `workspace.changesBody()`, and a whiteboard uses
-`whiteboards.mountGrid(boardId, cell)` — or, with no board chosen, one gone, or one
-another square of the view already shows (the first square to claim a board keeps it),
-the in-cell picker: `Which whiteboard?`, a search field that hides rows in place rather
-than rendering (a render rebuilds all four squares, terminals included, on every
-keystroke), and the groups `For <workspace>`, `Recent`, each folder and `No folder`.
-Its list is `SB.load('wb:grid', whiteboards.boards)`, a `wb:` key, so a whiteboard
-change marks it stale, and `choosingBoard()` — a `.wbpick` on screen — is how app.js
-knows to redraw for one (R2). The search has the keyboard whenever the picker shows (by
-the mode button, by Change whiteboard); ↑/↓ walk the boards it leaves showing, and ↑
-from the first goes back to it. A board's own quick switcher, ← / →, New whiteboard and
-Duplicate inside a square change what the square shows
-(`SB.views.grid.replaceBoard(from, to)`) rather than leaving the Grid, and the keyboard
-stays in the square (R15). Delete, or Back on a board that has gone, returns the square
-to its picker, the board refused; Back on one that couldn't be read is
-`chooseAgain(boardId)`: the square goes back to choosing with that board still its
-choice, offered again, and Cancel reads it afresh — rather than reloading the same
-error. A folder square shows only Terminal. An empty cell is an `Add workspace`
+Terminal tab; its run dot; Terminal and Changes mode buttons; and, only while the view
+is being edited, a `×` to take it out) over the selected content. Terminal uses
+`terminal.mount()` and Changes reuses `workspace.changesBody()`; no square shows a
+whiteboard (§4.10). `modeFor()` reads only `changes` or `terminal`, and `forgetBoards()`,
+run once as the file loads, takes the old `whiteboard` and `diagrams` modes out of
+`switchboard.grid.cellMode` (writing it back only when it dropped one) and removes
+`switchboard.grid.cellBoard`, both inside try/catch, so storage that is off costs
+nothing. A folder square shows only Terminal. An empty cell is an `Add workspace`
 button that turns into a picker of the workspaces not already in this view, headed by a
 `Folder` › `Choose a folder…` row — first, because the list already overflows a square
 and a row under ten workspaces is one nobody scrolls to — that raises the system's folder sheet
@@ -2447,8 +2575,7 @@ becomes the new view's name field. Leaving the screen ends it, as it ends everyt
 mid-flight.
 
 What it keeps between rebuilds is only what a rebuild would lose: the name being typed,
-the square that is choosing, the square choosing another whiteboard and what each
-square's board search says, the open menu, the armed Delete, the view that is being
+the square that is choosing, the open menu, the armed Delete, the view that is being
 edited, and the workspace just placed — whose terminal gets focus, because the picker row the user clicked no longer
 exists and `app.js`'s path-based focus restore would land on whatever now sits at that
 position. All of it is dropped when the Grid is rendered after another screen: `render()`
@@ -2797,12 +2924,12 @@ answers yet`), with `· 2 terminals` while any are open and `· archived`, fed b
 `onBoardChange` and the terminal layer. No workspace tabs. Body: the board's slab.
 
 **Canvases are keyed by board.** One `SBDiagrams.create` instance and one `.dgslab` per
-board, moved between the board's screen and a Grid square — and onto `<body>` for its
-full screen, `position: fixed` and `no-drag`, since the slab then covers the header's
-drag region, which Electron still counts — and never remounted by a render. The slab is
-focusable but never tabbed to (`tabindex="-1"`, no outline): a press on empty paper
-leaves the keyboard there rather than on `<body>`, from which a Grid render's landing
-focus would hand it to the first terminal square. At most
+board, shown in the board's screen and parked off the page while another screen shows —
+and moved onto `<body>` for its full screen, `position: fixed` and `no-drag`, since the
+slab then covers the header's drag region, which Electron still counts — and never
+remounted by a render. No Grid square holds one (§4.10), so the slab takes no focus of
+its own: a press on empty paper leaves the keyboard on `<body>`, which the editor counts
+as the canvas, as it does the slab's ancestors. At most
 eight live at once: the least recently shown that is off screen, not full screen and
 holding nothing unsaved is let go — its layer destroyed, every shell living on, and its
 editor flushed and destroyed after the current task, since that is often a callback from
@@ -2811,21 +2938,18 @@ for the gap until its destroy (`kept()`), so a late dirty flag or slot list neve
 on a new canvas for the same board, and no terminal layer is attached to it again. A
 full-screen board goes back once the route moves on. After Delete, or Back, the board's
 own screen goes to the list it was in — its breadcrumb's: its folder, No folder, or
-Archived (`listedIn`); and only `info.missing` makes it gone for the session, refused by
-every Grid square, while one that merely couldn't be read is let go and opens again
-once fixed (in a square, `SB.views.grid.chooseAgain`, R10). A board switched inside a
-square takes the keyboard with it when the old one had it: `activeGrid` names the new
-board before `replaceBoard()` renders, and `holdFocus()` focuses its slab before grid.js's
-deferred landing looks, so the next → is not typed into a shell. `renderMain()`
+Archived (`listedIn`) — and the canvas is let go; one that merely couldn't be read
+opens again from that list once fixed. The quick switcher, ← / →, New whiteboard and
+Duplicate change the route (`openFrom`). `renderMain()`
 tells the view after every render which canvas is visible (`shown(route)`). Only the
-active canvas handles document shortcuts — in Grid, focus or a pointer press selects
-it — and hidden canvases turn their keyboard handlers off, so Backspace in a Terminal
+active canvas — the one on the board's own screen — handles document shortcuts, and
+hidden canvases turn their keyboard handlers off, so Backspace in a Terminal
 cannot delete boxes on another canvas. `shown()` also rebuilds `workspaceStatus` (each
 workspace's rail dot and, once scanned, branch), pushes it only to canvases on screen and
 only when it changed, and gives every layer its turn (`layer.shown(visible)`). The seam:
-`SB.views.whiteboards = { render, mountGrid(boardId, cell), shown, onKey, editAction,
+`SB.views.whiteboards = { render, shown, onKey, editAction,
 refresh, flushAll, toggleTerminalShortcut, terminalShown(wsId), terminalFocused(wsId),
-boards(), lastFolder(), api(boardId) }`, `api` for the smoke harness and the browser
+lastFolder(), api(boardId) }`, `api` for the smoke harness and the browser
 tests only. Main's flush (`sb:evt:diagramsFlush`), the window's blur and `pagehide` all
 write every board.
 
@@ -2973,7 +3097,7 @@ Esc (`escape()`) is the board's, never a step back, when something already answe
 on that very keydown in the capture phase, so by the window its Cancel is in no document
 at all — and it leaves a Radix picker, menu or dialog to Radix; it leaves a full-screen
 board before it means anything else; and inside the board — the canvas, its bar, the
-terminals' tray — it never leaves the board, on its own screen or in a Grid square, nor
+terminals' tray — it never leaves the board, nor
 from the page itself on the board's own screen: the canvas has had its turn, and one Esc
 too many must not throw the user out; leaving is the breadcrumb or its caret. ⌘↵ (or ⌘I)
 over the canvas is ✦ Answer (the editor's own listener) and never Start. `onKey` leaves
@@ -2993,8 +3117,8 @@ when it turns true again.
 scoped to `.sbdg` behind `:where()` and with the cascade layers flattened
 (`build-diagrams.js` says why), and Radix's portals render into a second scoped root
 each instance appends to `<body>` (`.sbdg.sbdg-portal-root`, fixed, z-index 1500), so a
-popover escapes a Grid square's container query and clip and keeps the editor's rules
-and dark theme; it is shown only while its board is active or a picker the host asked
+popover escapes the slab's clip and the terminal panels' stacking, and keeps the editor's
+rules and dark theme; it is shown only while its board is active or a picker the host asked
 for is open, and `destroy()` removes it. One collision that went the other way was fixed at its source:
 styles.css's `.grid` (the Grid screen's 2x2) is `.gridbd > .grid` now, since `grid` is a
 Tailwind utility the editor uses. styles.css's element rules reach in too, and beat the
@@ -3017,8 +3141,14 @@ controls clickable, Pin keeping the same xterm, cols/rows and text position (slo
 on the panel's body) while the overlay follows a pan and a zoom, the pinned node in the
 board file, Float landing on the node's body, Undo putting the node back with a grid that
 fits it and Redo floating it where its text was, Select All kept by Markdown and labels,
-full screen and leaving right after it, a Grid square showing a whiteboard, and a
-panel's exit footer and retry. A
+full screen and leaving right after it, the Grid without whiteboards — each square
+offering Terminal and Changes only, squares saved as whiteboards opening Terminal on the
+same shell, and the old `cellMode` and `cellBoard` entries cleared as the page loads —
+a panel's exit footer and retry, and ✦ Answer's Conversation row, its count read through
+the real `answer.js` from the real board file: New conversation pressed from the keyboard
+leaving Enter and Tab in the menu (no box added, none edited), a workspace changed and
+changed back in the open menu leaving nothing to continue, and a CLI main lists as
+`alone`. A
 product bug it has found is listed in its `KNOWN_BUGS` by check name: the run reports it
 and passes only while it still fails, so a fix says to take it off the list.
 

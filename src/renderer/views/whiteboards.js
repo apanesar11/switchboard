@@ -13,9 +13,9 @@
 //                                 canvas, its xterms and focus never see a teardown.
 //
 // Canvases are keyed by BOARD id: one React instance (window.SBDiagrams.create) and one
-// slab per board, moved between the board's screen and a Grid square, never remounted
-// by a render. At most eight live at once; the least recently shown that is off screen
-// and has nothing unsaved is let go. Each canvas has a terminal layer
+// slab per board, shown on the board's own screen (or full screen) and parked off it,
+// never remounted by a render. At most eight live at once; the least recently shown
+// that is off screen and has nothing unsaved is let go. Each canvas has a terminal layer
 // (views/wbterminals.js, SB.wbTerminals) for the terminals that float over it or are
 // pinned to it; this file wires it to the editor and asks it the questions app.js has
 // about bells, retiring panes and ⌘A.
@@ -116,15 +116,6 @@ SB.views = SB.views || {};
       error: entry && entry.status === 'error' ? (entry.error || 'could not list the whiteboards') : null,
       running: !!(entry && entry.running)
     };
-  }
-
-  // For the Grid's in-cell picker (views/grid.js): the index, asked for now.
-  function boards() {
-    return fetchIndex().then(function (r) {
-      if (!r || r.ok !== true || !r.data || typeof r.data !== 'object') return null;
-      lastGood = tidyIndex(r.data);
-      return lastGood;
-    });
   }
 
   function folderById(data, id) {
@@ -1172,10 +1163,7 @@ SB.views = SB.views || {};
   // ── canvases ──────────────────────────────────────────────────────────────
 
   var canvases = Object.create(null);   // boardId → item, see makeCanvas
-  var gone = Object.create(null);       // boards closed for good (deleted, or found missing in a Grid square)
   var clock = 0;                        // the LRU's order: higher was shown more recently
-  var renderSeq = 0;                    // bumped by every shown(); a canvas touched since is in use
-  var activeGrid = null;                // the board whose Grid canvas owns the window's shortcuts
   var told = 0;
 
   function reportDirty(boardId, count) {
@@ -1215,8 +1203,8 @@ SB.views = SB.views || {};
   function rehome(item) {
     var home = item.home;
     var r = route();
-    var mine = home && home.isConnected &&
-      (home === (view && view.body) ? r.view === 'whiteboard' && r.board === item.boardId : true);
+    var mine = !!home && home.isConnected && !!view && home === view.body &&
+      r.view === 'whiteboard' && r.board === item.boardId;
     if (mine) home.appendChild(item.slab);
     else if (item.slab.parentNode) item.slab.parentNode.removeChild(item.slab);
   }
@@ -1299,90 +1287,33 @@ SB.views = SB.views || {};
     }
   }
 
-  // The quick switcher, ←/→, New whiteboard and Duplicate. A board on its own screen
-  // changes the route; one in a Grid square changes what that square shows, so the
-  // Grid stays where it is.
-  //
-  // In a square the keyboard goes along with the board, as it does on the board's own
-  // screen. The square now holds a different canvas, and the old one's slab — focus with
-  // it — has left the document: left alone, no canvas was active (activeGrid still named
-  // the old board), focus fell to <body>, grid.js landed it in the first terminal square,
-  // and the next → was typed into that workspace's shell. So when the old board had the
-  // keyboard, the new one is made active by the very render that draws it (activeGrid
-  // names it before replaceBoard renders) and takes focus (holdFocus) before grid.js's
-  // deferred landing looks.
+  // The quick switcher, ←/→, New whiteboard and Duplicate: the board opens on its own
+  // screen, which changes the route.
   function openFrom(item, id) {
     if (!id || id === item.boardId) return;
-    if (route().view === 'grid' && inGrid(item)) {
-      var grid = SB.views.grid;
-      var had = activeGrid === item.boardId;
-      if (had) activeGrid = id;
-      if (grid && typeof grid.replaceBoard === 'function' && grid.replaceBoard(item.boardId, id)) {
-        if (had) holdFocus(canvases[id]);
-        return;
-      }
-      if (had && activeGrid === id) activeGrid = item.boardId;
-    }
     SB.go({ view: 'whiteboard', board: id });
   }
 
-  // Puts the keyboard on a Grid square's canvas that has nothing focused yet (its board
-  // may still be loading): the slab itself (tabindex -1, makeCanvas). Keys on the slab
-  // are the canvas's — the editor counts its ancestors as the canvas — and focusin makes
-  // it activeGrid through chooseFrom, as a click would.
-  function holdFocus(item) {
-    if (!item || !item.slab.isConnected || item.fullscreen) return;
-    var a = document.activeElement;
-    var inside = a && a !== document.body && (item.slab.contains(a) || (item.api && item.api.contains(a)));
-    if (!inside) focusEl(item.slab);
-    if (activeGrid !== item.boardId) {
-      activeGrid = item.boardId;
-      shown(route());
-    }
-  }
-
-  // After Delete, or Back on a board that is missing or can't be opened. From its own
-  // screen the list the board was in comes up — the place its breadcrumb and caret lead:
-  // its folder, No folder, or Archived for an archived one (listedIn). A board that was
-  // never read has no list; All, or the folder the editor names. In a Grid square the
-  // square goes back to choosing.
-  //
-  // `info.missing` (the editor's word: deleted, or not found) is the only thing that
-  // makes a board gone for the session, refused by every Grid square. A board that merely
-  // couldn't be read — a hand-edited file that is not JSON, a read that failed — is let
-  // go and nothing more: once the file is fixed it opens again, from the list or a square.
-  function closedFrom(item, folderId, info) {
-    var missing = !!(info && info.missing);
-    if (missing) gone[item.boardId] = true;
+  // After Delete, or Back on a board that is missing or can't be opened. The canvas is
+  // let go, and from the board's own screen the list the board was in comes up — the
+  // place its breadcrumb and caret lead: its folder, No folder, or Archived for an
+  // archived one (listedIn). A board that was never read has no list; All, or the folder
+  // the editor names. A board that merely couldn't be read — a hand-edited file that is
+  // not JSON, a read that failed — opens again from that list once the file is fixed.
+  function closedFrom(item, folderId) {
     var r = route();
-    var inSquare = r.view === 'grid' && inGrid(item);
     var back = item.summary ? listedIn(item.summary) : (folderId || 'all');
     forget(item);
-    if (inSquare) {
-      // A gone board's square chooses again by itself (mountGrid refuses it). One that is
-      // still there would just be read again into the same square: grid.js puts that
-      // square into choosing instead, the board still its choice (Cancel shows it again).
-      var grid = SB.views.grid;
-      if (missing || !grid || typeof grid.chooseAgain !== 'function' || !grid.chooseAgain(item.boardId)) SB.render();
-    } else if (r.view === 'whiteboard' && r.board === item.boardId) goHome(back);
-  }
-
-  function inGrid(item) {
-    return !!item.home && item.home.isConnected && !!item.home.closest('.gridbd');
+    if (r.view === 'whiteboard' && r.board === item.boardId) goHome(back);
   }
 
   function makeCanvas(boardId) {
     var have = canvases[boardId];
-    if (have) { have.touch = renderSeq; return have; }
+    if (have) return have;
     evict();
-    // Focusable (never tabbed to): a press on the canvas's empty paper — or holdFocus after
-    // a square's board is switched — leaves the keyboard on the slab rather than on <body>.
-    // Each Grid render moves the slab into a new cell, and app.js's renderMain gives the
-    // focused element back afterwards only if it can take focus; from <body>, grid.js's
-    // landFocus would hand the keyboard to the first terminal square instead.
-    var slab = h('div.dgslab', { tabindex: '-1', dataset: { wbBoard: boardId } });
+    var slab = h('div.dgslab', { dataset: { wbBoard: boardId } });
     // The editor is mounted in .dgcanvas; the terminal layer puts its panels beside it,
-    // in the slab but outside the React/Tailwind scope (.sbdg), exactly as the Grid does.
+    // in the slab but outside the React/Tailwind scope (.sbdg).
     var canvas = h('div.dgcanvas');
     slab.appendChild(canvas);
     var index = boardById(lastGood, boardId);
@@ -1390,7 +1321,7 @@ SB.views = SB.views || {};
       boardId: boardId, slab: slab, canvas: canvas, api: null, layer: null,
       active: false, dirty: false, home: null, fullscreen: false,
       summary: null, folder: null, loaded: false,
-      lastShown: ++clock, touch: renderSeq,
+      lastShown: ++clock,
       terminals: [], termSig: '[]', statusSig: '', dead: false
     };
     if (index) item.folder = folderById(lastGood, index.folderId);
@@ -1417,7 +1348,7 @@ SB.views = SB.views || {};
         active: false,
         onOpenSettings: function () { SB.go({ view: 'settings' }); },
         onOpenBoard: kept(function (id) { openFrom(item, id); }),
-        onClosed: kept(function (folderId, info) { closedFrom(item, folderId, info); }),
+        onClosed: kept(function (folderId) { closedFrom(item, folderId); }),
         onBoardChange: kept(function (board, folder) { boardChanged(item, board, folder); }),
         onDirty: kept(function (count) { reportDirty(boardId, count); }),
         onFullscreenChange: kept(function (open) { hostFullscreen(item, !!open); }),
@@ -1443,7 +1374,6 @@ SB.views = SB.views || {};
     if (canvases[item.boardId] !== item) return;
     item.dead = true;
     delete canvases[item.boardId];
-    if (activeGrid === item.boardId) activeGrid = null;
     if (item.slab.parentNode) item.slab.parentNode.removeChild(item.slab);
     var layer = item.layer;
     var bundleApi = item.api;
@@ -1465,8 +1395,7 @@ SB.views = SB.views || {};
   }
 
   // At most MAX_CANVASES. The one let go is the least recently shown of those that are
-  // off screen, not full screen, have nothing unsaved and were not touched by the render
-  // in progress — a Grid render moves every square's slab into a cell not yet attached.
+  // off screen, not full screen and have nothing unsaved.
   function evict() {
     var ids = Object.keys(canvases);
     var r = route();
@@ -1474,7 +1403,7 @@ SB.views = SB.views || {};
       var victim = null;
       for (var i = 0; i < ids.length; i++) {
         var it = canvases[ids[i]];
-        if (it.dirty || it.fullscreen || it.touch === renderSeq || it.slab.isConnected || visible(it, r)) continue;
+        if (it.dirty || it.fullscreen || it.slab.isConnected || visible(it, r)) continue;
         if (!victim || it.lastShown < victim.lastShown) victim = it;
       }
       if (!victim) return;
@@ -1488,29 +1417,13 @@ SB.views = SB.views || {};
     if (r.view === 'whiteboard') {
       return item.boardId === r.board && !!view && item.home === view.body && view.root.isConnected;
     }
-    if (r.view === 'grid') return inGrid(item);
     return false;
-  }
-
-  // Grid builds a fresh cell tree on each render. Moving the existing slab into the new
-  // cell keeps React Flow's editor, its terminals and its autosave state.
-  function mountGrid(boardId, cell) {
-    if (!boardId || !cell || gone[boardId]) return false;
-    var item = makeCanvas(boardId);
-    item.home = cell;
-    item.touch = renderSeq;
-    if (!item.fullscreen) cell.appendChild(item.slab);
-    return true;
   }
 
   function activeCanvas(r) {
     if (r.view === 'whiteboard' && r.board) {
       var it = canvases[r.board];
       return it && it.slab.isConnected && view && it.home === view.body && view.root.isConnected ? it : null;
-    }
-    if (r.view === 'grid' && activeGrid) {
-      var grid = canvases[activeGrid];
-      return grid && grid.slab.isConnected && inGrid(grid) ? grid : null;
     }
     return null;
   }
@@ -1521,7 +1434,6 @@ SB.views = SB.views || {};
   // a parked board catches up the moment it is shown.
   function shown(r) {
     r = r || route();
-    if (r.view !== 'grid') activeGrid = null;
     var current = activeCanvas(r);
     var status = null;
     var sig = '';
@@ -1555,30 +1467,7 @@ SB.views = SB.views || {};
     if (r.view === 'whiteboard' && r.board && canvases[r.board] && canvases[r.board].summary) {
       rememberFolder(listedIn(canvases[r.board].summary));
     }
-    renderSeq++;
   }
-
-  // In Grid, clicking or focusing a canvas makes that board the only one listening for
-  // document/window shortcuts. A click into a terminal or Changes square releases it,
-  // including when focus remains on document.body.
-  function chooseFrom(event) {
-    if (route().view !== 'grid') return;
-    var target = event.target;
-    var next = null;
-    if (target instanceof Node) {
-      Object.keys(canvases).some(function (id) {
-        var item = canvases[id];
-        if (item.slab.isConnected && (item.slab.contains(target) ||
-          (item.api && item.api.contains(target)))) { next = id; return true; }
-        return false;
-      });
-    }
-    if (next === activeGrid) return;
-    activeGrid = next;
-    shown(route());
-  }
-  document.addEventListener('pointerdown', chooseFrom, true);
-  document.addEventListener('focusin', chooseFrom, true);
 
   // ── terminals, as app.js asks about them ──────────────────────────────────
 
@@ -1586,17 +1475,10 @@ SB.views = SB.views || {};
   // means). The xterms' own helper textareas are part of it; every other text field,
   // menu, dialog and list keeps Select All.
   function toggleTerminalShortcut() {
-    var r = route();
-    // Reparenting a focused xterm between Grid and a panel need not emit focusin.
-    // Resolve the canvas from the actual focus before toggling.
-    if (r.view === 'grid' && document.activeElement && document.activeElement !== document.body) {
-      chooseFrom({ target: document.activeElement });
-    }
-    var item = activeCanvas(r);
+    var item = activeCanvas(route());
     if (!item || !item.api) return false;
     var active = document.activeElement;
     if (active && active !== document.body) {
-      if (r.view === 'grid' && !item.slab.contains(active) && !item.api.contains(active)) return false;
       if (!active.closest('[data-wb-terminal]') && (active.isContentEditable ||
           /^(INPUT|TEXTAREA|SELECT|WEBVIEW)$/.test(active.tagName) ||
           active.closest('[role="dialog"], [role="menu"], [role="listbox"]'))) return false;
@@ -1644,7 +1526,7 @@ SB.views = SB.views || {};
     // workspace — it is the board's chrome, its buttons, and Esc there is the board's.
     var shell = e.target instanceof Element ? e.target.closest('[data-wb-terminal]') : null;
     if (shell && shell.getAttribute('data-wb-terminal')) return false;
-    if (e.key === 'Escape' && !e.metaKey && !e.ctrlKey && !e.altKey) return escape(e, item, r);
+    if (e.key === 'Escape' && !e.metaKey && !e.ctrlKey && !e.altKey) return escape(e, item);
     if (shell) return false;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
       var target = e.target;
@@ -1655,7 +1537,7 @@ SB.views = SB.views || {};
 
   // A plain Esc with a board on screen. True = it is the board's, and app.js must not
   // also take it as a step back.
-  function escape(e, item, r) {
+  function escape(e, item) {
     var t = e.target;
     // Something on the board already answered it. A Radix dialog or menu closes on this
     // very keydown — its DismissableLayer listens on the document in the capture phase,
@@ -1670,11 +1552,11 @@ SB.views = SB.views || {};
     if (item.api.fullscreen()) { item.api.leaveFullscreen(); return true; }
     // Inside the board — the canvas, its bar, the terminals' tray — Esc never leaves it:
     // the canvas has already had its turn (a tool, a selection, an answer being waited
-    // for), and one Esc too many must not throw the user out of the board, on its own
-    // screen or out of the Grid. Leaving is the breadcrumb, or its caret.
+    // for), and one Esc too many must not throw the user out of the board. Leaving is the
+    // breadcrumb, or its caret.
     if (!e.shiftKey && t instanceof Node && (item.slab.contains(t) || item.api.contains(t))) return true;
-    // On the board's own screen nothing else is focused but the page itself.
-    if (r.view === 'whiteboard' && !e.shiftKey && (t === document.body || t === document.documentElement)) return true;
+    // With the board on screen, nothing else is focused but the page itself.
+    if (!e.shiftKey && (t === document.body || t === document.documentElement)) return true;
     return false;
   }
 
@@ -1728,7 +1610,6 @@ SB.views = SB.views || {};
 
   SB.views.whiteboards = {
     render: render,
-    mountGrid: mountGrid,
     shown: shown,
     onKey: onKey,
     editAction: editAction,
@@ -1737,7 +1618,6 @@ SB.views = SB.views || {};
     toggleTerminalShortcut: toggleTerminalShortcut,
     terminalShown: terminalShown,
     terminalFocused: terminalFocused,
-    boards: boards,
     // app.js normalize(): the folder a route to the home lands on when it names none.
     lastFolder: lastFolder,
     // The editor handle for a board's live canvas, for the smoke harness and browser

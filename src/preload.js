@@ -158,13 +158,25 @@ contextBridge.exposeInMainWorld('sb', {
   // comes back — only whether there is one and its last four characters.
   answerSetKey: (provider, key) => ipcRenderer.invoke('sb:answer:setKey', provider, key),
   answerRemoveKey: provider => ipcRenderer.invoke('sb:answer:removeKey', provider),
-  // Ask. `req`: { provider, wsId, system, user, schema, operation? } — `wsId` is the
-  // whiteboard's workspace, or null; a CLI asked to read none answers code 'no-workspace'
-  // (a condensation never does). Resolves { ok, text, files? } — the answer's JSON — or
-  // { ok:false, error, code }; a CLI's steps arrive meanwhile as sb:evt:answerStep
-  // (id, step). answerStop ends it, CLI process and all.
+  // Ask. `req`: { provider, wsId, system, user, schema, operation?, boardId? } — `wsId` is
+  // the whiteboard's workspace, or null; a CLI asked to read none answers code
+  // 'no-workspace' (a condensation never does). `boardId`, sent with an answer and never
+  // with a condensation, makes a CLI's answer a turn of that whiteboard's one conversation
+  // with it. Resolves { ok, text, files?, conversation? } — the answer's JSON, and for a
+  // turn { turns, resumed } — or { ok:false, error, code }; a CLI's steps arrive
+  // meanwhile as sb:evt:answerStep (id, step), and an answer waiting behind another on
+  // the same whiteboard says so as a 'wait' step. answerStop ends it, CLI process and
+  // all, or takes it out of the line.
   answerStart: (id, req) => ipcRenderer.invoke('sb:answer:start', id, req),
   answerStop: id => ipcRenderer.invoke('sb:answer:stop', id),
+  // A whiteboard's conversations: { ok, data: { 'claude-code', codex }, alone? }, each null
+  // or { turns, startedAt, lastAt, workspace } — never a session id or a folder — and
+  // `alone` the CLIs whose answers each stand alone on this Mac (['codex'] once Codex has
+  // been found too old to resume). The reset
+  // forgets one (`provider` 'claude-code' or 'codex') or both (left out), and the next
+  // answer on the board starts a new conversation; it answers { ok }.
+  answerConversation: boardId => ipcRenderer.invoke('sb:answer:conversation', boardId),
+  answerResetConversation: (boardId, provider) => ipcRenderer.invoke('sb:answer:resetConversation', boardId, provider),
   onAnswerStep: cb => subscribe('sb:evt:answerStep', cb),
   onAnswerStatus: cb => subscribe('sb:evt:answerStatus', cb),
   // App ▸ Settings… (⌘,), a menu item, so the shortcut reaches the page as this.

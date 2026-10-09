@@ -111,8 +111,8 @@ window.SB = window.SB || {};
   // drawn here in the same box and weight.
   var W = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">';
 
-  // The rail's Whiteboards row, a Grid square's "Show a whiteboard", the home's notice:
-  // a board on an easel, a line chart drawn on it.
+  // The rail's Whiteboards row and the home's notice: a board on an easel, a line
+  // chart drawn on it.
   var board = W + '<rect x="1.5" y="2.6" width="13" height="9.6" rx="1.6"/><path d="M4.4 9.4l2.4-2.6 1.8 1.7 2.9-3.2"/><path d="M6 12.2l-1 1.9M10 12.2l1 1.9"/></svg>';
 
   // A folder row on the Whiteboards screen, and Move to folder…; open for the selected one.

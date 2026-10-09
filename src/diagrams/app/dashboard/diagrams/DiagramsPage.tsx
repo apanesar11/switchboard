@@ -1,8 +1,8 @@
 "use client"
 
 // Switchboard's copy of the admin's app/dashboard/diagrams/DiagramsPage.tsx: ONE
-// whiteboard, open — on the Whiteboards screen or in a Grid square. Mirrored by hand
-// like FlowEditor.tsx; what differs:
+// whiteboard, open on its own screen. Mirrored by hand like FlowEditor.tsx; what
+// differs:
 //
 //   * A board, not a product's list. The page shows exactly `boardId` and never picks
 //     another on its own: the quick switcher, ← / →, New whiteboard and Duplicate ask
@@ -20,10 +20,10 @@
 //     host's layer (views/wbterminals.js); this page only asks for them.
 //   * ✦ Answer reads the board's own workspace (`board.workspace`), changed from the
 //     editor's AI menu and remembered with the board.
-//   * `active`: false while off screen or another Grid square has the keyboard. Each
-//     board's tree stays mounted (the host keeps it), but may not answer keys meant
-//     for a terminal or another canvas. The editor hears it too (`shown`) so its
-//     Google Images panel stops accepting input when inactive.
+//   * `active`: false while off screen. Each board's tree stays mounted (the host
+//     keeps it), but may not answer keys meant for a terminal or another canvas. The
+//     editor hears it too (`shown`) so its Google Images panel stops accepting input
+//     when inactive.
 //
 // The canvas IS the editor (FlowEditor.tsx), and changes save as you go — the spec
 // only. Rename writes the name only, so neither can carry an old copy of the other
@@ -178,17 +178,13 @@ export type ClientRect = { left: number; top: number; width: number; height: num
 export type DiagramsPageProps = {
   /** The whiteboard on screen. The page shows exactly this one. */
   boardId: string
-  /** False while off screen or another Grid square owns the keyboard. */
+  /** False while off screen. */
   active: boolean
   onOpenSettings?: () => void
   /** Open another board — the switcher, ← / →, New whiteboard and Duplicate. */
   onOpenBoard: (id: string) => void
-  /**
-   * Leave the board for `folderId`'s list: Delete, or Back. `missing` says the board is
-   * gone (deleted, or not found) rather than merely unreadable for now — only a gone
-   * board may be refused from then on; one that couldn't be read may open again.
-   */
-  onClosed: (folderId: string | null, info?: ClosedInfo) => void
+  /** Leave the board for `folderId`'s list: Delete, or Back. */
+  onClosed: (folderId: string | null) => void
   /** The board and its folder after the load and after every write, for the header. */
   onBoardChange: (board: WhiteboardSummary | null, folder: WhiteboardFolder | null) => void
   /** The rail's dot and branch for each workspace — pinned terminals and pickers. */
@@ -209,14 +205,12 @@ export type DiagramsPageProps = {
   onEditor?: (editor: FlowEditorHandle | null) => void
   /** Whether that editor holds anything not yet saved. */
   onDirtyChange?: (dirty: boolean) => void
-  /** The board's full-screen controls, also used from Grid. */
+  /** The board's full-screen controls, for the host's Esc. */
   onFullscreen?: (handle: FullscreenHandle | null) => void
   onFullscreenChange?: (open: boolean) => void
 }
 
 export type FullscreenHandle = { isFullscreen: () => boolean; leave: () => void }
-
-export type ClosedInfo = { missing?: boolean }
 
 // The board as this page last saw it, tagged with the id it belongs to — so one
 // board's name never paints over another's drawing if the host swaps `boardId`.
@@ -588,15 +582,14 @@ export function DiagramsPage({
     fullscreenNow.current = fullscreen
   }, [fullscreen])
 
-  // The Grid's container query establishes a containing block for fixed
-  // descendants. The host moves to body while full screen, preserving this
-  // exact React Flow tree and all of its editor state.
+  // The host moves to body while full screen, out of the slab's clip and stacking
+  // context, preserving this exact React Flow tree and all of its editor state.
   useLayoutEffect(() => {
     onFullscreenChange?.(fullscreen)
   }, [fullscreen, onFullscreenChange])
 
   // Body-level dialogs and menus cannot remain visible after this board loses
-  // the screen or another Grid square takes the keyboard.
+  // the screen.
   useEffect(() => {
     if (!active) {
       // A menu closing now finishes only once the board is back (see afterMenu).
@@ -625,7 +618,7 @@ export function DiagramsPage({
     if (fullscreen) paneRef.current?.focus()
   }, [fullscreen])
 
-  // Each board owns its own canvas, including while several are on the Grid.
+  // Each board owns its own canvas, and the host asks the one on screen.
   useEffect(() => {
     onFullscreen?.({
       isFullscreen: () => fullscreenNow.current,
@@ -797,7 +790,7 @@ export function DiagramsPage({
           deleted.current = true
           const folderId = board?.folderId ?? null
           setFullscreen(false)
-          onClosed(folderId, { missing: true })
+          onClosed(folderId)
           setLoaded({ boardId: deletedId, status: "missing" })
         }}
       />
@@ -837,10 +830,10 @@ export function DiagramsPage({
           </p>
           <div className="mt-3 flex items-center gap-2">
             {/* Back from a board that couldn't be read is not a goodbye: the host
-                forgets this canvas but may open the board again (missing: false). */}
+                forgets this canvas, and the board opens again once it can be read. */}
             <Button
               className="h-[30px] rounded-lg border-transparent bg-[#1d1d1f] px-3 text-[13px] text-white shadow-none hover:bg-[#333336] dark:bg-gray-50 dark:text-gray-900 dark:hover:bg-white"
-              onClick={() => onClosed(null, { missing })}
+              onClick={() => onClosed(null)}
             >
               <Glyph name="chevL" className="-ml-1 mr-1.5" />
               Back

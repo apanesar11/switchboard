@@ -1,12 +1,13 @@
 // Switchboard's React whiteboard editor. One instance belongs to each open BOARD
 // (views/whiteboards.js keeps them, keyed by board id, at most a handful at once), and
-// its DOM host can move between the Whiteboards screen and a Grid square without
-// remounting React Flow or losing the selection, viewport, or undo history. A board
-// never has two instances, so two editors can never write the same file.
+// its DOM host can move — onto the board's screen, onto <body> for full screen, off the
+// page while another screen shows — without remounting React Flow or losing the
+// selection, viewport, or undo history. A board never has two instances, so two
+// editors can never write the same file.
 import { createRoot, type Root } from "react-dom/client"
 import { createPortal } from "react-dom"
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
-import { DiagramsPage, type ClientRect, type ClosedInfo, type FullscreenHandle } from "./app/dashboard/diagrams/DiagramsPage"
+import { DiagramsPage, type ClientRect, type FullscreenHandle } from "./app/dashboard/diagrams/DiagramsPage"
 import type { FlowEditorHandle } from "./app/dashboard/diagrams/FlowEditor"
 import { WorkspacePicker } from "./app/dashboard/diagrams/WorkspacePicker"
 import { Toaster } from "./components/Toast"
@@ -31,12 +32,8 @@ type Props = {
   onOpenSettings(): void
   /** The quick switcher, ← / →, New whiteboard and Duplicate: the host changes the route. */
   onOpenBoard(id: string): void
-  /**
-   * After Delete, and Back on a board that no longer exists or couldn't be read.
-   * `info.missing` is true only when the board is gone (deleted, or not found); Back
-   * from one that merely couldn't be read passes false, and it may open again.
-   */
-  onClosed(folderId: string | null, info?: ClosedInfo): void
+  /** After Delete, and Back on a board that no longer exists or couldn't be read. */
+  onClosed(folderId: string | null): void
   /** After the load and every write — the header's breadcrumb and status line. */
   onBoardChange(board: WhiteboardSummary | null, folder: WhiteboardFolder | null): void
   onDirty(count: number): void
@@ -75,7 +72,7 @@ type PickRequest = {
 type Callbacks = {
   onOpenSettings: () => void
   onOpenBoard: (id: string) => void
-  onClosed: (folderId: string | null, info?: ClosedInfo) => void
+  onClosed: (folderId: string | null) => void
   onBoardChange: (board: WhiteboardSummary | null, folder: WhiteboardFolder | null) => void
   onDirtyChange: (dirty: boolean) => void
   onFullscreenChange: (open: boolean) => void
@@ -347,8 +344,9 @@ function create(element: HTMLElement, initial: Props) {
   const app = document.createElement("div")
   app.className = "sbdg-app"
   const portal = document.createElement("div")
-  // Popovers and dialogs must escape Grid's container query and clipped cell.
-  // A second scoped root on body keeps their Tailwind rules and dark theme.
+  // Popovers and dialogs must escape the slab: its clip, and the stacking context that
+  // keeps the board's terminal panels (views/wbterminals.js) beneath them. A second
+  // scoped root on body keeps their Tailwind rules and dark theme.
   portal.className = "sbdg sbdg-portal-root"
   document.body.appendChild(portal)
   element.appendChild(app)
@@ -381,9 +379,8 @@ function create(element: HTMLElement, initial: Props) {
       if (instance.destroying) return
       instance.props = { ...instance.props, ...next }
       // A picker the host asked for belongs to the board on screen. Once the host says
-      // this board no longer is — the route moved on, or another Grid square took the
-      // keyboard — it closes unanswered; left open it would float over the next screen
-      // and open a terminal on a board nobody can see.
+      // this board no longer is — the route moved on — it closes unanswered; left open
+      // it would float over the next screen and open a terminal on a board nobody can see.
       if (instance.picker && next.active === false) finishPick(instance, null)
       syncPortal(instance)
       render(instance)

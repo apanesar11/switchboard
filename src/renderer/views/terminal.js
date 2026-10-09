@@ -608,8 +608,8 @@ window.SB = window.SB || {};
   function focusedPane() {
     var active = document.activeElement;
     if (!active) return null;
-    // A Grid square can show a whiteboard instead of its terminal. Keep edit commands
-    // in the focused canvas rather than sending them to a shell parked off screen.
+    // Text that is edited in place (a contenteditable) keeps its own edit commands,
+    // wherever it sits: ⌘V there must never type the clipboard into a shell.
     if (active.isContentEditable === true) return null;
     var found = null;
     panes.forEach(function (pane) {
@@ -776,10 +776,10 @@ window.SB = window.SB || {};
   // whichever screen is showing it, so the host moves between them. The route hosts
   // (the Terminal tab and a Grid square) take it with mount() unconditionally, as the
   // only screen on show; a whiteboard takes it with place() below, which yields to
-  // whoever holds it — several boards and a Grid square can be on screen together,
-  // and two hosts that both took it on every render would bounce it between them,
-  // refitting and resizing the pty each time. That is the whole reason the Grid and
-  // the whiteboards can exist without a second copy of everything in this file.
+  // whoever holds it on screen — two hosts that both took it on every render would
+  // bounce it between them, refitting and resizing the pty each time. That is the whole
+  // reason the Grid and the whiteboards can exist without a second copy of everything
+  // in this file.
   function mount(wsId, shell, into) {
     if (!loaded()) {
       into.appendChild(blank('the terminal did not load'));
