@@ -1,10 +1,11 @@
 "use client"
 
-// Switchboard: Actions ▸ Rename. The admin has no rename; here a diagram is a file
-// you keep working on, and its name should be able to follow what it became. The
-// name is written with the diagram as it stands (DiagramsPage flushes the editor
-// first), and a name another diagram in the workspace already has is refused, the
-// same rule as New diagram.
+// Switchboard: Actions ▸ Rename. The admin has no rename; here a whiteboard is a
+// file you keep working on, and its name should be able to follow what it became.
+// Only the name is written — the drawing on disk is whatever the last autosave put
+// there, so a board whose spec can't be read can still be renamed — and a name
+// another whiteboard in the same folder already has is refused, the same rule as
+// New whiteboard.
 
 import { useState } from "react"
 import {
@@ -21,7 +22,7 @@ import { Label } from "@/components/Label"
 import { DIAGRAM_NAME_MAX_LENGTH } from "@/lib/diagrams/types"
 
 type Props = {
-  /** The diagram being renamed, or null while the dialog is closed. */
+  /** The whiteboard being renamed, or null while the dialog is closed. */
   target: { id: string; name: string } | null
   onOpenChange: (open: boolean) => void
   /** Writes the new name; resolves to why it couldn't, or null once it has. */
@@ -36,7 +37,7 @@ export function RenameDiagramDialog({ target, onOpenChange, onRename, returnFocu
       <DialogContent
         className="sm:max-w-md"
         onCloseAutoFocus={(event) => {
-          if (!returnFocusRef?.current) return
+          if (!returnFocusRef?.current?.isConnected) return
           event.preventDefault()
           returnFocusRef.current.focus()
         }}
@@ -86,7 +87,7 @@ function RenameForm({
       if (problem) setError(problem)
       else onDone()
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't rename the diagram")
+      setError(err instanceof Error ? err.message : "Couldn't rename the whiteboard")
     } finally {
       setSubmitting(false)
     }
@@ -95,16 +96,16 @@ function RenameForm({
   return (
     <form onSubmit={handleSubmit}>
       <DialogHeader>
-        <DialogTitle>Rename diagram</DialogTitle>
+        <DialogTitle>Rename whiteboard</DialogTitle>
         <DialogDescription>
           The drawing stays as it is; only its name changes.
         </DialogDescription>
       </DialogHeader>
 
       <div className="mt-5 flex flex-col gap-2">
-        <Label htmlFor="rename-diagram-name">Name</Label>
+        <Label htmlFor="rename-whiteboard-name">Name</Label>
         <Input
-          id="rename-diagram-name"
+          id="rename-whiteboard-name"
           autoFocus
           onFocus={(event) => event.currentTarget.select()}
           value={name}

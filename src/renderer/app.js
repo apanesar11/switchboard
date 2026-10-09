@@ -13,6 +13,7 @@
 //   SB.ws(id?)                   the current (or named) workspace object
 //   SB.act(work, opts)           run an action, show it in flight, surface failure as a .bar
 //   SB.bell(wsId, on)            views/terminal.js rings it; the sidebar dot turns blue
+//   SB.ensureScanned(wsId)       scan a workspace once, if nothing has yet (panel headers)
 //
 // Views are `(state) => Node`. Returning a DocumentFragment of `.hd` + `.bd` is the
 // shape styles.css is written for; a single wrapper element is adapted in fit().
@@ -55,23 +56,35 @@ window.SB = window.SB || {};
   // the user's open pull requests in every repository. Their routes carry no wsId on
   // purpose — and nor does a pull request opened FROM that list, which is named by
   // owner/repo/number instead (views/pr.js) since its repo may be cloned nowhere here.
-  // 'settings' is the fourth: this Mac's settings (§4.18) — today, who answers ✦ Answer
-  // on the Diagrams tab and the API keys for it.
-  var VIEWS = { workspace: 1, files: 1, diff: 1, pr: 1, grid: 1, usage: 1, prs: 1, settings: 1 };
+  // 'settings' is another: this Mac's settings (§4.18) — today, who answers ✦ Answer
+  // on a whiteboard and the API keys for it. 'whiteboards' and 'whiteboard' are the last
+  // pair, mirroring 'prs' and 'pr': every board in the folders the user makes, and one
+  // board open. A board belongs to a folder, never to a workspace, so neither carries a
+  // wsId; the home's route names a folder ({folder}: a folder id, or all | recent |
+  // archived | none) and an open board's names the board ({board}: its id).
+  var VIEWS = { workspace: 1, files: 1, diff: 1, pr: 1, grid: 1, usage: 1, prs: 1, settings: 1, whiteboards: 1, whiteboard: 1 };
   var TABS = {
-    workspace: ['changes', 'logs', 'terminal', 'editor', 'diagrams', 'databases'],
-    files: ['files', 'all'], pr: ['overview', 'files', 'all'], diff: [], grid: [], usage: [], prs: [], settings: []
+    workspace: ['changes', 'logs', 'terminal', 'editor', 'databases'],
+    files: ['files', 'all'], pr: ['overview', 'files', 'all'], diff: [], grid: [], usage: [], prs: [], settings: [],
+    whiteboards: [], whiteboard: []
   };
-  var FREE = { grid: 1, usage: 1, prs: 1, settings: 1 };
+  var FREE = { grid: 1, usage: 1, prs: 1, settings: 1, whiteboards: 1, whiteboard: 1 };
 
   // Tabs of the workspace route that live in their own file and compose the whole
   // screen themselves — Logs, Terminal and the Editor each borrow the shared header
   // and own everything below it; see buildView(). Anything not listed is
   // views/workspace.js. A new tab needs both lines: one missing from TABS.workspace
   // is rewritten by normalize() to the remembered tab before it is ever looked up.
-  var TAB_VIEWS = { logs: 'logs', terminal: 'terminal', editor: 'editor', diagrams: 'diagrams', databases: 'databases' };
+  var TAB_VIEWS = { logs: 'logs', terminal: 'terminal', editor: 'editor', databases: 'databases' };
 
-  var PARENT = { diff: 'files', files: 'workspace', pr: 'workspace', workspace: null, grid: null, usage: null, prs: null, settings: null };
+  // Views drawn by a module of another name: both whiteboard screens are
+  // views/whiteboards.js (SB.views.whiteboards), which owns the home and the canvases.
+  var VIEW_MODULES = { whiteboard: 'whiteboards' };
+
+  var PARENT = {
+    diff: 'files', files: 'workspace', pr: 'workspace', workspace: null, grid: null, usage: null, prs: null, settings: null,
+    whiteboards: null, whiteboard: 'whiteboards'
+  };
 
   // A route that needs no workspace on screen: the three free screens, and a pull
   // request from the list.
@@ -169,6 +182,15 @@ window.SB = window.SB || {};
     byWs[route.view] = route.tab;
   }
 
+  // The folder the Whiteboards screen opens on when a route does not name one: the
+  // folder of the board last shown, or the one last looked at there (views/whiteboards.js
+  // keeps whichever came last, across launches). `all` when that module is missing.
+  function whiteboardFolder() {
+    var wb = SB.views.whiteboards;
+    if (!wb || typeof wb.lastFolder !== 'function') return 'all';
+    try { return String(wb.lastFolder() || '') || 'all'; } catch (e) { return 'all'; }
+  }
+
   // A partial route inherits from the current one, so a segmented control can
   // call SB.go({tab:'logs'}) and a file row SB.go({view:'diff', repo, path}).
   function normalize(route) {
@@ -176,6 +198,12 @@ window.SB = window.SB || {};
     var cur = state.route || {};
     var view = VIEWS[r.view] ? r.view : (VIEWS[cur.view] ? cur.view : 'workspace');
     if (view === 'usage' && state.usageConfigured === false) view = 'grid';
+    // An open board is named by its id; with none to name, the board's screen is the
+    // Whiteboards screen. A route to the old Diagrams tab — a caller written before
+    // whiteboards left the workspace — lands there too, rather than on the first tab.
+    var board = view === 'whiteboard' ? (r.board || (cur.view === 'whiteboard' ? cur.board : null) || null) : null;
+    if (view === 'whiteboard' && !board) view = 'whiteboards';
+    if (view === 'workspace' && r.tab === 'diagrams') view = 'whiteboards';
     var wsId = r.wsId || cur.wsId || null;
     var same = cur.view === view;
     // A pull request named by number (from the Pull requests list) carries no
@@ -188,7 +216,7 @@ window.SB = window.SB || {};
     if (FREE[view] || number) wsId = null;
     var list = TABS[view] || [];
 
-    var out = { view: view, wsId: wsId, tab: null, repo: null, path: null, owner: null, number: null };
+    var out = { view: view, wsId: wsId, tab: null, repo: null, path: null, owner: null, number: null, folder: null, board: null };
     if (list.length) out.tab = list.indexOf(r.tab) !== -1 ? r.tab : tabFor(wsId, view);
     if (view === 'diff' || view === 'pr') out.repo = r.repo || (same ? cur.repo : null) || null;
     if (view === 'diff') out.path = r.path || (same ? cur.path : null) || null;
@@ -196,17 +224,25 @@ window.SB = window.SB || {};
       out.number = number;
       out.owner = r.owner || (same ? cur.owner : null) || null;
     }
+    // The home's folder is never inherited from the screen being left: the rail's row
+    // and the breadcrumb ask for "the Whiteboards screen", and the remembered folder is
+    // the answer (the board just shown, or the folder last looked at).
+    if (view === 'whiteboards') out.folder = typeof r.folder === 'string' && r.folder ? r.folder : whiteboardFolder();
+    if (view === 'whiteboard') out.board = String(board);
     return out;
   }
 
+  // Every field normalize() carries, or two boards (or two folders) would be the same
+  // route: go() would take the second for a re-render and never move state.route.
   function sameRoute(a, b) {
     return !!a && !!b && a.view === b.view && a.wsId === b.wsId && a.tab === b.tab &&
       (a.repo || null) === (b.repo || null) && (a.path || null) === (b.path || null) &&
-      (a.owner || null) === (b.owner || null) && (a.number || null) === (b.number || null);
+      (a.owner || null) === (b.owner || null) && (a.number || null) === (b.number || null) &&
+      (a.folder || null) === (b.folder || null) && (a.board || null) === (b.board || null);
   }
 
   function routeKey(r) {
-    return [r.view, r.wsId, r.tab, r.repo, r.path, r.owner, r.number].join('|');
+    return [r.view, r.wsId, r.tab, r.repo, r.path, r.owner, r.number, r.folder, r.board].join('|');
   }
   SB.routeKey = routeKey;
 
@@ -294,11 +330,14 @@ window.SB = window.SB || {};
     try { return window.localStorage.getItem(LAST_KEY); } catch (e) { return null; }
   }
 
-  // A pull request from the list counts as the list: the window comes back to it.
+  // A pull request from the list counts as the list, and an open whiteboard as the
+  // Whiteboards screen: the window comes back to the list (in the board's folder).
   function rememberScreen(route) {
     // Settings is visited, not worked in: the window comes back to wherever it was before.
     if (route.view === 'settings') return;
-    var screen = standalone(route) ? (route.view === 'pr' ? 'prs' : route.view) : 'workspace';
+    var screen = standalone(route)
+      ? (route.view === 'pr' ? 'prs' : route.view === 'whiteboard' ? 'whiteboards' : route.view)
+      : 'workspace';
     try { window.localStorage.setItem(SCREEN_KEY, screen); } catch (e) { /* storage off */ }
   }
 
@@ -361,11 +400,15 @@ window.SB = window.SB || {};
 
   // Invalidation marks entries stale instead of deleting them, so a revalidating
   // screen keeps showing the data it already has rather than flashing a spinner.
-  function invalidate(prefix) {
+  function markStale(prefix) {
     var keys = Object.keys(loads);
     for (var i = 0; i < keys.length; i++) {
       if (prefix === undefined || prefix === null || keys[i].indexOf(String(prefix)) === 0) loads[keys[i]].stale = true;
     }
+  }
+
+  function invalidate(prefix) {
+    markStale(prefix);
     schedule();
   }
   SB.invalidate = invalidate;
@@ -511,10 +554,14 @@ window.SB = window.SB || {};
   }
   SB.refresh = refresh;
 
+  // A workspace's first scan, if nothing has asked for one yet. go() calls it for the
+  // workspace it lands on; a whiteboard's terminal panels and workspace pickers call it
+  // for workspaces no route has visited, whose branch would otherwise never be known.
   function ensureScanned(wsId) {
     var ws = state.byId[wsId];
     if (ws && !ws.scanned && !scans[wsId]) refresh(wsId);
   }
+  SB.ensureScanned = ensureScanned;
 
   function currentWorkspace(id) {
     return state.byId[id || state.route.wsId] || null;
@@ -845,10 +892,12 @@ window.SB = window.SB || {};
   function bell(wsId, on) {
     if (!wsId) return;
     var want = !!on;
-    // The Grid only reads a terminal's bell while that square shows Terminal.
-    // Changes and Diagrams leave its output hidden, unless the floating terminal
-    // is open, so a hidden terminal's bell stays unread.
-    if (want && (gridShows(wsId) || (SB.views.diagrams && SB.views.diagrams.terminalVisible(wsId)))) return;
+    // The Grid only reads a terminal's bell while that square shows Terminal; Changes
+    // and a whiteboard leave its output hidden, so a hidden terminal's bell stays unread.
+    // A whiteboard's own terminal panels are read only while the keyboard is in one:
+    // several can float over a board at once, and the blue dot on a panel that is merely
+    // open is exactly how the user learns which of them Claude has finished in.
+    if (want && (gridShows(wsId) || whiteboardCall('terminalFocused', wsId))) return;
     if (!!state.bell[wsId] === want) return;
     if (want) state.bell[wsId] = true;
     else delete state.bell[wsId];
@@ -861,8 +910,28 @@ window.SB = window.SB || {};
     return state.route.view === 'prs' || (state.route.view === 'pr' && !state.route.wsId);
   }
 
+  // The Whiteboards row is lit for the screen and for an open board alike.
+  function onWhiteboards() {
+    return state.route.view === 'whiteboards' || state.route.view === 'whiteboard';
+  }
+
+  // Asks views/whiteboards.js a yes/no question, feature-checked: a build without it,
+  // or a method that threw, answers no. The bell, retirePanes() and ⌘A all ask it in
+  // the middle of something that must not fall over.
+  function whiteboardCall(name, arg) {
+    var wb = SB.views.whiteboards;
+    if (!wb || typeof wb[name] !== 'function') return false;
+    try { return !!wb[name](arg); } catch (err) {
+      console.error('[switchboard] whiteboards ' + name + ':', err);
+      return false;
+    }
+  }
+
+  // The lit top row is part of the signature: without its letter, leaving the
+  // Whiteboards screen for Usage or Settings reads ''→'' and the row would stay lit.
   function sidebarSignature() {
-    var parts = [state.route.wsId || '', state.route.view === 'grid' ? 'G' : onPrs() ? 'P' : '', state.booted ? '1' : '0'];
+    var lit = state.route.view === 'grid' ? 'G' : onPrs() ? 'P' : onWhiteboards() ? 'W' : '';
+    var parts = [state.route.wsId || '', lit, state.booted ? '1' : '0'];
     for (var i = 0; i < state.workspaces.length; i++) {
       var ws = state.workspaces[i];
       parts.push(ws.section + '/' + ws.id + '/' + dotFor(ws));
@@ -882,12 +951,9 @@ window.SB = window.SB || {};
     nav.setAttribute('data-sig', sig);
     d.clear(nav);
 
-    if (!state.workspaces.length) {
-      nav.appendChild(d.empty(state.booted ? 'no workspaces' : 'looking…'));
-      return;
-    }
-
-    // Above the groups: Grid is shared across workspaces, with no activity dot.
+    // Above the groups: Grid is shared across workspaces, with no activity dot. The
+    // three top rows come before the zero-workspace return below — whiteboards belong to
+    // no workspace, and a rail with none configured must still reach them.
     var onGrid = state.route.view === 'grid';
     nav.appendChild(h('button.it.top' + (onGrid ? '.on' : ''), {
       type: 'button',
@@ -905,6 +971,25 @@ window.SB = window.SB || {};
       'aria-current': prs ? 'true' : null,
       onClick: function () { go({ view: 'prs' }); }
     }, d.icon('pr'), h('span', null, 'Pull requests'), h('span.sp')));
+
+    // The third: every whiteboard, in the folders the user makes. No dot — a board has
+    // nothing running; its terminals' bells ring on their workspaces' rows below.
+    var wb = onWhiteboards();
+    nav.appendChild(h('button.it.top' + (wb ? '.on' : ''), {
+      type: 'button',
+      title: 'Your whiteboards, in folders you make',
+      'aria-current': wb ? 'true' : null,
+      onClick: function () { go({ view: 'whiteboards' }); }
+    }, d.icon('board'), h('span', null, 'Whiteboards'), h('span.sp')));
+
+    if (!state.workspaces.length) {
+      nav.appendChild(d.empty(state.booted ? 'no workspaces' : 'looking…'));
+      if (hadFocus) {
+        var top = nav.querySelector('.it.on') || nav.querySelector('.it');
+        if (top) { try { top.focus({ preventScroll: true }); } catch (e) { top.focus(); } }
+      }
+      return;
+    }
 
     var section = null;
     state.workspaces.forEach(function (ws) {
@@ -1400,11 +1485,16 @@ window.SB = window.SB || {};
     if (name === 'usage' && !state.usageConfigured) name = 'grid';
     // Usage is about this Mac's Claude sign-in and Pull requests about its GitHub
     // sign-in, not a workspace: both show with none, as does a PR opened from the list.
-    var free = name === 'usage' || name === 'prs' || name === 'settings' || (name === 'pr' && !state.route.wsId && !!state.route.number);
+    // So do the Whiteboards screen and an open board, which belong to folders. This is
+    // its own test rather than FREE: the Grid is free of a workspace too, yet with none
+    // configured it has nothing to show but the setup screen.
+    var free = name === 'usage' || name === 'prs' || name === 'settings' ||
+      name === 'whiteboards' || name === 'whiteboard' ||
+      (name === 'pr' && !state.route.wsId && !!state.route.number);
     if (!free && !state.workspaces.length) return noWorkspacesScreen();
     if (!free && name !== 'grid' && !currentWorkspace()) return noWorkspacesScreen();
 
-    var view = SB.views[name];
+    var view = SB.views[VIEW_MODULES[name] || name];
     // Logs is a TAB of the workspace route but lives in its own file, and it
     // composes the whole screen itself — it borrows the shared header from
     // SB.views.workspace.header(ws, state) and owns the .bd.pane below it. So the
@@ -1569,11 +1659,12 @@ window.SB = window.SB || {};
     mounted.key = key;
     applyNotice(main);
 
-    // The Diagrams tab's editor stays mounted behind every other screen; it has to know
-    // the moment it is not the one showing, or it would answer keys meant for that one.
-    var dg = SB.views.diagrams;
-    if (dg && typeof dg.shown === 'function') {
-      try { dg.shown(state.route); } catch (err) { console.error('[switchboard] diagrams shown:', err); }
+    // A whiteboard's editor stays mounted behind every other screen; it has to know the
+    // moment it is not the one showing, or it would answer keys meant for that one. Its
+    // terminal panels are re-placed and their dots repainted here too.
+    var wbv = SB.views.whiteboards;
+    if (wbv && typeof wbv.shown === 'function') {
+      try { wbv.shown(state.route); } catch (err) { console.error('[switchboard] whiteboards shown:', err); }
     }
     var dbv = SB.views.databases;
     if (dbv && typeof dbv.shown === 'function') dbv.shown(state.route);
@@ -1634,8 +1725,8 @@ window.SB = window.SB || {};
       // inside that window and the pane its output is about to arrive in gets thrown out
       // from under it. hasLivePane() is the view's own answer to the same question and is
       // true from the instant the pane exists. This is the caller it was written for.
-      var diagramTerminal = SB.views.diagrams && SB.views.diagrams.terminalVisible(id);
-      if (canTerm && id !== onTerm && !diagramTerminal && onGrid.indexOf(id) === -1 && shell.status !== 'running') {
+      var onBoard = whiteboardCall('terminalShown', id);
+      if (canTerm && id !== onTerm && !onBoard && onGrid.indexOf(id) === -1 && shell.status !== 'running') {
         var paneAlive = typeof term.hasLivePane === 'function' && term.hasLivePane(id);
         if (!paneAlive) term.dispose(id);
       }
@@ -1764,22 +1855,22 @@ window.SB = window.SB || {};
   // DOM selection — but this is the path it takes now.
   function handleEdit(e) {
     if (!e || !e.action) return;
-    // ⌘A is a native menu accelerator. On diagrams it toggles the workspace's
-    // floating terminal, including while xterm has focus; text editors decline.
-    var dg = SB.views.diagrams;
-    if (e.action === 'selectAll' && dg && dg.toggleTerminalShortcut()) return;
+    // ⌘A is a native menu accelerator. On a whiteboard it shows or hides the board's
+    // terminals, including while one of their xterms has focus; text editors decline.
+    var wb = SB.views.whiteboards;
+    if (e.action === 'selectAll' && whiteboardCall('toggleTerminalShortcut')) return;
     var term = SB.views.terminal;
     var done = term && typeof term.editAction === 'function'
       ? term.editAction(e.action, e.text) : false;
     if (done) return;
-    // The Diagrams canvas: Undo and Redo are its own, Copy, Cut and Paste move its
+    // A whiteboard's canvas: Undo and Redo are its own, Copy, Cut and Paste move its
     // selected boxes, and a pasted screenshot goes onto it as a picture — before the
     // line below throws an image paste away. Only while the canvas has the keyboard; a
     // box's text field gets the document's fallback.
-    if (dg && typeof dg.editAction === 'function') {
+    if (wb && typeof wb.editAction === 'function') {
       try {
-        if (dg.editAction(e.action, e.text, e.image)) return;
-      } catch (err) { console.error('[switchboard] diagrams edit:', err); }
+        if (wb.editAction(e.action, e.text, e.image)) return;
+      } catch (err) { console.error('[switchboard] whiteboards edit:', err); }
     }
     // A pasted screenshot arrives as the escaped path of a PNG main saved it to (§4.7):
     // that is for a terminal, whose Claude Code reads the image from it. Typed into a
@@ -1795,7 +1886,7 @@ window.SB = window.SB || {};
       } catch (err) { console.error('[switchboard] editor edit:', err); }
     }
     if (editableFocused() && e.action !== 'close') return;
-    // The Diagrams tab's Google Images panel is a <webview>, and main runs the Edit menu
+    // A whiteboard's Google Images panel is a <webview>, and main runs the Edit menu
     // on its page itself (§4.17). One that arrives here anyway must not fall back onto
     // this document: Select All would select the whole window behind Google's page.
     if (webviewFocused() && e.action !== 'close') return;
@@ -1901,14 +1992,35 @@ window.SB = window.SB || {};
       try { ed.refresh(wantFetch); } catch (err) { console.error('[switchboard] editor refresh:', err); }
     }
     // A CLI installed or signed in to while the window was away changes who can answer.
-    var dgv = SB.views.diagrams;
-    if (dgv && typeof dgv.refresh === 'function') {
-      try { dgv.refresh(); } catch (err) { console.error('[switchboard] diagrams refresh:', err); }
+    var wbv = SB.views.whiteboards;
+    if (wbv && typeof wbv.refresh === 'function') {
+      try { wbv.refresh(); } catch (err) { console.error('[switchboard] whiteboards refresh:', err); }
     }
     var dbv = SB.views.databases;
     if (dbv && typeof dbv.refresh === 'function') dbv.refresh(wantFetch);
     var a = api();
     if (a) Promise.resolve(a.runStates()).then(adoptRunStates, noop);
+  }
+
+  // Main says a whiteboard or folder changed (sb:evt:wbChanged) — after every write,
+  // the editor's autosave included, which is many a minute while a board is being drawn.
+  // Every 'wb:' load goes stale QUIETLY, and only a screen showing the list is redrawn
+  // for it: the Whiteboards screen, and the Grid while one of its squares is choosing a
+  // board (a board made, renamed, archived or deleted meanwhile belongs in that list).
+  // Never for a save there: a render for an autosave would rebuild the Grid's four
+  // squares (their terminals re-parented, focus restored) to re-sort a list by a minute.
+  // Whoever shows the list next revalidates it then. An open board learns of its own
+  // writes from the editor.
+  function handleWhiteboards(change) {
+    markStale('wb:');
+    if (state.route.view === 'whiteboards') { schedule(); return; }
+    if (state.route.view !== 'grid' || (change && change.reason === 'save')) return;
+    var grid = SB.views.grid;
+    var choosing = false;
+    if (grid && typeof grid.choosingBoard === 'function') {
+      try { choosing = !!grid.choosingBoard(); } catch (err) { console.error('[switchboard] grid choosingBoard:', err); }
+    }
+    if (choosing) schedule();
   }
 
   function subscribe() {
@@ -1927,6 +2039,9 @@ window.SB = window.SB || {};
     try { a.onPublish(handlePublish); } catch (e) { console.error('[switchboard] onPublish:', e); }
     if (typeof a.onOpenSettings === 'function') {
       try { a.onOpenSettings(function () { go({ view: 'settings' }); }); } catch (e) { console.error('[switchboard] onOpenSettings:', e); }
+    }
+    if (typeof a.onWhiteboardsChanged === 'function') {
+      try { a.onWhiteboardsChanged(handleWhiteboards); } catch (e) { console.error('[switchboard] onWhiteboardsChanged:', e); }
     }
   }
 
@@ -1956,12 +2071,13 @@ window.SB = window.SB || {};
         try { used = ed.onKey(e); } catch (err) { console.error('[switchboard] editor key:', err); }
         if (used) { e.preventDefault(); return; }
       }
-      // The Diagrams tab: Esc leaves a full-screen diagram before it means back, and ⌘↵
-      // over the canvas is ✦ Answer (the editor's own listener), never Start.
-      var dv = SB.views.diagrams;
-      if (dv && typeof dv.onKey === 'function') {
+      // A whiteboard: ⌘A shows or hides its terminals, Esc leaves a full-screen board
+      // before it means anything else and never leaves the board itself, and ⌘↵ over the
+      // canvas is ✦ Answer (the editor's own listener), never Start.
+      var wv = SB.views.whiteboards;
+      if (wv && typeof wv.onKey === 'function') {
         var kept = false;
-        try { kept = dv.onKey(e); } catch (err) { console.error('[switchboard] diagrams key:', err); }
+        try { kept = wv.onKey(e); } catch (err) { console.error('[switchboard] whiteboards key:', err); }
         if (kept) { e.preventDefault(); return; }
       }
       var dbv = SB.views.databases;
@@ -1970,8 +2086,11 @@ window.SB = window.SB || {};
         return;
       }
       if (e.key === 'Escape') {
-        // The composer, the terminal and Monaco (a textarea too) keep Esc.
-        if (typing(e.target)) return;
+        // The composer, the terminal and Monaco (a textarea too) keep Esc. So does
+        // whatever already acted on it — a dialog or menu that closed on this very key
+        // (Radix marks it handled before it gets here): one Esc is one step, never a
+        // dialog closing AND the screen going back underneath it.
+        if (e.defaultPrevented || typing(e.target)) return;
         if (back()) e.preventDefault();
         return;
       }

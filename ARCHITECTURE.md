@@ -16,7 +16,7 @@ edit files you do not own.
 
 - **No build step, no bundler, no framework.** Plain CommonJS in the main process,
   plain *classic* scripts (no ES modules, no `import`) in the renderer. **One exception,
-  and only one:** the Diagrams tab's editor (§4.17, R15) is a web admin's React Flow
+  and only one:** the whiteboard editor (§4.17, R15) is a web admin's React Flow
   editor, copied into `src/diagrams/` and mirrored by hand — four thousand lines that would
   otherwise be two editors to keep alike. `scripts/build-diagrams.js` builds it into
   `src/renderer/diagrams/diagrams.{js,css}`: one IIFE that sets `window.SBDiagrams`, and a
@@ -81,6 +81,8 @@ switchboard/
   src/renderer/views/workspace.js — Changes tab (repo rows) + header              [R4]
   src/renderer/views/logs.js    — Logs tab (terminal)                             [R5]
   src/renderer/views/terminal.js — Terminal tab (a real login shell)               [R8]
+  src/renderer/views/wbterminals.js — a whiteboard's terminals: panels, tray, pins [R15]
+  src/renderer/wbterminals.css  — their styles, after styles.css                  [R15]
   src/renderer/views/grid.js    — Grid: four workspace panes, in views            [R10]
   src/renderer/views/usage.js   — Usage screen + the Grid's five-hour gauge         [R11]
   src/main/usage.js             — Claude usage: the keychain token, the endpoint    [M7]
@@ -90,15 +92,16 @@ switchboard/
   src/renderer/views/pr.js      — Pull request screen                             [R7]
   src/renderer/views/prs.js     — Pull requests screen: every open PR of yours    [R12]
   src/renderer/views/editor.js  — Editor tab (Monaco over the workspace's repos)  [R13]
-  src/main/diagrams.js          — the Diagrams tab's files, per workspace; pictures  [M10]
-  src/main/images.js            — Google Images beside a diagram: webview, session, fetch [M12]
+  src/main/whiteboards.js       — Whiteboards: folders, boards, documents, pictures; the migration [M10]
+  src/main/images.js            — Google Images beside a whiteboard: webview, session, fetch [M12]
   src/main/answer.js            — ✦ Answer: Claude Code / Codex / Claude API / OpenAI [M11]
   src/main/databases.js         — local encrypted connections and read-only browsing [M13]
   src/renderer/views/databases.js — Databases tab: connections, entities, records     [R17]
-  src/renderer/views/diagrams.js — Diagrams tab: the seam to the editor bundle       [R15]
+  src/renderer/views/whiteboards.js — Whiteboards screen, an open board, the canvases [R15]
   src/renderer/views/settings.js — Settings screen: who answers, API keys            [R16]
   src/diagrams/                 — the editor bundle's sources (mirrored by hand)     [R15]
   scripts/build-diagrams.js     — builds src/diagrams into src/renderer/diagrams/   [R15]
+  scripts/test-whiteboards.js   — the store and the migration, under plain node    [M10]
 ```
 
 ---
@@ -200,6 +203,48 @@ GridView = {                              // one of the Grid's views — §4.10
   name: 'Sample',
   cells: ['sample-1', '/Users/…/any/folder', null, 'sample-4'],   // always four; null is an empty
                                          // square; an absolute path is a FOLDER square — §4.10
+}
+
+Whiteboard = {                            // one board as every list and write answers it — §4.17
+  id: '6f1d2c3a-…',                       // a UUID; the board's file is boards/<id>.json
+  name: 'Search filters',                 // 1–120, one line; unique within its folder
+  kind: 'flow',
+  folderId: '0b7e…' | null,               // null is No folder — and so is a folder that has gone
+  workspace: 'sample-2' | null,           // the rail workspace ✦ Answer's CLIs read for it (§4.18);
+                                         // an id, never a path
+  createdAt: '…', updatedAt: '…',         // updatedAt moves on a save or a rename, nothing else
+  archivedAt: null | '…',
+  boxes: 12,                              // nodes on it, pinned terminals left out
+  reads: ['sample-2'],                    // the workspaces its AI boxes say they read (answeredIn), sorted
+  thumb: [[4, 4.4, 10.7, 5.5], …],        // the list's mini preview: up to 14 boxes at the editor's own
+                                         // node sizes, fitted inside a 4px margin of 40×30, none under 6×4
+}                                         // + `spec` where the whole board is asked for (get, create, duplicate)
+
+Folder = {                                // a folder the user made — a row in store.json, never a directory
+  id: '0b7e…',
+  name: 'sample',                         // 1–60, one line; unique whatever the case
+  createdAt: '…',
+  moved: true,                            // the migration made it and nothing has happened in it since
+  count: 3, archived: 1,                  // list() only: its active and its archived boards
+}
+
+TerminalSlot = {                          // where a PINNED terminal's live xterm goes, as the editor
+                                         // reports it to the host (onTerminalSlots) — §4.17, R15
+  wsId: 'sample-2', nodeId: '…',
+  body: { left, top, width, height },     // CLIENT px under the node's 30-unit header, inset 5px
+                                         // left, right and bottom so the resize handles stay reachable
+  clip: { left, top, right, bottom },     // CLIENT px of the React Flow pane
+  zoom: 0.8,
+  size: { width: 560, height: 340 },      // flow units, the COMMITTED size — it moves when a resize ends
+  font: 12.5,                             // rendered px: the node's stored font × zoom
+  minimized: false, selected: true,
+  resizing: false,                        // from a resize handle's press until its size is committed,
+                                         // or until that press is let go having moved nothing
+  covered: false,                         // the canvas's own floating UI is over `body`
+  holes: [{ left, top, right, bottom }],  // CLIENT px of the canvas's chrome over `body` — the tool
+                                         // rail, the undo strip, the zoom controls — cut to it; [] if none
+  live: true,                             // false when minimized, folded away, its workspace has left
+                                         // the rail, or font < 7 px — the node draws its own card then
 }
 
 Usage = {                                 // what Anthropic says about the plan — §4.11
@@ -341,7 +386,16 @@ Optional configuration fields:
   `links` override matching repo links. No command or port inventory ships by default.
 - `terminal.appearance`, `sidebar.visible`, and `grid.views` store UI preferences.
   Each grid view has an `id`, `name`, and four `cells` (workspace IDs, absolute folder
-  paths, or null).
+  paths, or null). Which whiteboard a Grid square shows is not here: it is this Mac's
+  arrangement, in localStorage (§4.10).
+- `answer` is the ✦ Answer block (§4.18): who answers, the models and efforts, Web
+  access and Subtext. Never a key — those are in `keys.json`.
+
+Whiteboards keep a store of their own beside this file, `whiteboards/` (§4.17), and
+nothing about them is in `config.json`: the folders, the workspace a new board starts
+with, the recent workspaces the pickers lead with and the one-time migration notice are
+all in `whiteboards/store.json`. `SWITCHBOARD_CONFIG` moves that folder with the config,
+which is how every test and smoke keeps out of `~/.switchboard`.
 
 Invalid configuration reports `configError` and falls back to an empty setup;
 it is not overwritten on load. Missing roots produce no automatic discoveries.
@@ -499,7 +553,8 @@ needs nothing but the `gh` sign-in the rest of the app already uses — no token
 The Terminal tab is a real interactive login shell in the workspace directory — the
 thing the user runs `claude` in. It is **not** the dev server: `Stop` never touches it,
 and it survives every navigation. One shell per workspace, opened lazily the first time
-that workspace's Terminal tab is shown.
+anything shows it — the workspace's Terminal tab, a Grid square, or a terminal on a
+whiteboard (R8).
 
 **It survives quitting, too.** With tmux installed, the shell runs inside a tmux session
 on Switchboard's own socket and what the app holds is a client attached to it; quitting
@@ -677,29 +732,22 @@ their realpath: realpath follows links, so `CLAUDE.md -> AGENTS.md` and `AGENTS.
 resolved to one path, read as "the same file", and `fs.rename` replaced the real file with
 the link — a dangling self-reference, the bytes gone and never in the Trash. Measured.
 
-### 4.17 Diagrams
+### 4.17 Whiteboards
 
-**Markdown documents.** A `shape: "document"` node stores a display label and UUID
-`documentId`; its source is a plain file at
-`<config dir>/diagrams/<workspace-folder>/documents/<documentId>.md`.
-`DocumentPanel.tsx` opens floating by default, with docked and focus layouts and
-Read / Write / Split modes. Rendering reuses `SB.markdown` with document soft breaks.
-The native textarea owns its editing history; Tab indents Markdown and panel events
-stay outside canvas shortcuts. `useFlowDocuments.ts` owns buffers and serial save
-queues per workspace, retaining failed edits across diagram switches. Saves use the
-file's content hash as a revision, refusing stale writes after an external edit.
-`diagramsCreateDocument`, `diagramsGetDocument`, and `diagramsSaveDocument` bridge to
-atomic writes in `main/diagrams.js`, whose `settle()` includes document writes.
-Copies and duplicates create independent files; removing nodes retains their files
-for undo and recovery. Archived canvases open documents in Read mode. The isolated
-production-bundle check is `npm run test:documents:browser`.
-
-The fifth workspace tab, **Diagrams** (added 2026-10-04, the user's ask: their web
-admin's diagram feature as a desktop app, inside Switchboard, with its ✦ Answer using
-"the corresponding workspace and the CLI tool … I should be able to select what CLI tool
-it is, whether it's Codex or Claude"). Flow diagrams — boxes, arrows, sticky notes, text
-and pictures, arranged by hand, Tab for the next box — in the admin's own editor, saved
-as you go. The renderer side is R15; who answers ✦ Answer is §4.18.
+**Whiteboards** is a free screen in the rail, the third row above the workspaces beside
+Grid and Pull requests (2026-10-08, from an approved mock-up). It began on 2026-10-04 as
+the workspace's fifth tab, **Diagrams** — the user's ask: their web admin's diagram
+feature as a desktop app, inside Switchboard, with its ✦ Answer using "the corresponding
+workspace and the CLI tool … I should be able to select what CLI tool it is, whether it's
+Codex or Claude". Flow diagrams — boxes, arrows, sticky notes, text, pictures and
+Markdown documents, arranged by hand, Tab for the next box — in the admin's own editor,
+saved as you go. A whiteboard belongs to no workspace: boards live in folders the user
+makes, and each board names the one workspace its ✦ Answer reads (§4.18). Terminals float
+over a board or are pinned to it — any number, one per workspace — and each is still that
+workspace's own shell (R8, R15). The renderer side is R15; who answers ✦ Answer is §4.18.
+What the user reads says whiteboard; the internal names — `src/diagrams`, `SBDiagrams`,
+`DiagramsPage`, `build:diagrams`, `test:diagrams` and the `sb:diagrams:*` channels kept
+below — stay as they were.
 
 **The editor is the admin's, mirrored by hand.** `src/diagrams/` holds copies of the
 admin's `app/dashboard/diagrams/*` and `lib/diagrams/*` under the same paths, so a change
@@ -733,20 +781,29 @@ per box: the strip says "Answering 3 boxes · Stop all", each box's toolbar stop
 own, and an answer that lands while you have moved on to another box leaves your
 selection and the view alone. ⌘I answers as ⌘↵ does. Edit ▸ Copy, Cut and Paste work on
 boxes: ⌘C keeps the selected boxes and the arrows between them for the bundle (any
-diagram) and puts their words on the clipboard; ⌘V puts new copies down centred on the
-pointer, but only while the clipboard still holds those words, so text copied since
+whiteboard) and puts their words on the clipboard; ⌘V puts new copies down centred on
+the pointer, but only while the clipboard still holds those words, so text copied since
 never pastes an older copy. An arrow can be **collapsed** (`collapsed: true` on the edge in
 the spec): `layout.ts foldFlow` hides what it points at and everything that can no longer
-be reached from the diagram's starting boxes without crossing a collapsed arrow (loops set
+be reached from the board's starting boxes without crossing a collapsed arrow (loops set
 aside, so a branch never folds away what leads to it); the editor hands React Flow those
 boxes marked hidden, lays out and pushes as if they weren't there, shows a "+N" on the box
 they are folded behind, carries them along when that box is dragged, and deletes them with
-it. Unfolding re-tidies the tree around them. A diagram has **no limit** on boxes, arrows
-or size (the admin's 60 / 120 / 512 KB, `types.ts` says why not here): the layout and save
-paths stay in single milliseconds into the thousands of boxes. **Actions ▸ Rename**
-(`RenameDiagramDialog.tsx`) writes a new name with the drawing as it stands. And the image
+it. Unfolding re-tidies the tree around them. A whiteboard has **no limit** on boxes,
+arrows or size (the admin's 60 / 120 / 512 KB, `types.ts` says why not here): the layout
+and save paths stay in single milliseconds into the thousands of boxes. **Actions ▸
+Rename** (`RenameDiagramDialog.tsx`) writes the name and nothing else. And the image
 tool is a menu — a file, or **Google Images** (G): Google's own results in a panel docked
-on the canvas's right, whose pictures drag straight onto it (below). `npm run
+on the canvas's right, whose pictures drag straight onto it (below). The tool rail fits
+the canvas's height (`data-rail-fit`): at full size, `compact` (28px tools packed closer),
+or in two `columns` on a canvas shorter still — a Grid square, a small window — where
+what a tool opens sits beside the whole rail rather than over the next column; it never
+runs off the canvas with its first tools out of reach. Full screen re-frames the drawing
+by hand, not with `fitView`'s d3 transition, which measures the pane a frame or two late
+and, for a board taken off screen in between, interpolated over a pane of no size, NaN
+on every frame: the target is worked out once from the pane on screen and each step is
+set outright; a pane gone part-way jumps to the end, a pan or zoom by hand wins, and a
+board already off screen is framed at once, not animated, when it is back. `npm run
 test:diagrams` covers the layout and folding (`scripts/test-flow-layout.js`).
 
 **Condense replaces an explored discussion.** A rectangle selection of connected text
@@ -757,55 +814,339 @@ corrections and asks for a few standalone concepts, fewer than the selection and
 most six. `lib/diagrams/answer.ts` validates every returned part before the editor
 changes anything. `lib/diagrams/condense.ts` keeps IDs and layout local: incoming arrows
 fan out to the summaries, outgoing continuations follow the final concept, and every
-unselected node survives. The replacement is one undo step. A content/connection
-fingerprint prevents a pending response from replacing a changed discussion; moves
-are allowed, and Stop, undo/redo, or leaving the diagram cancels it. Graph and prompt
-tests are in `scripts/test-condense.js` and `scripts/test-answer.js`.
+unselected node survives. A pinned terminal in the selection is refused ("Leave
+terminals out of the selection before condensing."), and one beside it stays where it
+was put. The replacement is one undo step. A content/connection fingerprint prevents a
+pending response from replacing a changed discussion; moves are allowed, and Stop,
+undo/redo, or leaving the whiteboard cancels it. Graph and prompt tests are in
+`scripts/test-condense.js` and `scripts/test-answer.js`.
 
-**A diagram belongs to a workspace and lives on this Mac.** One JSON file per diagram —
-the admin's row, `{ id, name, kind, createdAt, updatedAt, archivedAt, spec }` minus the
-product — in `<config dir>/diagrams/<workspace>-<hash>/<id>.json`, beside the config
-rather than in a repo, so it never appears in Changes or gets staged with
-`git add -A`. The folder name hashes the whole workspace id. These
-are not the admin's diagrams and never sync with them; the format is the same, so a spec
-can be carried either way by hand.
+**A whiteboard lives on this Mac, in a folder the user makes.** Everything is under
+`<config dir>/whiteboards/` — beside the config rather than in a repo, so it never
+appears in Changes or gets staged with `git add -A`:
+
+```
+whiteboards/
+  store.json          { version: 1, folders: [Folder], lastWorkspace, recentWorkspaces,
+                        notice: { boards, folders, dismissed } | null, migration: {…} | null }
+  boards/<id>.json    one board: the admin's row { id, name, kind, createdAt, updatedAt,
+                      archivedAt, spec } minus the product, plus folderId, workspace and,
+                      on a migrated one, migratedFrom: { legacyKey, workspace }
+  documents/<id>.md   every board's Markdown documents, keyed by document id
+  images/<sha>.<ext>  pictures, kept once by content (below)
+```
+
+Folders exist only in `store.json`. A board names its folder by id and every board file
+sits flat in `boards/`, so moving a board or renaming a folder is one small write, and a
+folder's name is only ever data, never a path. A board names its workspace the same way:
+a rail workspace id, which `index.js` resolves to a folder and nothing else does. These
+are not the admin's diagrams and never sync with them; the spec's format is the same, so
+one can be carried either way by hand. A field a board file holds that this version does
+not know survives every write. A file in `boards/` that is not a board is skipped by the
+list and logged, and `get` says so; an unreadable `store.json` is copied aside as
+`store.unreadable-<ms>.json` before the first write replaces it, never overwritten unseen.
+
+**Every write goes through one chain.** Each board write and each `store.json` write —
+create, save, rename, workspace, move, duplicate, archive, delete, the folders, the
+notice, the recent workspaces and the migration itself — is a job on ONE serial chain,
+so a name check and the write it guards cannot interleave with another, and each goes
+through a temp file and a rename, so a crash cannot leave half a file. Documents keep a
+chain per file, and every copy into `documents/` — the migration's, a first open's
+(below) — runs on that document's chain too. `settle()` waits on all of them. After
+every successful write main sends `sb:evt:wbChanged` `{ reason, boardId?, folderId? }`
+(§4.7), `reason` one of `save`, `create`, `rename`, `workspace`, `move`, `duplicate`,
+`archive`, `delete`, `folder` and `notice`; the recent workspaces change no board or
+folder and send nothing, so a picker asks again each time it opens. Every `sb:wb:*`
+handler waits for the migration that runs before the first window (below), so nothing
+reads a half-moved store. Nothing here deletes anything but the one board, or the one
+empty folder, the user asked to delete.
 
 | `window.sb` | channel | returns |
 |---|---|---|
-| `sb.diagramsList(id)` | `sb:diagrams:list` | `{ ok, data: DiagramSummary[] }` — archived ones included, newest-touched first, no specs. A workspace with none answers `[]` |
-| `sb.diagramsGet(id, diagramId)` | `sb:diagrams:get` | `{ ok, data: summary + spec }` — the spec as stored; the bundle re-parses it with the admin's validator and shows what is wrong with one that no longer draws |
-| `sb.diagramsCreate(id, name, spec)` | `sb:diagrams:create` | `{ ok, data: detail }`, or `{ ok:false, error }` — a name already taken IN THAT WORKSPACE says so |
-| `sb.diagramsUpdate(id, diagramId, name, spec)` | `sb:diagrams:update` | the autosave: `{ ok, data: detail }`; `archivedAt` is left alone |
-| `sb.diagramsArchive(id, diagramId, archived)` | `sb:diagrams:archive` | `{ ok, data: summary }` — `updatedAt` does not move, so archiving reshuffles nothing |
-| `sb.diagramsDelete(id, diagramId)` | `sb:diagrams:delete` | `{ ok, data: { id } }` — for good; the confirmation dialog is the gate |
+| `sb.whiteboardsList()` | `sb:wb:list` | `{ ok, data: { folders: Folder[], boards: Whiteboard[], notice, lastWorkspace, recentWorkspaces, migration } }` — every board, archived ones included, newest edit first, no specs; folders by name (`sample 2` before `sample 10`, case ignored); `migration` is `{ error, skipped, legacyRoot, legacyLabel }` once one has run, else null — `legacyLabel` the old tree's real folder as the screen's sentences name it, the home written `~` (a finished run's renamed tree, or null when there was none; before then `<config dir>/diagrams`, or a rename a stopped run made and never recorded). Summaries are cached by the file's mtime, size and inode, so a board nobody touched is not parsed again. A store with nothing in it answers empty lists |
+| `sb.whiteboardsGet(id)` | `sb:wb:get` | `{ ok, data: Whiteboard + spec }` — the spec as stored; the bundle re-parses it with the admin's validator and shows what is wrong with one that no longer draws. `Whiteboard not found` for one that has gone |
+| `sb.whiteboardsCreate(req)` | `sb:wb:create` | `req = { folderId, name, spec, workspace? }` → `{ ok, data: Whiteboard + spec }`. `folderId` null is No folder; `workspace` left out starts the board with the workspace a new board starts with (below), null with none. A name already in that folder: `A whiteboard named “X” is already in “F” — pick another name` |
+| `sb.whiteboardsSaveSpec(id, spec)` | `sb:wb:saveSpec` | the autosave: `{ ok, data: Whiteboard }` — the spec only, never the name; `updatedAt` moves |
+| `sb.whiteboardsRename(id, name)` | `sb:wb:rename` | `{ ok, data: Whiteboard }` — the name only, unique in its folder; `updatedAt` moves |
+| `sb.whiteboardsSetWorkspace(id, wsId)` | `sb:wb:setWorkspace` | `{ ok, data: Whiteboard }` — the workspace ✦ Answer reads for it, or null. Not an edit of the board: `updatedAt` stays. A workspace (not null) also becomes the one used last and leads the recent ones |
+| `sb.whiteboardsMove(id, folderId)` | `sb:wb:move` | `{ ok, data: Whiteboard }` — into a folder, or No folder (null); `updatedAt` stays. Refused onto a name that folder already has: `A whiteboard named “X” is already in “F” — rename it first` |
+| `sb.whiteboardsDuplicate(id)` | `sb:wb:duplicate` | `{ ok, data: Whiteboard + spec }` — beside it, in the same folder with the same workspace, active, named `X copy` (then `X copy 2`, …). Every document its spec names is copied to a new file — read from the old tree when only it has one (below) — and the copy points at that |
+| `sb.whiteboardsArchive(id, archived)` | `sb:wb:archive` | `{ ok, data: Whiteboard }` — `updatedAt` does not move, so archiving reshuffles nothing |
+| `sb.whiteboardsDelete(id)` | `sb:wb:delete` | `{ ok, data: { id } }` — for good, the board's own file and nothing else; the confirmation dialog is the gate |
+| `sb.whiteboardsCreateFolder(name)` | `sb:wb:createFolder` | `{ ok, data: Folder }`, or `A folder named “F” already exists` |
+| `sb.whiteboardsRenameFolder(id, name)` | `sb:wb:renameFolder` | `{ ok, data: Folder }` — and a migrated folder stops being `moved` |
+| `sb.whiteboardsDeleteFolder(id)` | `sb:wb:deleteFolder` | `{ ok, data: { id } }` — an empty folder only: with any board in it, archived ones too, `Move its whiteboards out first` |
+| `sb.whiteboardsDismissNotice()` | `sb:wb:dismissNotice` | `{ ok, data: {} }` — the migration notice has been read and does not come back |
+| `sb.whiteboardsNoteWorkspace(wsId)` | `sb:wb:noteWorkspace` | `{ ok, data: { recentWorkspaces } }` — a terminal was opened in it on a board: it leads the pickers' Recent |
+| `sb.whiteboardsWorkspaces()` | `sb:wb:workspaces` | `{ ok, data: { workspaces: [{ id, project, dirLabel }], recent, last } }` — what a workspace picker offers: the rail in discovery order, each with its project and its folder (the home written `~`), the recent ones that are still in the rail, and `last`, the workspace a new board would start with. One `discover()`, never a scan |
+| `sb.whiteboardsCreateDocument(text)`, `sb.whiteboardsGetDocument(id)`, `sb.whiteboardsSaveDocument(id, text, revision)` | `sb:wb:createDocument`, `sb:wb:getDocument`, `sb:wb:saveDocument` | `{ ok, data: { id, text, revision, path } }`; a save whose revision is stale answers `code: 'conflict'`; a get for a document only the old tree has copies it in first. Markdown documents, below |
+| `sb.whiteboardsMigrate()` | `sb:wb:migrate` | `{ ok, data: { boards, folders, skipped, legacyRoot, already? } }` — the screen's Try again after a migration that stopped part way: it resumes where the last run left off, and `list()` then says how it went |
 | `sb.diagramsSaveImage(bytes, type)` | `sb:diagrams:saveImage` | `{ ok, src }` — `sbimg://image/<file>`; see below |
+| `sb.diagramsGetImagePath(src)` | `sb:diagrams:getImagePath` | `{ ok, data: path }` — a picture's file on disk, for its copy-path button; an `https:` picture an imported spec names is fetched and kept first |
 | `sb.diagramsClipboardImage()` | `sb:diagrams:clipboardImage` | `{ ok, bytes, type }` — the clipboard's PNG, for Edit ▸ Paste over the canvas |
 | `sb.diagramsFetchImage(url, referrer?)` | `sb:diagrams:fetchImage` | `{ ok, bytes, type, name }` — a picture from the Google Images panel, by its address, as PNG, JPEG or WebP; or `{ ok:false, error }`. See Google Images, below |
 | `sb.diagramsDirty(count)` | `sb:diagrams:dirty` | `{ ok }` — 0 or 1, whenever it changes; see below |
 
+The pictures, the clipboard, the Google Images fetch, the dirty count and the flush keep
+their `sb:diagrams:*` names: they are internal, and the bundle mirrors them.
+
+**Folders are the user's.** Any number, made, renamed and deleted on the Whiteboards
+screen (R15). A folder's name is one line of 1–60 characters, unique whatever its case,
+and folders list by name, numbers in order. A board's name is unique within its folder —
+exactly, as the admin's is within a product — and the boards in no folder are one
+namespace of their own, so two folders may each hold a "Search filters". A board whose
+`folderId` names a folder that is not there lists as No folder. A folder the migration
+made is `moved`, and the screen marks it so, until something happens in it: the folder
+renamed, a board created in it or moved into it, or one of its boards saved, renamed or
+duplicated. A folder with any board in it — an archived one included — is never deleted;
+the user moves them out first, so deleting a folder can never take a board with it.
+
+**A board's workspace.** `workspace` is the rail workspace ✦ Answer's CLIs read for that
+board (§4.18) — one per board, never one per box. It is checked as an id and never taken
+as a path: one line, at most 200 characters, no `/` or `\`, no control character, no
+leading dot. A new board starts with the workspace used last (`store.lastWorkspace`: the
+last one picked for a board, or the last one a CLI was asked to read) while that is still
+on the rail, else the most recent one that is, else none (`startingWorkspace`, against
+one `discover()` started before the write joins the chain; a discovery that fails trusts
+the store) — workspaces leave the rail, and a new board never starts out reading one
+that has gone. An explicit `workspace` is taken as given. A copy starts with its
+original's, a migrated board with the one its old folder belonged to, gone or not.
+`recentWorkspaces` — eight at most, newest first — is the pickers' Recent group: a
+workspace goes to its front when it is picked for a board, when a CLI starts reading it,
+and when a terminal is opened in it on a board.
+
+**Markdown documents.** A `shape: "document"` node stores a display label and UUID
+`documentId`; its source is a plain file at `<config
+dir>/whiteboards/documents/<documentId>.md` — one folder for every board, so moving a
+board between folders moves no file. `DocumentPanel.tsx` opens floating by default, with
+docked and focus layouts and Read / Write / Split modes. Rendering reuses `SB.markdown`
+with document soft breaks. The native textarea owns its editing history; Tab indents
+Markdown and panel events stay outside canvas shortcuts. `useFlowDocuments.ts` owns the
+buffers and serial save queues in one store for the whole window, retaining failed edits
+across board switches; each editor's dirty flag and save error count only the documents
+that editor has opened or edited, so one board never shows another's failed save. A
+change wakes only those editors too: the store says which document changed, and a hook
+re-renders only for one of its own, so typing in a document never re-renders the
+canvases parked beside it. Saves use the file's content hash as a revision, refusing
+stale writes after an external edit. `whiteboardsCreateDocument`,
+`whiteboardsGetDocument`, and `whiteboardsSaveDocument` bridge to atomic writes in
+`main/whiteboards.js`, whose `settle()` includes document writes. Copies and duplicates
+create independent files — Duplicate copies every document its board names and rewrites
+the `documentId`s; removing nodes, or a whole board, retains their files for undo and
+recovery. Archived boards open documents in Read mode. The isolated production-bundle
+check is `npm run test:documents:browser`.
+
 **Pictures are kept once, by content.** A picture dropped, pasted or picked onto a
-canvas is written to `<config dir>/diagrams/images/<sha256>.<png|jpg|webp>` and the image
-node's `src` is `sbimg://image/<file>`. `sbimg` is registered as a standard, secure
-scheme before `ready` and served by `protocol.handle` from that folder and nowhere else:
-a request names a file only by a name `imagePath()` accepts (32 hex and one of three
-extensions). The bundle's copy of the admin's validator accepts that one scheme beside
-`https:`. Deleting a diagram leaves its pictures — another diagram may show the same one.
+canvas is written to `<config dir>/whiteboards/images/<sha256>.<png|jpg|webp>` and the
+image node's `src` is `sbimg://image/<file>`. `sbimg` is registered as a standard, secure
+scheme before `ready` and served by `protocol.handle` from that folder and nowhere else
+but the old tree's (below): a request names a file only by a name `imagePath()` accepts
+(32 hex and one of three extensions), and the old tree's name is read from `store.json`
+only when it is one the migration could have written. The bundle's copy of the admin's
+validator accepts that one scheme beside `https:`. Deleting a board leaves its pictures —
+another board may show the same one.
+
+**The diagrams moved here once, and nothing was deleted.** Before Whiteboards each
+workspace had a folder of diagrams, `<config dir>/diagrams/<stem>-<hash>/` — the stem
+readable, the hash the first ten hex of the whole workspace id's SHA-1 — with its
+documents inside it and one `images/` shared by all. `whiteboards.migrate()` brings them
+into the store, once. `index.js` starts it inside the single-instance branch, so a second
+instance quits without touching the store, and it runs while Electron gets ready:
+`whenReady` waits for it before the first window, `activate` waits for it too and opens a
+window only when there is none (macOS sends it at launch), and every `sb:wb:*` handler
+waits on it. Requiring the module does nothing on disk — `scripts/test-images.js`
+requires it with no temp config, and a migration at require time would move the user's
+real `~/.switchboard`.
+
+* **Which workspace each old folder was.** The hash cannot be inverted, so it is
+  recomputed (`legacyKeyFor`, byte for byte the old `keyFor`) for the folder's own stem,
+  then for every workspace discovery finds, then for every one the config declares. A
+  folder that matches none keeps its stem and gets no workspace.
+* **One folder per project, named after it** and unchanged — `sample-1`'s boards and
+  `sample-2`'s both land in `sample` — made only when a board lands in it; one that would
+  clash with a folder already there gets a number (`sample 2`). A board name that clashes
+  inside the folder gets its workspace: `Name (sample-2)`, then `Name (sample-2) 2`. Each
+  board keeps its id and records its old workspace as its own (`workspace`, and
+  `migratedFrom: { legacyKey, workspace }`), and every AI box on it that does not say what
+  it read is tagged with that workspace (`answeredIn`), so ✦ Answer reads what it read
+  before and the boxes say so.
+* **Documents and pictures come along.** Each folder's `documents/*.md` is copied into
+  the one `documents/`; every picture is hard-linked into `images/` where the disk
+  allows, which takes no extra space, and copied where it does not. Every copy goes to
+  a temp file beside its target (`<name>.<pid>.<n>.tmp`) and is hard-linked into place
+  only when whole — a rename on a disk without hard links, and only while the name is
+  free — so a resumed run, which skips every target that exists, never keeps half a file
+  and never replaces one that is there (`placeCopy`).
+* **It is crash-consistent.** The whole run is one job on the store chain. The folders
+  that will receive boards, and the run's record — `migration: { from: 'diagrams',
+  at: null, imported: [], folders: { <old folder>: folderId }, skipped, legacyRoot,
+  error }` — are written before any board; each old folder's boards are written before
+  their ids join `imported`; and the record is marked finished (`at`) only after the old
+  tree has been renamed. A run that stops anywhere — a full disk, a crash — leaves `at`
+  null, and the next launch, or the screen's **Try again** (`sb:wb:migrate`), picks up
+  where it stopped without a second copy of anything: folders are found again by
+  `migration.folders`, never by name, and a board already in `boards/` from that same
+  old folder counts as imported. Only a failed write to `boards/` or `store.json` stops a
+  run. A document or picture that will not copy, and an old file that is not a diagram
+  (broken JSON, an id that is not a UUID, a second file with the same id), is counted in
+  `skipped` and left where it was. `list()` reports the last failure as
+  `migration.error` until a run succeeds.
+* **The old tree is renamed, never deleted**: `diagrams` → `diagrams-before-whiteboards`
+  (`-2`, `-3` beside an earlier one), recorded as `legacyRoot`. A rename that fails is
+  logged and leaves `legacyRoot: 'diagrams'`. `imagePath()` still looks in
+  `diagrams/images/` and in `<legacyRoot>/images/` for a picture the copy left behind, so
+  no spec's `sbimg://` address ever has to change. A document the copy left behind (one
+  that failed, or a run not yet that far) is copied in from
+  `diagrams/<old folder>/documents/` or `<legacyRoot>/<old folder>/documents/` the first
+  time `getDocument()` is asked for it (`legacyDocumentFile`), and `duplicate()` reads one
+  from there too; one in neither place is still `Document file not found`.
+* **What the user sees.** A notice on the Whiteboards screen until it is dismissed
+  (`notice: { boards, folders, dismissed }`, written when any board moved or any file
+  was skipped), the migrated folders marked `moved`, and the recent workspaces seeded
+  with the migrated boards' workspaces that are still on the rail, newest edit first,
+  the first of them the workspace used last when none is yet; a board keeps its own gone
+  workspace, and its ✦ Answer says so. The notice and the error bar name the old tree by
+  `migration.legacyLabel`. A store with no old tree only records that the migration ran
+  (`from: null`). Once finished, `migrate()` answers `already: true` and touches nothing
+  — so a copy of an older Switchboard still writing to `diagrams/` after the move is
+  never followed; nothing reads that tree again but the picture fallback.
+
+**The bundle's seam is one board.** `window.SBDiagrams.create(element, props)` makes an
+editor for exactly `props.boardId` and never opens another on its own. Props: `boardId`;
+`active` (false while off screen, or while another Grid square has the keyboard);
+`onOpenSettings`; `onOpenBoard(id)` (the quick switcher, ← / →, New whiteboard and
+Duplicate — the host changes the route); `onClosed(folderId, info?)` (after Delete, and
+Back on a board that no longer exists or can't be read — `info.missing` true only for one
+that is gone, deleted or not found, false for one that merely couldn't be read and may
+open again; only `missing` lets the host refuse the board from then on);
+`onBoardChange(board, folder)` (after the load and every
+write — the host's breadcrumb and status line); `onDirty(count)`;
+`onFullscreenChange(open)`; `terminals` (the host's list, `{ wsId, open, minimized,
+pinned }[]`); `workspaceStatus` (`{ [wsId]: { dot, branch } }`, the rail's dot and branch,
+for pinned terminals' headers and the pickers); and the terminal callbacks
+`onOpenTerminal(wsId)`, `onToggleTerminals()`, `onTerminalSlots(slots)`,
+`onTerminalFloat(wsId)` and `onTerminalRemoved(wsId, reason, rect)`. The handle has
+`update(partial)`, `flush()`, `editAction(action, image, text)`, `fullscreen()`,
+`leaveFullscreen()` and `contains(el)`, and `destroy()` — flush, unmount, remove its
+body-level portal; nothing reaches the host after it, so a late `onDirty(0)` cannot clear
+the flag of a new canvas the host has since made for the same board — `board()`, the
+summary as last reported, `pickWorkspace(anchor, opts)` — a light `WorkspacePicker`
+under `anchor` and kept inside the window, its choices fetched afresh each time,
+resolving the id picked or null — and `pinTerminal`, `unpinTerminal`, `revealTerminal`
+and `terminalSlots`, passed through to the editor (false, null or `[]` without one). The
+host's picker (`AnchoredPicker`) is never hidden while it is measured — its search box
+takes the keyboard as it mounts, which an element under `visibility: hidden` cannot — so
+typing and Enter go to it, not to the + or the body behind it. Escape anywhere closes it
+and nothing more (a capture-phase listener on the window, before the app's "Esc means
+back"); a press outside it closes it; and a press on its anchor — the tray's +, or
+Actions — closes it and goes no further, its click swallowed, so the button that opened
+it puts it away rather than opening a fresh one (a press dragged off the button leaves
+it open). It also closes, unanswered, when `active` turns false and on `destroy()`, and
+`pickWorkspace` answers null for a board going away or not in the window: a picker left
+open would float over the next screen and open a terminal on a board nobody can see. The
+global adds `flush()` (every board, parked ones included), `refreshAnswers(fresh)` and
+`blankSpec()`, the empty spec the screen's New whiteboard writes.
+
+`DiagramsPage.tsx` is that one board. It fetches the board first and draws it without
+waiting for the folder list. A board that has gone says `This whiteboard no longer
+exists`, with Back (`onClosed(…, { missing: true })`); one that cannot be read, `This
+whiteboard can't be opened` over main's reason, with Back (`{ missing: false }`) and
+**Try again**, which reads it again — as does the board coming back on screen still in
+that state — so a file fixed by hand opens without a restart while the host keeps the
+canvas. A spec that no longer parses still opens, so Rename, Move, Archive and Delete
+stay available on it. Its bar holds the quick switcher (`DiagramPicker.tsx`: the boards
+of THIS board's folder, active ones first and archived ones under their own heading, the
+trigger reading `name · folder`, ← / → stepping through them), **New whiteboard** (a
+name; it lands in this board's folder, its workspace left to main), full screen, and
+**Actions** (`data-whiteboard-actions`): **Open terminal…** (a picker: this board's
+workspace first, then Recent, then the rest, with search), **Show or hide terminals**
+(⌘A), **Rename…**, **Move to folder…** (every folder and No folder, the current one
+checked), **Duplicate** (and opens the copy), **Archive** or **Unarchive**, **Delete**.
+A dialog an Actions item opens waits until the menu has closed: opened in the same tick,
+a modal left `<body>` at `pointer-events: none` and the whole window dead to clicks. An
+item picked as the board leaves the screen, or a menu left open then, is marked stale:
+its close finishes only once the board is back, and the item is dropped then rather than
+greeting the user unasked, focus left where it is; Delete checks again after its flush
+that the same board is still on screen. Autosave writes the spec only and Rename the
+name only, so neither can carry an old copy of the other over a newer one. The page
+refetches the folder list, debounced, on `sb:evt:wbChanged` — not for its own saves, nor
+for another board's while it is off screen — and again when `active` turns true, so the
+switcher, the breadcrumb's folder and the Move menu stay current.
+
+**A terminal can be pinned to a board.** A `shape: "terminal"` node is a workspace's
+terminal made board content — `{ id, label, shape: 'terminal', workspace, size, font?,
+minimized?, position }`, its label the workspace id — saved in the board file and undone
+and redone like any edit. The node is only a frame (`TerminalNode` in `FlowEditor.tsx`):
+a 30-unit header that drags it — the rail's dot, the workspace, its branch, then
+**Float**, **Minimize** or **Restore**, and **Close** — over a dark body. The live xterm
+is never inside the canvas, whose CSS transform would blur its text and throw xterm's
+mouse coordinates off: the host lays it over the body (R15) from the geometry the
+editor reports, `onTerminalSlots(TerminalSlot[])` (§2), coalesced to one call a frame
+(rAF, with a 50 ms timer behind it, since rAF starves in a hidden window), sent only when
+something changed, and `[]` on unmount — and from the page whenever it draws no editor
+(an archived, missing or unreadable board). `font` is 12.5 over the zoom the terminal
+was pinned at, so pinning keeps its text exactly the size it was on screen; it is drawn
+at `font × zoom`, and below 7 px the slot is `live: false` and the body shows **Zoom in
+to use**, whose button zooms to `12.5 / font` around it. Minimized, the node folds to its
+header where it is. `covered` is worked out against `[data-canvas-overlay]` — the node
+toolbar and its menus, the ✦ Answer menu, a workspace picker, the Google Images panel —
+and the document panel, so the host hides the xterm while one of them is over it rather
+than drawing on top. `holes` are the canvas's own chrome over the body — every React
+Flow panel and the zoom controls, cut to it — which the host leaves out of the live
+terminal so the chrome stays visible and clickable above it, as above any other node;
+a ResizeObserver on those panels (re-attached as they come and go) re-sends the slots
+when one changes size, the undo strip growing during an answer included. A workspace
+that has left the rail shows `<id> is no longer in the rail`, with Close only — but one
+pinned through the host's own picker that the editor's list does not have yet is newer
+than that list, not gone: it stays live while main is asked again, and main's answer has
+the last word (`terminalGone`); `revealTerminal` asks again too. One node per workspace on
+a board: Copy, Paste and Duplicate skip terminals, they take no colour and no text,
+✦ Answer's context and Condense leave them out, and every tidy leaves them where they
+were put. Nor does a tidy put a box on one — the live terminal over it would hide the box:
+going down a freshly laid-out tree (Tab, ✦ Answer's boxes), the first box that would
+land on a terminal moves down past it and takes its branch and every box laid out after
+it, so the tree keeps its order and spacing and its top never moves (`clearOfTerminals`,
+`flow-editor.ts`); and an arrow to or from a terminal ties nothing to it, so a box wired
+to one is pushed out of a tree's way like any other. 560 × 340 when pinned with no
+size; a hand resize never goes under 280 × 140 (`FLOW_TERMINAL_MIN_SIZE`), but a
+terminal pinned at a high zoom keeps the smaller size it was pinned at, its handles
+taking that as their least, and only `FLOW_TERMINAL_FLOOR` (96 × 46, a header and a
+sliver of body) bounds how it is drawn. A resize is written once its handle is let go;
+React Flow ends no resize for a press that changed nothing, so the press's own
+`pointerup` (or `pointercancel`) on the window ends `resizing` then. The handle's
+`pinTerminal(wsId, rect, body?)` adds one — one undo step; for a workspace already
+pinned it reveals that node and answers false, and with no usable rect it answers false.
+Given `body`, where the floating panel's terminal sits, the node is fitted round it —
+`computeSlots`' body worked backwards, the 30-unit header above it and the 5px inset on
+the other three sides — so the slot's body is `body` and the text does not move; else
+its outer client rect is `rect`. Its size is rounded UP to whole canvas units (exact at
+zoom 1, never smaller elsewhere) and never clamped up to what the handles allow, which
+at a high zoom would make the node bigger on screen than the panel it replaces.
+`unpinTerminal(wsId)` removes it and answers where it was, and `revealTerminal(wsId)`
+opens every collapsed arrow hiding it (`unfoldTo`, one undo step and one layout pass),
+pans to it, restores it if minimized and selects it — or answers false, selecting
+nothing, when it cannot be brought into view. Any other way a terminal node
+leaves the canvas reaches the host as `onTerminalRemoved(wsId, 'undo' | 'delete', rect)`:
+`undo` from undo or redo, `delete` from Delete, Cut or the node's Close. An archived
+board's read-only canvas draws one as a dark card, `Unarchive to use this terminal`.
 
 **Unsaved edits are flushed, not asked about.** The editor saves 700 ms after the last
 change, so a close or a quit usually lands inside that wait. The admin holds the page
 with a `beforeunload`, which Electron answers by refusing to close in silence; here the
-editor reports whether it holds anything (`sb:diagrams:dirty`). Main sends
-`sb:evt:diagramsFlush`, waits for `sb:diagrams:flushed`, then waits for
-`diagrams.settle()`. A close holds while `diagramDirty > 0` and flushes; only a diagram
-that STILL could not be written joins the
-"unsaved changes" question. The quit asks about diagrams only after its flush, never
-before — before it, the count is the autosave in flight.
+renderer reports whether any open canvas holds anything (`sb:diagrams:dirty`, 0 or 1
+across all of them). Main sends `sb:evt:diagramsFlush`, the renderer writes every board
+it holds, parked ones included, and answers `sb:diagrams:flushed`; main then waits for
+`whiteboards.settle()`. A close holds while `diagramDirty > 0` and flushes; only a
+whiteboard that STILL could not be written joins the "unsaved changes" question. The
+quit asks about whiteboards only after its flush, never before — before it, the count is
+the autosave in flight.
 
-**The Edit menu reaches the canvas.** ⌘Z, ⇧⌘Z and ⌘V are menu items (§4.7), so the
-editor never sees them as keystrokes: `handleEdit` asks R15 right after the terminal, and
-while the canvas has the keyboard — not a box's own text field, which gets the document's
-fallback like any field — Undo and Redo are the editor's, and an image Paste fetches the
-clipboard's picture and adds it.
+**The Edit menu reaches the canvas.** ⌘Z, ⇧⌘Z, ⌘V and ⌘A are menu items (§4.7), so the
+editor never sees them as keystrokes. ⌘A on a board shows or hides its terminals unless a
+text field, menu, dialog or list has the keyboard (R15). For the rest `handleEdit` asks
+R15 right after the terminal, and while the canvas has the keyboard — not a box's own
+text field, which gets the document's fallback like any field — Undo and Redo are the
+editor's, and an image Paste fetches the clipboard's picture and adds it.
 
 #### Google Images
 
@@ -874,7 +1215,7 @@ that link first and the thumbnail after it (`imageUrlsFromDrop`), and the thumbn
 in only when the full picture's host refuses it, is too big or too slow; a right-click
 does the same (below). `sb:diagrams:fetchImage` then fetches each address through the
 panel's session — its cookies, and the Referer a browser would send when the caller says
-which page the picture was on: Add Image to Diagram does; a drop cannot, and sends none —
+which page the picture was on: Add Image to Whiteboard does; a drop cannot, and sends none —
 after unwrapping Google's `/imgres?imgurl=` and `/url?url=` / `?q=` wrappers — an
 `/imgres` picture goes out with its own page (`imgrefurl`) as the Referer, the one a host
 that guards its pictures expects, rather than Google's — and
@@ -896,10 +1237,10 @@ The bundle makes the bytes a File and hands it to the same `addImages` a dropped
 goes through, so it is saved by `sb:diagrams:saveImage` exactly as one is.
 
 **Right-click is main's menu.** Each guest gets a browser's context menu, built in main
-(`attachGuest`): for a picture **Add Image to Diagram**, Copy Image, Copy Image Address
+(`attachGuest`): for a picture **Add Image to Whiteboard**, Copy Image, Copy Image Address
 and Open Image in Browser; for a link Open Link in Browser and Copy Link Address; Cut,
 Copy, Paste and Select All in a field, or Copy for a selection; then Back, Forward and
-Reload. Add Image to Diagram sends `sb:evt:diagramsImageOffer` `{ guestId, url,
+Reload. Add Image to Whiteboard sends `sb:evt:diagramsImageOffer` `{ guestId, url,
 fallback, referrer }` (§4.7) — on a Google result `url` is the result's `/imgres` link
 (the full picture) and `fallback` the thumbnail clicked, since the right-click carries
 both (`imageOffer`); on any other picture `url` is the picture and `fallback` is `''`.
@@ -920,12 +1261,12 @@ have focus, and never ⌘W. Should an event arrive anyway, the renderer stands a
 the bundle's `editAction` and app.js's document fallback both decline while a `WEBVIEW`
 is the active element.
 
-**Leaving the tab kills the page, so coming back makes a new one.** app.js takes the
-Diagrams tab's root out of `#main` while another screen shows (R15), and Electron destroys
+**Leaving the board kills the page, so coming back makes a new one.** app.js takes the
+board's root out of `#main` while another screen shows (R15), and Electron destroys
 a `<webview>`'s guest as it leaves the document and never makes another when it is put
 back: measured in 44.4.2, the element stays blank and every method answers "Invalid
 guestInstanceId". So the editor hears `active` (as `shown`), and the panel keys a fresh
-`<webview>` as the tab returns, at the last page it showed. That page is kept at module
+`<webview>` as the board returns, at the last page it showed. That page is kept at module
 scope, and only when main would let the panel start on it (`opensInPanel`), since a site
 followed out of the results would be refused at the attach. The page's history is lost;
 the page is not.
@@ -942,19 +1283,22 @@ Condense uses the same provider and request lifecycle, with `operation: 'condens
 on `sb.answerStart`. Main validates this operation and disables web access regardless
 of saved Answer settings. Claude Code receives no built-in tools; Codex keeps its
 read-only sandbox with web search disabled. Every provider is instructed to condense
-only the supplied discussion, without researching new facts.
+only the supplied discussion, without researching new facts. A condensation reads no
+file, so it never needs a workspace: a CLI condenses in the board's workspace folder
+when it has one, and in the system's temp folder when it has none or that one has left
+the rail.
 
-✦ Answer, on the Diagrams tab, puts a box's question to an AI and hangs the answer off it
+✦ Answer, on a whiteboard, puts a box's question to an AI and hangs the answer off it
 as one box per part — six repos are six boxes; the admin's cap of four is gone here (40 is
 only a backstop against a runaway list). The admin asks one OpenAI model; here it is any
 of four, chosen per Mac — the user has Claude Code on one laptop and Codex on another:
 
 | provider | what it is | sees |
 |---|---|---|
-| `claude-code` | `claude -p` in the workspace folder, `--tools Read,Grep,Glob` (plus `WebFetch,WebSearch` with Web access) and nothing else, `--permission-mode dontAsk`, prompt on stdin, `--json-schema` for the answer, `--output-format stream-json` for the steps | the workspace's code |
-| `codex` | `codex exec --json --sandbox read-only -c web_search="live"\|"disabled" --cd <folder> --output-schema … --output-last-message …` | the workspace's code |
-| `claude-api` | the Messages API, the answer as structured output (`output_config.format`, the schema) — not a forced tool call, which Opus 5.5, Sonnet 5.5 and Fable 5.1 refuse with a 400 — plus `web_search_20250305` / `web_fetch_20250910` with Web access, a paused turn (`pause_turn`) sent back to carry on | only the diagram |
-| `openai-api` | the Responses API with the admin's json_schema format, streamed, the admin's models and probed efforts, plus `{type:'web_search'}` with Web access | only the diagram |
+| `claude-code` | `claude -p` in the board's workspace folder, `--tools Read,Grep,Glob` (plus `WebFetch,WebSearch` with Web access) and nothing else, `--permission-mode dontAsk`, prompt on stdin, `--json-schema` for the answer, `--output-format stream-json` for the steps | the code of the board's workspace |
+| `codex` | `codex exec --json --sandbox read-only -c web_search="live"\|"disabled" --cd <folder> --output-schema … --output-last-message …` | the code of the board's workspace |
+| `claude-api` | the Messages API, the answer as structured output (`output_config.format`, the schema) — not a forced tool call, which Opus 5.5, Sonnet 5.5 and Fable 5.1 refuse with a 400 — plus `web_search_20250305` / `web_fetch_20250910` with Web access, a paused turn (`pause_turn`) sent back to carry on | only the whiteboard |
+| `openai-api` | the Responses API with the admin's json_schema format, streamed, the admin's models and probed efforts, plus `{type:'web_search'}` with Web access | only the whiteboard |
 
 A CLI is slower — it opens and searches files first — and knows the code; an API answers
 in seconds, much as the admin's ✦ Answer does. The user rejected sending an API any part
@@ -969,7 +1313,8 @@ the file in a box's second line when the answer came from code (`lib/diagrams/an
 bundle drops whatever the model wrote there anyway. **Web access** (on by default) gives
 whoever answers its own web tools — a page a box links to, or a search — and main adds a
 line to the system prompt saying so, and to use them only when the question needs
-something the diagram (and the code) can't tell it; off, the tools are left out
+something the diagram (and the code) can't tell it — the prompts still say diagram,
+which is the model's word, not the user's; off, the tools are left out
 altogether (for Claude Code, out of `--tools`: dontAsk would still let WebFetch open the
 documentation sites Claude Code trusts) and the prompt says to admit a page it can't see
 rather than guess. Codex's own default is a cached search, so off says `"disabled"`
@@ -979,10 +1324,11 @@ structured answer (a 400 naming citations), the answer goes again with web fetch
 **main owns all of it**: which providers exist, which models and efforts each takes,
 whether each CLI is installed and signed in (`claude --version` / `auth status`, `codex
 --version` / `login status`, cached a minute), the stored choice (config.json's `answer`
-block), and the keys. The page names a provider and the workspace; main resolves the
-workspace's folder itself (`workspaces.dirOf`) — a CLI never runs in a path the page
-handed over — and reads the model and effort from the stored settings, never from the
-request.
+block), and the keys. The page names a provider and the board's workspace; main resolves
+the folder itself, with `answer.resolveAnswerDir(req, workspaces.lookup)` — the rail's
+own list, never `workspaces.dirOf`, which would take an absolute path — so a CLI never
+runs in a path the page handed over; an API provider gets no folder and no lookup. Main
+reads the model and effort from the stored settings, never from the request.
 
 | `window.sb` | channel | returns |
 |---|---|---|
@@ -990,7 +1336,7 @@ request.
 | `sb.answerSetSettings(patch)` | `sb:answer:setSettings` | the status, after merging `{ provider, split, context, web, subtext, claudeCodeEffort, claudeApiModel, openaiModel, openaiEffort }` |
 | `sb.answerSetKey(provider, key)` | `sb:answer:setKey` | the status — after the provider accepted the key (`GET /v1/models`); a refused key is never stored and answers `{ ok:false, error, code:'bad-key' }` |
 | `sb.answerRemoveKey(provider)` | `sb:answer:removeKey` | the status |
-| `sb.answerStart(id, req)` | `sb:answer:start` | `{ ok, text, files? }` — the answer's JSON, which the bundle reads into boxes — or `{ ok:false, error, code }`, `code` one of `missing`, `signed-out`, `no-key`, `bad-key`, `timeout`, `stopped`. `req`: `{ provider, wsId, system, user, schema }` |
+| `sb.answerStart(id, req)` | `sb:answer:start` | `{ ok, text, files? }` — the answer's JSON, which the bundle reads into boxes — or `{ ok:false, error, code }`, `code` one of `missing`, `signed-out`, `no-key`, `bad-key`, `timeout`, `stopped`, `no-workspace`. `req`: `{ provider, wsId, system, user, schema, operation? }` — `wsId` is the board's workspace, or null; `operation: 'condense'` for ✦ Condense |
 | `sb.answerStop(id)` | `sb:answer:stop` | `{ ok }` — the CLI's whole process group, or the request |
 
 `sb:evt:answerStep` carries `(id, { kind, text, target })` for every tool call a CLI
@@ -998,6 +1344,50 @@ makes — "Reading lib/diagrams/ai.ts", "Opening example.com/docs" — which the
 in a card over its strip, so a minute's wait never looks stuck. The OpenAI API reports its
 finished web searches the same way, and gets the card once it has one. `sb:evt:answerStatus` goes out after every change,
 wherever it was made, so the ✦ Answer menu and the Settings screen never disagree.
+
+**Which workspace a CLI reads is the board's** (2026-10-08, with Whiteboards). A
+whiteboard belongs to no workspace, so each board names one (`workspace`, §4.17), and the
+who-answers menu under ✦ Answer's chevron (`AiSettingsMenu`) has one row for it, headed
+**Workspace**, under the providers: the id (or `None chosen`), its folder and `what a CLI
+reads`, and **Change…**, which opens a short `WorkspacePicker` beside the menu — over its
+right column when there is no room, or when the menu is cut short and scrolls, then kept
+inside the menu's own box so focusing its search never scrolls the menu sideways; the
+panel is placed (`keepInCanvas`, once, `data-placed`) before the picker measures it, as
+Choose workspace… opens both at once — with the board's workspace first, then Recent, then
+the rest, and a search box that has the keyboard: never every workspace inline. Escape
+closes the picker first, then the menu. A pick is `whiteboardsSetWorkspace`, and the
+picker's footer says what it does: `Applies to the next answers on this whiteboard.
+Boxes already answered keep their tag.` With an API selected the row is dimmed and reads
+`Claude API and OpenAI API see only the whiteboard`; while condensing it is not there.
+Each provider's line says what it would do — a CLI `Reads sample-2 first, then answers`
+(or `Pick a workspace to read`), an API `<model> · sees only the whiteboard · fast` — and
+the menu's footer `A box for each part an answer has. Workspace is kept with this
+whiteboard; the rest on this Mac.`
+
+The workspace is taken when the box asks, not when the answer lands, and every box the
+answer adds carries it as `answeredIn`: the small tag hanging under the box's corner (a
+dashed one on the placeholder while the answer is awaited). It belongs to the AI's
+words — kept while `ai` is true, gone once the box's text is edited, carried wherever
+`ai` is carried — and an API's answer has none, having read no workspace. An invalid one
+is dropped, never a parse failure. The Whiteboards list's `reads` is made from these
+tags.
+
+A CLI with no workspace to read is stopped before anything is asked: the editor's
+`notReady` answers `no-workspace` (`Pick a workspace for Claude Code to read`), and main
+answers the same code for any ask that gets through (`Pick a workspace for ✦ Answer to
+read`, or `could not find the folder for <id>` for an id the rail does not have). The
+failure line under the strip offers **Choose workspace…**, which selects the box that
+asked and opens the who-answers menu with the picker already showing — or the picker
+over the strip, for a box that is gone, folded away, being answered or in a condense on
+its way, whose toolbar has no menu to take it. Each request is numbered, and one that no
+menu takes within a second of when it was due lapses, so selecting the box minutes later
+never opens the menu by itself. A workspace that has left the rail is the same
+case: the row shows it with `No longer in the rail — choose another`, its provider line
+says `<id> is no longer in the rail`, and nothing is sent. The failure line's Open
+Terminal opens a terminal floating over the board, in the workspace the answer was to
+read. A CLI ask whose workspace resolved makes that the workspace used last and puts it
+first in the recent ones (`whiteboards.noteWorkspace(wsId, { last: true })`, not
+awaited), so the next new board starts with it.
 
 **Keys never touch config.json.** `safeStorage` (the Keychain) encrypts them into
 `<config dir>/keys.json` (mode 0600) beside the last four characters, which are all the
@@ -1007,7 +1397,7 @@ page ever gets back. Nothing logs a key; the Settings field is always empty.
 limit, the window closing and `stopEverything()` all signal its whole process group, the
 ripgrep and shells it runs included.
 
-**Settings** is a fourth free screen (`{view:'settings'}`, R16): App ▸ Settings… (⌘,),
+**Settings** is a free screen (`{view:'settings'}`, R16): App ▸ Settings… (⌘,),
 the rail's last row under Usage, and the ✦ Answer menu's "Settings…". It is not
 remembered as the screen to reopen on — it is visited, not worked in.
 
@@ -1024,20 +1414,24 @@ sb.onTermState((state /*Shell*/) => {})  // 'sb:evt:termState' — spawned, exit
 sb.onEdit((e) => {})                 // 'sb:evt:edit' — {action:'copy'|'paste'|'selectAll'|'undo'|'redo'|'cut'|'close', text?, image?}
 sb.onAppearance((s) => {})           // 'sb:evt:appearance' — {appearance, effective}; see §4.8
 sb.onSidebar((s) => {})              // 'sb:evt:sidebar' — {visible}; see §4.9
-sb.onDiagramsFlush((id) => {})       // 'sb:evt:diagramsFlush' — save pending diagram edits,
+sb.onDiagramsFlush((id) => {})       // 'sb:evt:diagramsFlush' — save every board's pending edits,
                                      // answer sb:diagrams:flushed with the same `id`; §4.17
+sb.onWhiteboardsChanged((change) => {}) // 'sb:evt:wbChanged' — {reason, boardId?, folderId?} after
+                                     // every write to the whiteboards store; §4.17, R2
 sb.onAnswerStep((id, step) => {})    // 'sb:evt:answerStep' — what a CLI answering a box is doing; §4.18
 sb.onAnswerStatus((status) => {})    // 'sb:evt:answerStatus' — who can answer, after any change; §4.18
 sb.onOpenSettings(() => {})          // 'sb:evt:openSettings' — App ▸ Settings… (⌘,)
 sb.onDiagramsImageOffer((offer) => {}) // 'sb:evt:diagramsImageOffer' — {guestId, url, fallback, referrer}:
-                                     // Add Image to Diagram, in the Google Images panel; §4.17
+                                     // Add Image to Whiteboard, in the Google Images panel; §4.17
 ```
 
 `sb:evt:edit` exists because a menu accelerator wins over the renderer's keydown, and
 xterm's selection is **not** a DOM selection, so `role: 'copy'` copies nothing from the
 terminal. The Edit menu's Copy / Paste / Select All are therefore custom items that send
-this event. The renderer gives first refusal to the focused terminal, then to the
-Diagrams canvas (R15) and Editor (R13), and only then falls back to the document: its own
+this event. The renderer gives Select All first to a whiteboard on screen, where ⌘A shows
+or hides its terminals unless a text field, menu, dialog or list has the keyboard (R15);
+then first refusal to the focused terminal, then to the whiteboard's canvas (R15) and the
+Editor (R13), and only then falls back to the document: its own
 selection for Copy, `execCommand` for Select All, Undo and Redo, and — for a focused text
 field, the Grid's name field — the field's selection for Cut and `insertText` for Paste,
 since the menu's ⌘V never lets the keystroke reach it. A Paste with `image: true` (below) is the one
@@ -1062,7 +1456,7 @@ and ⌘W. And while the key window is no BrowserWindow at all — the About pane
 is sent: it closes the panel, not a tab or the window behind it (§4.14). That test comes
 after the DevTools' and before the crashed page's, and a smoke run skips it — its
 window is never shown, so never key, and `SB_SMOKE_MENU='File>Close'` must still reach
-the page. And while the Diagrams tab's Google Images panel has the keyboard, every Edit
+the page. And while a whiteboard's Google Images panel has the keyboard, every Edit
 item but Close runs natively on the panel's page instead, after the DevTools' test
 (`guestEdit()`, §4.17).
 
@@ -1252,32 +1646,52 @@ puts that workspace in the square, not a second shell in its folder under anothe
 A folder that has since gone shows the shell's own sentence with Try again, and Edit
 takes it out.
 
-**A workspace square shows Terminal, Changes, or Diagrams.** The three mode buttons live
-in its 30px header. Changes uses the workspace page's repository summary and shows
-compact green addition and red deletion counts in its button. Diagrams uses the same
-workspace canvas as the Diagrams tab, with a diagram picker and a full-screen control.
-The chosen mode is stored per workspace in localStorage and follows it across Grid views.
-Older saved Notes choices are ignored; those squares start on Terminal. Folder squares
-remain Terminal-only.
+**A workspace square shows Terminal, Changes, or a whiteboard.** The three mode buttons
+live in its 30px header. Changes uses the workspace page's repository summary and shows
+compact green addition and red deletion counts in its button. **Show a whiteboard**
+(`data-grid-mode="whiteboard"`) shows any board — a square is no longer limited to its
+workspace's — and the board's live canvas is the very one its own screen shows, moved
+into the square (`SB.views.whiteboards.mountGrid`), with its quick switcher, full-screen
+control and terminals. With no board chosen yet the square is a picker with a search
+box: the boards whose workspace is the square's first, then Recent, then each folder,
+then No folder, each board once; archived boards and boards another square of this view
+already shows are left out, since one board is one canvas and cannot be in two squares.
+A chevron beside the mode buttons (**Change whiteboard**) picks again. A board switched
+from inside its square (its switcher, ← / →, New whiteboard, Duplicate) keeps the
+keyboard there; Back on one that can't be read sends its square back to choosing with
+the board still offered, and Delete or one that has gone, without it (R10). The chosen
+mode is stored per workspace in localStorage (`switchboard.grid.cellMode`) and follows
+it across Grid views; the chosen board likewise (`switchboard.grid.cellBoard`), keyed by
+the square's workspace. `GridView` is untouched. A square saved as `diagrams` — its
+workspace's Diagrams tab, before Whiteboards — reads as a whiteboard square and takes
+that workspace's most recently edited board. Older saved Notes choices are ignored;
+those squares start on Terminal. Folder squares remain Terminal-only.
 
-`views/terminal.js` keeps one xterm and one shell per workspace and exposes
-`mount(wsId, into)`, which moves the same host into whatever is showing it — a Grid
-square or the workspace's own Terminal tab. Only one screen is ever on, so the host
-simply moves; nothing is duplicated and nothing restarts when a square changes mode.
-Measured: the host element in the square is the host element on the Terminal tab, the
-marker typed in one is in the other, and the shell's `startedAt` is unchanged across the
-round trip. Taking a workspace out of a square — only from the `⋯`'s Edit, R10 —
-leaves its shell running.
+`views/terminal.js` keeps one xterm and one shell per workspace. `mount(wsId, into)`
+moves that same host into a route's screen — a Grid square or the workspace's own
+Terminal tab — and takes it unconditionally, as the only screen on show; nothing is
+duplicated and nothing restarts when a square changes mode. Measured: the host element
+in the square is the host element on the Terminal tab, the marker typed in one is in the
+other, and the shell's `startedAt` is unchanged across the round trip. A whiteboard's
+terminals take the same host with `place()`, which yields to whoever has it (R8): a
+board in one square and a Terminal square for the same workspace are on screen together,
+and two hosts that both took it on every render would bounce it between them. Taking a
+workspace out of a square — only from the `⋯`'s Edit, R10 — leaves its shell running.
 
 Three rules in `app.js` follow from that:
 
 * `retirePanes()` keeps a workspace shell for any square in the current view, including
-  one showing Changes or Diagrams. It walks the folder ids main's shell states carry as
-  well as the rail's workspaces, so a folder square's pane is retired like any other once
-  its shell has exited and it has left its square.
+  one showing Changes or a whiteboard, and for any terminal a whiteboard on screen is
+  showing (`SB.views.whiteboards.terminalShown`). It walks the folder ids main's shell
+  states carry as well as the rail's workspaces, so a folder square's pane is retired
+  like any other once its shell has exited and it has left its square.
 * A bell is read only while that workspace's Terminal is visible: `bell()` ignores
   a Terminal-mode Grid square and `renderMain()` clears its bell, as on the workspace's
-  Terminal tab. Changes and Diagrams squares keep unread bells until Terminal is shown.
+  Terminal tab. Changes and whiteboard squares keep unread bells until Terminal is shown.
+  A whiteboard's terminals are read only while the keyboard is in one
+  (`SB.views.whiteboards.terminalFocused`): several can be open over a board at once,
+  and the blue dot on a panel that is merely open is how the user learns which of them
+  Claude has finished in.
 * `SB.grid` — `create / rename / move / remove / select / assign` — is the only writer of
   `state.grid`. Every change is applied first and written after, so a click never waits
   on the round trip, and whatever main kept replaces the list when it answers.
@@ -1596,21 +2010,41 @@ untracked and staged nowhere, that a rename or a delete moves the LINK and not i
 target, that a link pointing out of the repo is refused either way, that `.git` and `..`
 are refused, and that a folder the Trash will not take is left alone.
 
-### M10 `diagrams.js`
-The Diagrams tab's files (§4.17): `list(id)`, `get(id, diagramId)`, `create`, `update`,
-`setArchived`, `remove`, `saveImage(bytes, type)`, `imagePath(name)` and `settle()`, plus
-`rootDir()` / `dirFor()` / `keyFor()` for the tests. The admin's server actions as files:
-the same answers, the same name rule (unique within a workspace), the same "archiving
-does not touch updatedAt". It checks only what keeps the folder sane — an object of kind
-`flow` (of any size — §4.17), a name of 1–120 characters, a UUID for an id — because the bundle has
-run the admin's validator before it asks. Writes go through a temp file and a rename,
-serialised per workspace folder so two creates under one name cannot both pass the
-check. Nothing throws. `scripts/test-diagrams.js` (`npm run test:diagrams`) runs it
-against a scratch folder, with the stylesheet scoping from `build-diagrams.js`.
+### M10 `whiteboards.js`
+The Whiteboards store (§4.17), which replaced the per-workspace `diagrams.js`: `list()`,
+`get(id)`, `create(req)`, `saveSpec`, `rename`, `setWorkspace`, `move`, `duplicate`,
+`setArchived`, `remove`; `createFolder`, `renameFolder`, `removeFolder`;
+`dismissNotice()`, `noteWorkspace(wsId, {last})`, `workspaceChoices()`;
+`createDocument`, `getDocument`, `saveDocument`; `saveImage(bytes, type)`,
+`imagePath(name)` (synchronous, for the `sbimg` handler), `getImagePath(src)` and
+`IMAGE_TYPES`; `migrate()`, `settle()` and `onChange(fn)` (→ an unsubscribe; `index.js`
+forwards each change as `sb:evt:wbChanged`); and `rootDir()` / `legacyKeyFor()` for the
+tests. The admin's server actions as files: the same answers, the same name rule (unique
+within a folder here), the same "archiving does not touch updatedAt". It checks only
+what keeps the store sane — an object of kind `flow` (of any size — §4.17), a name of
+1–120 characters, a folder name of 1–60, a UUID for an id, a workspace that is an id and
+never a path — because the bundle has run the admin's validator before it asks. Every
+board and `store.json` write is one job on one serial chain, through a temp file and a
+rename, so two creates under one name cannot both pass the check; documents keep a chain
+per file. Every path is computed from `config.CONFIG_FILE` when it is needed, and
+requiring the module does nothing on disk — the migration runs only when `index.js`
+calls it. It reads the rail through `workspaces.discover()` (pickers, the migration) and
+`projectOf()`, and runs no git. Nothing throws. `scripts/test-whiteboards.js` (`npm run
+test:diagrams`) runs all of it under plain node against scratch folders — folders,
+moves, duplicates and their documents, summaries and their previews, change events, the
+workspace a new board starts with as workspaces leave the rail, every migration case
+(a clash, a stop part way and the resume, a run that renamed the tree and stopped before
+saying so, an unreadable file, a hash that names no workspace, a second run, a copy a
+crash cut short, a disk without hard links, a document brought in from the old tree on
+its first open) — with the stylesheet scoping from `build-diagrams.js`.
 
 ### M11 `answer.js`
 ✦ Answer (§4.18): `status({fresh})`, `settings()`, `setSettings(patch)`, `setKey`,
-`removeKey`, `start(id, req, onStep)`, `stop(id)`, `stopAll()`. The provider catalogue —
+`removeKey`, `start(id, req, onStep)`, `stop(id)`, `stopAll()`, and
+`resolveAnswerDir(req, lookup)` → `{ ok, dir, wsId }` or `{ ok:false, code:'no-workspace',
+error }` — the folder a CLI answer runs in, from the board's workspace through the rail's
+own `lookup`; an API gets `dir: null` without one, and a condensation the temp folder
+when there is no workspace (`cliDir()`). The provider catalogue —
 the admin's OpenAI models with their probed efforts, the Claude models, Claude Code's
 `--effort` levels — is here and only here; the menu and the Settings screen draw what
 `status()` says. Each provider is one function that turns `{ system, user, schema }` into
@@ -1621,12 +2055,13 @@ act on. Each provider's request is built by a pure function (`claudeCodeArgs`,
 `codexArgs`, `claudeApiBody`, `openAiBody`) and its answer read by another
 (`claudeAnswerText`, `readOpenAiStream`), so `scripts/test-answer.js` (`npm run
 test:diagrams`) checks them with Electron stubbed — Web access and Subtext included, with
-the bundle's prompt and answer reading beside them. The live paths were checked against
+the bundle's prompt and answer reading beside them, and `resolveAnswerDir` for a CLI, an
+API, a condensation, a path handed over as an id and a lookup that throws. The live paths were checked against
 Claude Code and the OpenAI API; the Claude API (no key on hand) and Codex (not installed)
 only against their documentation.
 
 ### M12 `images.js`
-Google Images beside a diagram, main's half (§4.17): `hardenWebview(webPreferences,
+Google Images beside a whiteboard, main's half (§4.17): `hardenWebview(webPreferences,
 params)` (the whole `will-attach-webview` decision), `setupImagesSession()`,
 `attachGuest(wc, deps)` (popups, navigation, the right-click menu), `focusedGuest(host)`
 (for the Edit menu) and `fetchImage(url, referrer)`, whose conversions run sips under
@@ -1643,15 +2078,21 @@ plain node; what needs Electron requires it inside the function, and that test h
 ### R1 `index.html`
 Load order, all classic scripts, no `type=module`:
 `icons.js`, `dom.js`, `term-theme.js`, `markdown.js`, `diffview.js`, `views/workspace.js`,
-`views/logs.js`, `views/terminal.js`, `views/usage.js`,
+`views/logs.js`, `views/terminal.js`, `views/wbterminals.js`, `views/usage.js`,
 `views/grid.js`, `views/files.js`, `views/diff.js`, `views/pr.js`, `views/prs.js`,
-`views/editor.js`, `app.js` (last — it
+`views/editor.js`, `diagrams/diagrams.js` (the built bundle, §0), `views/whiteboards.js`,
+`views/databases.js`, `views/settings.js`, `app.js` (last — it
 boots). `term-theme.js` must precede the two views that build `Terminal`s: both read the
 palette at construction; `markdown.js` must precede `diffview.js` and the two PR screens,
 which render every comment body through it; `prs.js` follows `pr.js`, whose gh failure
 bars it borrows;
 `views/editor.js` follows `term-theme.js` (Monaco's themes are built
-from its palette) and `views/workspace.js` (it borrows the header).
+from its palette) and `views/workspace.js` (it borrows the header);
+`views/wbterminals.js` follows `views/terminal.js`, whose panes its panels and pins hold;
+`views/whiteboards.js` follows the bundle it drives, and reads `SB.wbTerminals` only when
+a canvas is made, feature-checked, so a build without it still draws boards. The
+stylesheets are `xterm.css`, `styles.css`, `wbterminals.css` (a whiteboard's terminals,
+after the tokens and classes it leans on) and the bundle's scoped `diagrams/diagrams.css`.
 
 **Monaco is not in this list, and must never be put above it.** Its AMD `loader.js`
 installs a global `define` with `define.amd`, and the xterm UMD wrappers at the top of
@@ -1725,7 +2166,9 @@ SB.state = { workspaces: [], byId: {}, route: {view:'workspace', wsId, tab:'chan
 the workspaces' `section`s, in the order main hands them over. Views are pure functions
 `(state) => HTMLElement`; `app.js` swaps `#main`'s child. It subscribes to `onLog`,
 `onRunState`, `onLinks`, `onFocus`, `onAppearance`, `onUsage`, and owns keyboard shortcuts
-(⌘1–9 switch workspace, ⌘R refresh, Esc back, ⌘. stop). An appearance change never calls
+(⌘1–9 switch workspace, ⌘R refresh, Esc back, ⌘. stop). Esc never goes back once
+something has acted on it (`defaultPrevented` — a Radix dialog or menu that closed on that
+very key marks it handled first), so one Esc is one step. An appearance change never calls
 `render()`: `term-theme.js` repaints the live xterms itself, and rebuilding the view would
 throw away the terminal's focus and selection to repaint colours that already changed.
 
@@ -1748,17 +2191,47 @@ element already mounted (the reuse path), where every other view is torn down.
 `SB.layout.full()` / `SB.layout.setFull(on)` are its full screen (§4.9): the `.edfull`
 class on `.win`, dropped by `renderMain()` off the Editor's route and by ⌃⌘S.
 
-Routes: `{view:'workspace', wsId, tab:'changes'|'logs'|'terminal'|'editor'|'diagrams'|'databases'}`, `{view:'settings'}` (no workspace; §4.18), `{view:'files', wsId, tab:'files'|'all'}`,
+Routes: `{view:'workspace', wsId, tab:'changes'|'logs'|'terminal'|'editor'|'databases'}`, `{view:'settings'}` (no workspace; §4.18), `{view:'files', wsId, tab:'files'|'all'}`,
 `{view:'diff', wsId, repo, path}`, `{view:'pr', wsId, repo, tab:'overview'|'files'|'all'}`,
 `{view:'pr', owner, repo, number, tab}` (no workspace — a pull request opened from the
 list; its parent for the back caret and Esc is `prs`, not `workspace`),
 `{view:'grid'}` (no workspace; §4.10), `{view:'usage'}` (no workspace; §4.11),
-`{view:'prs'}` (no workspace; §4.12). A route with no workspace is `standalone()`:
-it renders with no workspaces at all and lights its own rail row — the Pull requests
-row stays lit while one of its pull requests is open.
+`{view:'prs'}` (no workspace; §4.12), `{view:'whiteboards', folder}` and
+`{view:'whiteboard', board}` (no workspace; §4.17, R15). A route with no workspace is
+`standalone()`: it renders with no workspaces at all and lights its own rail row — the
+Pull requests row stays lit while one of its pull requests is open, and the Whiteboards
+row while a board is.
+
+The two whiteboard routes mirror `prs` and `pr`: the Whiteboards screen, and one board
+open. Both are drawn by `views/whiteboards.js` (`VIEW_MODULES` maps `whiteboard` to it),
+both are in `FREE` — and in `buildView()`'s own `free` test, which does not read `FREE`
+and would otherwise show the no-workspaces screen for them — and `PARENT.whiteboard` is
+`whiteboards`. `folder` is a folder id or `all`, `recent`, `archived` or `none`; a route
+that names none gets `SB.views.whiteboards.lastFolder()` — the folder of the board shown
+last, or the one last looked at, whichever came last (`switchboard.wb.folder` in
+localStorage) — and never inherits one from the screen being left. `board` is a board
+id; a `whiteboard` route without one is the Whiteboards screen. `normalize()`,
+`sameRoute()` and `routeKey()` carry both fields, or two boards would be one route and
+`go()` would take the second for a re-render. A route to the old Diagrams tab,
+`{view:'workspace', tab:'diagrams'}`, lands on the Whiteboards screen rather than on the
+first tab, and `rememberScreen()` keeps an open board as `whiteboards`, so the window
+comes back to the list in the board's folder. `sb:evt:wbChanged` marks every `wb:` load
+stale without a render and redraws only when the Whiteboards screen is up, or on the
+Grid for a change that is not a `save` while a square is choosing a board
+(`SB.views.grid.choosingBoard()`), so its list has the board just made or renamed: an
+autosave is a write too, many a minute, and a render for it would rebuild the Grid's
+four squares for a list nobody is looking at. `SB.ensureScanned(wsId)` scans a workspace
+once, if nothing has asked yet — for a terminal panel's branch and the pickers, which
+can name a workspace no route has visited.
 
 It also owns the rail's bottom row, Usage, drawn by `renderFoot()` behind its own
 signature like the nav; its dot is red only while the five-hour window is `critical`.
+Above the workspace groups are three rows, Grid, Pull requests and Whiteboards — the
+last with no dot, a board having nothing running; its terminals' bells ring on their
+workspaces' rows — and all three are drawn before the zero-workspace return, since a
+rail with nothing configured must still reach them. The lit one is a letter in
+`sidebarSignature()`, or leaving Whiteboards for Usage would read as no change and the
+row would stay lit.
 
 ### R3 `markdown.js`
 `SB.markdown.render(text, { breaks })` → a DocumentFragment of block elements;
@@ -1836,12 +2309,56 @@ to its `file://` URL, which main's `will-navigate` cancels and `openExternal` re
 
 Exports `render(state)`, `write(wsId, chunk)`, `onState(shell)`, `dispose(wsId)`,
 `relayout()` (every pane refits — §4.9), `mount(wsId, into)` and `focus(wsId)` (the Grid's
-squares — §4.10), `editAction(action, text)` → `true` when the focused terminal
-consumed a menu Edit action, and `xterm(wsId)` (the live Terminal, for the smoke harness
-only). A pane whose shell is still alive is **never** disposed: replaying a full-screen
-TUI's ring buffer into a fresh xterm paints garbage. The one time a fresh pane meets a
-live shell — the window closed and opened again — the replay it asks for is a repaint
-by tmux (§4.6), which is why that case is not garbage either.
+squares — §4.10), `place`, `setFontSize`, `propose`, `setFixed`, `hold` and `owner` (a
+whiteboard's terminals, below), `editAction(action, text)` → `true` when the focused
+terminal consumed a menu Edit action, and `xterm(wsId)` (the live Terminal, for the smoke
+harness and the browser tests only). A pane whose shell is still alive is **never**
+disposed: replaying a full-screen TUI's ring buffer into a fresh xterm paints garbage. The
+one time a fresh pane meets a live shell — the window closed and opened again — the
+replay it asks for is a repaint by tmux (§4.6), which is why that case is not garbage
+either.
+
+**One pane, many hosts, one holder.** The Terminal tab, a Grid square and a whiteboard's
+terminals all show the SAME pane — one xterm and one shell per workspace (a second xterm
+would steal the tmux client and repaint garbage) — and with several boards and a Grid on
+screen together, more than one place can want it at once. So the pane records who holds
+it: `owner` is null for a route host, which takes it with `mount()`, and `'wb:<boardId>'`
+for a board's terminal layer (R15), which takes it with
+`place(wsId, into, { owner, fixed?, fontSize?, force? })` → whether `into` now holds it.
+`place()` YIELDS: it takes the host only when nothing on screen has it, when it is
+already in `into`, when the same owner put it elsewhere (a pinned terminal floating back
+out), or when `force` says the user asked for it here — otherwise it answers false and
+the layer draws a stand-in, `Showing in another place`, with **Show here** only when
+another board holds it (a Grid square or the Terminal tab would only take it back on its
+next render). Two hosts that both took it on every render would bounce it between them,
+refitting and resizing the pty each time. `place()` refuses an `into` that is not in the
+document, always sets the pane's whole mode — fit at 12.5 px unless it passes otherwise,
+so a pinned terminal's 7 px text and fixed grid never leak onto the Terminal tab — draws
+the failed-to-open sentence (kept as it is when it already says that, so a focused Try
+again survives every render) and the exit footer as `mount()` does, ends any hold, and
+calls `activate()`. `mount()` resets owner, font and fixed mode, and releases any hold, as
+it takes the host.
+
+**Fixed mode** is a pinned terminal's (`setFixed(wsId, {cols, rows} | null, owner)`):
+the box follows the canvas zoom every frame while the grid does not, so a fit is
+`term.resize(fixed)` instead of `fit.fit()` and the pty hears a size only when the fixed
+one changes — memoised, the one memo `sendResize` keeps, since a ResizeObserver firing
+on every zoom frame would otherwise put an ioctl on the IPC channel per frame. The
+first-fit path still runs, so a pinned terminal restored after a relaunch opens its
+shell at exactly those cols/rows, and a new shell generation is always told.
+`setFontSize(wsId, px, owner)` sets the live `fontSize` (xterm re-measures and repaints
+at the same cols/rows) and steps down a quarter pixel, at most three times, while the
+fixed grid would not fit the box — measured cells are rounded and ceil'd, and the prompt
+line is the one that gets clipped. Every font change then asks xterm's viewport to
+measure its scroll range again (`syncScroll`, its internal
+`_core._viewport.queueSync()`, a no-op when missing): xterm 6 recomputes that range only
+when the buffer resizes or scrolls, so after a zoom the wheel over a pinned terminal
+stopped scrolling its scrollback. `propose(wsId)` is what a fit would make of the box
+now, without resizing anything. `hold(wsId, on, owner)` suspends fits while a panel's
+edge, or a pinned node's resize handle, is dragged; the release fits once. All three do
+nothing unless `owner` holds the pane and it sits in the element that owner placed it
+in, so a layer that lost its terminal to the Grid cannot shrink the Grid's font or pin
+its size. `owner(wsId)` answers who holds it.
 
 ### R10 `views/grid.js`
 The Grid screen (§4.10). Header: one row — the views as the same segmented control the
@@ -1869,10 +2386,27 @@ fires no click at all (measured: a render in that gap and the segment pressed ne
 switched). So `whenReleased()` holds the decision until the mouseup and runs it a tick
 after, behind the click the press became.
 Body: four `.cell`s — a filled workspace has a 30px strip (its name, which opens its
-Terminal tab; its run dot; Terminal, Changes and Diagrams mode buttons; and, only while
-the view is being edited, a `×` to take it out) over the selected content. Terminal
-uses `terminal.mount()`, Changes reuses `workspace.changesBody()`, and Diagrams uses
-`diagrams.mountGrid()`. A folder square shows only Terminal. An empty cell is an `Add workspace`
+Terminal tab; its run dot; Terminal, Changes and Show a whiteboard mode buttons, and
+beside them, while a board is showing, the chevron that changes it; and, only while the
+view is being edited, a `×` to take it out) over the selected content. Terminal uses
+`terminal.mount()`, Changes reuses `workspace.changesBody()`, and a whiteboard uses
+`whiteboards.mountGrid(boardId, cell)` — or, with no board chosen, one gone, or one
+another square of the view already shows (the first square to claim a board keeps it),
+the in-cell picker: `Which whiteboard?`, a search field that hides rows in place rather
+than rendering (a render rebuilds all four squares, terminals included, on every
+keystroke), and the groups `For <workspace>`, `Recent`, each folder and `No folder`.
+Its list is `SB.load('wb:grid', whiteboards.boards)`, a `wb:` key, so a whiteboard
+change marks it stale, and `choosingBoard()` — a `.wbpick` on screen — is how app.js
+knows to redraw for one (R2). The search has the keyboard whenever the picker shows (by
+the mode button, by Change whiteboard); ↑/↓ walk the boards it leaves showing, and ↑
+from the first goes back to it. A board's own quick switcher, ← / →, New whiteboard and
+Duplicate inside a square change what the square shows
+(`SB.views.grid.replaceBoard(from, to)`) rather than leaving the Grid, and the keyboard
+stays in the square (R15). Delete, or Back on a board that has gone, returns the square
+to its picker, the board refused; Back on one that couldn't be read is
+`chooseAgain(boardId)`: the square goes back to choosing with that board still its
+choice, offered again, and Cancel reads it afresh — rather than reloading the same
+error. A folder square shows only Terminal. An empty cell is an `Add workspace`
 button that turns into a picker of the workspaces not already in this view, headed by a
 `Folder` › `Choose a folder…` row — first, because the list already overflows a square
 and a row under ten workspaces is one nobody scrolls to — that raises the system's folder sheet
@@ -1913,7 +2447,8 @@ becomes the new view's name field. Leaving the screen ends it, as it ends everyt
 mid-flight.
 
 What it keeps between rebuilds is only what a rebuild would lose: the name being typed,
-the square that is choosing, the open menu, the armed Delete, the view that is being
+the square that is choosing, the square choosing another whiteboard and what each
+square's board search says, the open menu, the armed Delete, the view that is being
 edited, and the workspace just placed — whose terminal gets focus, because the picker row the user clicked no longer
 exists and `app.js`'s path-based focus restore would land on whatever now sits at that
 position. All of it is dropped when the Grid is rendered after another screen: `render()`
@@ -1943,12 +2478,13 @@ gauge on screen up to date in place and answers whether the document now agrees 
 only then.
 
 ### R4 `views/workspace.js`
-The Changes tab and the shared header the Logs, Terminal, Editor, Diagrams and Databases tabs borrow
-(§6 R8, R13, R15); its segmented control is `Changes | Logs | Terminal | Editor | Diagrams | Databases`,
+The Changes tab and the shared header the Logs, Terminal, Editor and Databases tabs borrow
+(§6 R8, R13); its segmented control is `Changes | Logs | Terminal | Editor | Databases`,
 lit from a whitelist rather than a logs/else test, which would light
 `Changes` for any tab it had not heard of. Adding a tab takes two lines in `app.js` as
 well — `TABS.workspace` and `TAB_VIEWS` — because `normalize()` rewrites a tab it does
-not know to the remembered one before anything looks it up. The
+not know to the remembered one before anything looks it up. Whiteboards are not a tab:
+they belong to no workspace, and have a screen of their own in the rail (R15). The
 header's title (`h1.jump`) is a shortcut into this workspace's Terminal — the tab the
 user lives in — no-drag so the click is not eaten by the drag region, and the workspace
 name in the Files, Diff and Pull request breadcrumbs jumps there too. The repo name and
@@ -2204,40 +2740,249 @@ slab is refused rather than navigating the window.
 
 ---
 
-### R15 `views/diagrams.js`, and the bundle in `src/diagrams/`
-The Diagrams tab (§4.17). `views/diagrams.js` is the classic-script seam; the editor is
-the React bundle, which creates an editor instance for each open workspace canvas.
-Each canvas lives in a persistent `.dgslab` and moves between its workspace tab and Grid
-cell, preserving the current drawing across renders. A Grid canvas has the same diagram
-picker and full-screen control as the tab. While full screen, its slab moves to the
-document body so the Grid's container query cannot confine the overlay.
+### R15 `views/whiteboards.js`, `views/wbterminals.js`, and the bundle in `src/diagrams/`
+The Whiteboards screen and an open board (§4.17). `views/whiteboards.js` is the
+classic-script seam: it draws the home and a board's header and keeps the canvases. The
+editor is the React bundle, one instance per open board. `views/wbterminals.js`
+(`SB.wbTerminals`) is the terminals over each board.
 
-The **AI terminal** button or ⌘A toggles a floating, resizable workspace terminal.
-`views/diagrams.js` calls the same `terminal.mount(wsId, into)` as Grid: one xterm
-and one existing shell/tmux session per workspace, with no new chat backend. Its panel
-is a sibling of the `.dgcanvas.sbdg` React root inside `.dgslab`, keeping Tailwind's
-reset away from xterm and moving with the canvas in Grid and fullscreen. Closing
-the panel detaches its host; the session stays alive. Visible panels receive shell
-state changes and keep the existing exit/retry footer. Opening/returning marks bells
-read; a visible exited terminal is protected from `retirePanes()`.
+**The Whiteboards screen** (`{view:'whiteboards', folder}`, mock-up screen 1) is built
+fresh on every render, like Pull requests, from `SB.load('wb:index', whiteboardsList)`.
+Header `.hd.tight`: `Whiteboards`, **New folder** and **New whiteboard**, and under them
+`N whiteboards · K folders · A archived`. Body: two columns. On the left, the folders —
+`All whiteboards` with its count, `Recent` (the twelve edited last), the heading
+`Folders` and a row per folder with its count and, on one the migration made and nothing
+has touched since, a `moved` chip; `No folder` only while something is in it (and while
+a board is being dragged, as somewhere to drop it); `Archived`, dimmed. A folder row's
+`…`, shown on hover or focus, holds Rename (an inline field) and Delete, disabled with
+`Move its N whiteboards out first` while anything is in it. On the right, a row per
+board: a mini preview drawn from `thumb`, the name, and `Edited 2h ago · 12 boxes ·
+answers read` with a pill per workspace (or `· no answers yet`) — in All, Recent and
+Archived the folder's name first. **Open** is the one action and the whole row opens
+it; a row dragged onto a folder row, or No folder, moves there. A folder row takes only a
+drag that carries a board (its own drag type, the id read from the drag itself), and a
+drag ends on any drop or dragend the window sees, the next press, or a move with no
+button down: a render mid-drag detaches the row, Chromium sends a detached source no
+dragend, and a drag left stuck would have moved that board on a later, unrelated drop.
+The folder column scrolls on its own, so a long list of folders never pushes Archived
+out of reach. New folder and New
+whiteboard are inline fields — the second at the top of the list, `Lands in <folder> ·
+Enter to create, Esc to cancel` (No folder from All, Recent and Archived), writing
+`SBDiagrams.blankSpec()` and opening the board. Only Enter or Create makes one: on blur a
+typed name stays in its field, since committing there would let a click on a row open
+one board while the field made and opened another. The fields — their text and caret —
+the open menu and the last write's error survive re-renders the way the Grid's name
+field does (R10, `whenReleased()` included). At most one bar sits above the columns: a migration that stopped
+(`Your diagrams couldn't all be moved: … Nothing was deleted`, with **Try again** —
+`whiteboardsMigrate()`), else the one-time notice (`Your workspace diagrams moved here.
+Each project's diagrams are in a folder of its name. Drag a whiteboard into any folder,
+or make new folders.`, how many files could not be read and where they were left, and
+**Dismiss**). A write that fails is a warn bar over the list in main's words, and the
+field keeps its text. The empty states are the mock-up's: `No whiteboards yet`,
+`Nothing in <folder> yet`, `Whiteboards you edit show here`, `Nothing archived`.
 
-⌘A arrives through `sb:evt:edit` from the native Edit menu. The diagram toggle has
-first refusal before terminal Select All, including from xterm's helper textarea;
-Markdown, rich labels, inputs and dialogs keep their own Select All. Panel keys and
-wheel events stop before canvas shortcuts. `test:diagram-terminal:browser` exercises
-the production app/preload and a real temporary PTY, including menu routing, shared
-terminal identity across views, text editing, fullscreen, exit and failed-spawn retry.
+**An open board** (`{view:'whiteboard', board}`, mock-up screen 2) is a persistent root
+like the Editor's (R13): the same element comes back on every render, so the canvas,
+its xterms and focus never see a teardown. Its header is swapped only when what it says
+has changed (`putHeader`, against a signature of `headerOf()`'s plain data): the editor
+reports every write, autosave included, and a header rebuilt for each took the crumb
+from under a press — mousedown on the old span, mouseup on the new, no click. The body
+loses only what is neither the slab nor app.js's notice bar (`[data-sb-notice]`), and the
+slab is appended only when it is not already there: taken out and put back on every
+render while a notice was up, it lost focus and a `<webview>`'s page. Header: the
+breadcrumb `Whiteboards › <folder> › <board>` — `Archived` or `No folder` in the middle
+for a board listed there, the first two going to the home on that folder — the board's
+name, and `Saved locally · 12 boxes · answers read sample-2 and example-1` (or `· no
+answers yet`), with `· 2 terminals` while any are open and `· archived`, fed by
+`onBoardChange` and the terminal layer. No workspace tabs. Body: the board's slab.
 
-`renderMain()` tells the view after every render which canvas is visible (`shown(route)`).
-Only the active canvas handles document shortcuts; in Grid, focus or a pointer press
-selects it. Hidden canvases turn their keyboard handlers off, so Backspace in a Terminal
-cannot delete boxes on another canvas.
+**Canvases are keyed by board.** One `SBDiagrams.create` instance and one `.dgslab` per
+board, moved between the board's screen and a Grid square — and onto `<body>` for its
+full screen, `position: fixed` and `no-drag`, since the slab then covers the header's
+drag region, which Electron still counts — and never remounted by a render. The slab is
+focusable but never tabbed to (`tabindex="-1"`, no outline): a press on empty paper
+leaves the keyboard there rather than on `<body>`, from which a Grid render's landing
+focus would hand it to the first terminal square. At most
+eight live at once: the least recently shown that is off screen, not full screen and
+holding nothing unsaved is let go — its layer destroyed, every shell living on, and its
+editor flushed and destroyed after the current task, since that is often a callback from
+inside the editor. A canvas let go is marked dead: the editor's callbacks are silenced
+for the gap until its destroy (`kept()`), so a late dirty flag or slot list never lands
+on a new canvas for the same board, and no terminal layer is attached to it again. A
+full-screen board goes back once the route moves on. After Delete, or Back, the board's
+own screen goes to the list it was in — its breadcrumb's: its folder, No folder, or
+Archived (`listedIn`); and only `info.missing` makes it gone for the session, refused by
+every Grid square, while one that merely couldn't be read is let go and opens again
+once fixed (in a square, `SB.views.grid.chooseAgain`, R10). A board switched inside a
+square takes the keyboard with it when the old one had it: `activeGrid` names the new
+board before `replaceBoard()` renders, and `holdFocus()` focuses its slab before grid.js's
+deferred landing looks, so the next → is not typed into a shell. `renderMain()`
+tells the view after every render which canvas is visible (`shown(route)`). Only the
+active canvas handles document shortcuts — in Grid, focus or a pointer press selects
+it — and hidden canvases turn their keyboard handlers off, so Backspace in a Terminal
+cannot delete boxes on another canvas. `shown()` also rebuilds `workspaceStatus` (each
+workspace's rail dot and, once scanned, branch), pushes it only to canvases on screen and
+only when it changed, and gives every layer its turn (`layer.shown(visible)`). The seam:
+`SB.views.whiteboards = { render, mountGrid(boardId, cell), shown, onKey, editAction,
+refresh, flushAll, toggleTerminalShortcut, terminalShown(wsId), terminalFocused(wsId),
+boards(), lastFolder(), api(boardId) }`, `api` for the smoke harness and the browser
+tests only. Main's flush (`sb:evt:diagramsFlush`), the window's blur and `pagehide` all
+write every board.
 
-**Keys.** app.js asks `onKey` after the Editor: Esc leaves a full-screen
-diagram before it means back, and ⌘↵ (or ⌘I) over the canvas is ✦ Answer (the editor's own
-listener) and never Start. The editor's own Esc, in the capture phase, stops propagation
-when it uses one, so app.js never sees it. G opens Google Images; Esc in its search field
-closes the panel and goes no further.
+**Terminals over a board** (mock-up screen 4) are a layer per canvas,
+`SB.wbTerminals.attach({ boardId, slab, getApi, getBoard, onChange })`, which puts three
+layers in the slab as SIBLINGS of `.dgcanvas`, never inside the React tree: Tailwind's
+reset stays off xterm, the editor's keys stay off a shell, and every element a terminal
+lives in is marked `[data-wb-terminal]`, which is how ⌘A, Esc and the Edit menu's guards
+know to leave it alone. Inside `.dgslab` — its own stacking context, `z-index: 0`, under
+the bundle's portal — they are `.wbpins` (55), `.wbterms` (60) and `.wbtray` (61). A layer
+is `open(wsId)`, `toggleAll()`, `pick(anchor?)`, `slots(list)`, `float(wsId)`,
+`removed(wsId, reason, rect)`, `shown(on)`, `shows(wsId)`, `focused(wsId)`,
+`contains(el)`, `list()`, `tile()` and `destroy()`; its owner for `place()` is
+`'wb:' + boardId` (R8). Its styles are a sheet of their own, `wbterminals.css`.
+
+* **Floating panels**, one per workspace and any number at once (`section.wbterm`,
+  `role=group`, `<ws> terminal`). The header: the terminal icon, the workspace,
+  `~/…/folder · branch` small (`.wbterm-where`: a long folder is cut from its START —
+  right-to-left with left-to-right marks — and the branch keeps its width until the
+  folder is gone) — the folder from `whiteboardsWorkspaces()`, cached, since the
+  renderer has no home directory; the branch once a scan has said it
+  (`SB.ensureScanned`) — the rail's dot with its title (`Running`, `Claude finished a
+  turn`, `Failed`, `Has changes`), then **Pin to board**, **Minimize** and **Close**. A
+  panel drags by its header and resizes from four edges and four corners, at least 300 ×
+  180, kept inside the slab, never above the canvas bar — the measured top of the React
+  Flow pane, else just under Actions; dragged there it would cover the one way back to
+  Open terminal… — and, in full screen, below the traffic lights (56 px); a panel
+  restored before the bar is drawn is fitted again once it is (`refitSoon`). The pty is
+  resized once, on release (`hold()`). A gesture's end is listened for on the window,
+  not the handle (`track()`): a panel hidden by ⌘A, minimized or closed mid-drag leaves
+  the handle hearing neither its pointerup nor its lost capture, and it would go on
+  moving the panel whenever the pointer passed; hiding a panel ends its gesture at once
+  (`endGesture`). A press anywhere brings it to the front. The first opens against the
+  right edge under the bar, 560 wide and up to 420 tall — shorter on a short slab, to
+  clear the zoom controls the tray lifts; each next one 28 px down and LEFT of the last
+  one opened (stepping right would only pile them against the edge), keeping the 16 px
+  margin; off the bottom the next column starts under the bar one more step left, and a
+  last panel dragged to the left edge cascades right. Keys in a panel go to
+  `SB.views.whiteboards.onKey` first (⌘A) and then stop, so ⌘1–9, Esc-to-go-back and the
+  canvas shortcuts never fire while the user types into a shell; the wheel stays in the
+  panel. Opening one notes the workspace (`whiteboardsNoteWorkspace`) and focuses its
+  terminal. Minimize folds it into the tray and Close takes it off the board — both
+  detach it rather than hide it, so the host is free for anyone else, and neither ever
+  closes the shell: the tmux session lives on, as it does when the Terminal tab is left.
+  Focus goes to the next panel, else to Actions. The arrangement is this Mac's, not the
+  board's: `switchboard.wb.terms.<boardId>` in localStorage, `{ hidden, items: [{ wsId,
+  minimized, open, rect }], grids? }`, restored when the canvas is made, less any
+  workspace that has left the rail — asked of main again first when this session's list
+  does not name one, since that list may predate it. `grids` is `{ <wsId>: { cols, rows,
+  w, h, font } }`: the cols/rows each pinned terminal was fixed at, with the node size
+  and font they were worked out for. The node is in the board file; its grid depends on
+  this Mac's font metrics and is what the tmux session still has, so a board reopened at
+  another zoom gives a pinned terminal that grid back rather than fitting a new one
+  (`savedGrid`), and a relaunch resizes no pty.
+* **The tray**, bottom right, while the board has any terminal and ⌘A has not put them
+  away: `Terminals`, a chip per terminal that is open (solid), minimized (dashed, with a
+  restore chevron) or pinned (a pin), each with its dot; then **Tile**, the open panels
+  side by side along the right edge, in the left-to-right order they already had, 8 px
+  apart, from under the bar to above the tray and the zoom controls, each
+  `clamp(62% of the width / n, 300, 560)` wide; and **+**, the same picker as Actions ▸
+  Open terminal…, which a second press puts away (the bundle swallows a press on the
+  picker's anchor; `addPressed`/`addClicked` cover a + that has moved since, so a click
+  whose own press closed the picker opens nothing). `pick()` never opens a second picker
+  over its own open one — a keyboard + or ⌘A leaves it, typed text and all. A chip
+  restores its terminal or brings it to the front, or for a pinned one pans to its node.
+  Closing a panel removes its chip; chips have no ×. While the tray shows it lifts React
+  Flow's zoom controls above itself (`.dgslab:has(> .wbtray:not([hidden]))
+  .react-flow__controls`, 64 px), and it never runs under the undo/redo/Saved strip in
+  the middle: its width is capped at the room right of that strip (`fitTray`, a
+  ResizeObserver on the strip, which grows while an answer is on its way). Only the chips
+  scroll (`.wbtray-chips`), so Tile and + stay in reach; squeezed, the word `Terminals`
+  goes first (`.tight`), then the chips fade at the edge (`.scrolls`). The tray's keydown
+  rule lets the whiteboard view see a key first (⌘A), then stops Esc only — it is not a
+  shell, so ⌘1–9 and ⌘R still reach the window from Tile or +.
+* **⌘A** is `toggleAll()`: the open panels and the tray go away together and come back
+  together; with only minimized ones, they are restored; with none, it opens the board's
+  workspace, or the picker when the board has none or its workspace has left the rail —
+  which this session's list, fetched once, cannot say on its own: a workspace it does
+  not name is asked of main again (`knownFresh`, once however often ⌘A is pressed
+  meanwhile) before the picker opens. Pinned terminals are board content and stay. It is
+  the Edit menu's Select All (§4.7), so it arrives even from an xterm's helper textarea;
+  a text field, a contentEditable, a menu, a dialog, a listbox and a `<webview>` keep
+  Select All.
+* **Pinned terminals.** **Pin to board** — disabled on an archived board, `Unarchive the
+  whiteboard to pin` — passes the editor the panel's rect AND its terminal body's
+  (`pinTerminal(wsId, rect, body)`), so the node is laid out with its slot's body on the
+  panel's body; when that slot arrives the SAME body element moves from the panel into
+  an overlay, `.wbpin`: no remount, no clear, no reconnect, the cols/rows it has kept and
+  its font the node's, and the overlay's xterm padding at zoom 1 the panel's own
+  (`calc(var(--wbz) * 12px) calc(var(--wbz) * 16px)`), so the text does not move and the
+  pty is not resized. The node's **Float** is `float(wsId)`: `unpinTerminal` answers
+  where the node was, and the panel that opens there is lined up so its body covers where
+  the terminal's text was on the board (`bodyOnBoard`, read before the node goes;
+  `alignBody`, measured, one pass) — the exact inverse of the pin, since the node's outer
+  rect is the body plus its header and insets, and a panel put there drifted and gained a
+  column on every Pin → Float. It is back at 12.5 px and fitted to the panel — the one
+  pty resize floating costs. Focus follows the terminal both ways: pressed from a panel
+  that had the keyboard, or from the node's own header, the moved terminal is focused.
+  Each slot is laid with integer `left/top/width/height` in the `.wbpins` layer,
+  which is clipped to the pane — NO transform on any ancestor of the xterm, which would
+  blur its text and throw its mouse coordinates off — at `round4(slot.font)`:
+  quarter-pixel steps, smooth enough to follow a zoom and coarse enough that a pan never
+  re-measures, the xterm's padding scaled to match (`--wbz`). The cols/rows are fixed at
+  pin time and worked out again only when the node's committed size changes
+  (`propose()`, `setFixed()`), so a zoom never resizes the pty; while a resize handle is
+  held, fits are held. Only this layer's own Pin keeps the panel's grid (`t.pinning`
+  says so): a node that comes back any other way — an undo or redo of a Float or a Pin —
+  brings its own size and font, which that grid was never fitted to, so it gets the grid
+  saved for that size and font (`grids`), else one fitted once at the node's font, never
+  the panel's. A size committed while the node could not show its terminal (below the
+  font floor, folded, minimized), or by an undo of one, drops the old grid (`takeSize`),
+  so it is neither clipped into the new box nor saved under the new size. `covered`
+  hides the overlay — `visibility`, no detach, no refit — while the canvas's own floating
+  UI is over it; `live: false` detaches the body and the node draws its own card. What
+  the canvas draws over a pinned node is cut out of its overlay, which sits above the
+  whole canvas: the slot's `holes` (the tool rail, the undo strip, the zoom controls),
+  and the box — ring and handles included — of every pinned node stacked above it, as
+  `clip-path: path(evenodd, …)` in the overlay's own integer pixels (a clip, never a
+  transform; a clipped-out area takes no pointer, so the chrome under it is clickable).
+  Overlapping holes are first split into pieces that do not overlap (`disjoint`), since
+  evenodd would fill their overlap back in. The overlays' z-index follows their nodes' —
+  the slot's `selected` first (a frame ahead of the DOM), then React Flow's z-index, then
+  document order — so where two overlap, the one drawn on top owns the keyboard and the
+  pointer. A pinch (ctrl+wheel) over an overlay is handed to the React
+  Flow pane, so zooming works wherever the pointer is; a plain wheel scrolls the
+  terminal. `removed(wsId, 'undo', rect)` floats the terminal again where its node was,
+  lined up on its body as Float is (read while the overlay is still over the node: the
+  editor reports it from inside its undo); `'delete'` closes it. A slot that vanishes with
+  no event — the editor unmounted — just lets the terminal go, and it comes back with the
+  editor's next list.
+* **Place, and yield.** A layer calls `place()` only from `shown(true)` and from the
+  user's own actions while it is on screen; slots and a restore only build and position
+  DOM, and a board off screen never moves the host. A body is placed again only when its
+  shell changed or it no longer holds the xterm; where another host has it the body
+  shows the stand-in (R8). The stand-in's Show here tells every other layer at once
+  (the module's `layers` registry, `{ repaint, lost }`), so the board it was taken from
+  draws its own stand-in now rather than at some later render.
+* **Bells and retiring.** `focusin` in a panel or an overlay marks that workspace's
+  bell read; a panel merely open keeps its dot (R2's `bell()`, §4.10). `terminalShown(wsId)`
+  keeps `retirePanes()` from disposing a pane that a board on screen is showing.
+
+**Keys.** app.js asks `onKey` after the Editor: ⌘A shows or hides the board's terminals;
+Esc (`escape()`) is the board's, never a step back, when something already answered it —
+`defaultPrevented`, or a target no longer in the document: a Radix dialog or menu closes
+on that very keydown in the capture phase, so by the window its Cancel is in no document
+at all — and it leaves a Radix picker, menu or dialog to Radix; it leaves a full-screen
+board before it means anything else; and inside the board — the canvas, its bar, the
+terminals' tray — it never leaves the board, on its own screen or in a Grid square, nor
+from the page itself on the board's own screen: the canvas has had its turn, and one Esc
+too many must not throw the user out; leaving is the breadcrumb or its caret. ⌘↵ (or ⌘I)
+over the canvas is ✦ Answer (the editor's own listener) and never Start. `onKey` leaves
+alone anything inside a terminal (`[data-wb-terminal="<ws>"]`, a panel or a pinned
+overlay) and, but for ⌘A and Esc, the tray, which carries the attribute with no
+workspace — it is board chrome; `editAction` ignores both.
+The editor's own Esc, in the capture phase, stops propagation when it uses one, so app.js
+never sees it. G opens Google Images; Esc in its search field closes the panel and goes
+no further.
 
 **Google Images** is `ImageSearchPanel.tsx`, using a `<webview>` (§4.17). Staying
 mounted is not enough for it: its root leaving `#main` destroys the guest. So
@@ -2246,21 +2991,45 @@ when it turns true again.
 
 **Styles.** The bundle's stylesheet is the admin's Tailwind plus React Flow's, every rule
 scoped to `.sbdg` behind `:where()` and with the cascade layers flattened
-(`build-diagrams.js` says why), and Radix's portals render into an element inside the
-root rather than `<body>`. One collision that went the other way was fixed at its source:
+(`build-diagrams.js` says why), and Radix's portals render into a second scoped root
+each instance appends to `<body>` (`.sbdg.sbdg-portal-root`, fixed, z-index 1500), so a
+popover escapes a Grid square's container query and clip and keeps the editor's rules
+and dark theme; it is shown only while its board is active or a picker the host asked
+for is open, and `destroy()` removes it. One collision that went the other way was fixed at its source:
 styles.css's `.grid` (the Grid screen's 2x2) is `.gridbd > .grid` now, since `grid` is a
 Tailwind utility the editor uses. styles.css's element rules reach in too, and beat the
 bundle's `:where()`-scoped classes: every `aside` is the sidebar (its padding, and
 `.win.norail aside` hides it), so the bundle uses no `<aside>` — the Google Images panel
 is a `div` with `role="complementary"`. The canvas follows Terminal appearance, as the
-Editor slab does: dark is `[data-term-theme="dark"]`.
+Editor slab does: dark is `[data-term-theme="dark"]`. A terminal node's dot uses
+styles.css's `--run`, `--chg`, `--fail` and `--link`, which must keep existing.
 
 `npm run check:diagrams` type-checks `src/diagrams/` (esbuild builds without checking).
+`npm run test:whiteboards:browser` (`scripts/test-whiteboards-browser.js`, in place of
+the old floating-panel test) runs the production `index.html` and preload, the built
+bundle, xterm and a real PTY (`SWITCHBOARD_NO_TMUX=1`) in a hidden Electron window, with
+a main of its own: its IPC is stubbed but for the store, which is the real
+`whiteboards.js` beside a temporary `SWITCHBOARD_CONFIG`. It covers the rail screen and
+its list, opening a board, Open terminal… floating the Terminal tab's own xterm, a
+second panel from the tray (whose + also puts its picker away) cascading down and left,
+Tile, minimize and restore, Close keeping the shell, ⌘A, the tray leaving the zoom
+controls clickable, Pin keeping the same xterm, cols/rows and text position (slot body
+on the panel's body) while the overlay follows a pan and a zoom, the pinned node in the
+board file, Float landing on the node's body, Undo putting the node back with a grid that
+fits it and Redo floating it where its text was, Select All kept by Markdown and labels,
+full screen and leaving right after it, a Grid square showing a whiteboard, and a
+panel's exit footer and retry. A
+product bug it has found is listed in its `KNOWN_BUGS` by check name: the run reports it
+and passes only while it still fails, so a fix says to take it off the list.
 
 ### R16 `views/settings.js`
 The Settings screen (§4.18): a plain view, rebuilt on every render like Usage. One
-section today, ✦ Answer on diagrams — a row per provider (the radio that makes it the
-one ✦ Answer uses, its name, what it does, whether it is ready on this Mac, one action),
+section today, ✦ Answer on whiteboards — `Who answers a box's question on a whiteboard.
+Claude Code and Codex use their own sign-in and read the workspace you pick for each
+whiteboard; the two APIs need a key and see only the whiteboard.` — a row per provider
+(the radio that makes it the one ✦ Answer uses, its name, what it does — `Reads the
+whiteboard's workspace first · slower` or `Only the whiteboard · fast` — whether it is
+ready on this Mac, one action),
 and under an API's row, opened by Add key / Edit, its key field, its model and (OpenAI)
 its effort; after the list, the Web access and Subtext switches, a whole row each (the
 ✦ Answer menu has the same two). It asks main on the way in (and looks for the CLIs again after 30 s away),
@@ -2271,7 +3040,7 @@ and emptied.
 
 1. **Workspace / Changes** — header: name, `Pull main`, `Start`/`Stop` (the mock-up's sub
    line `TASK-352 · 6 changes · 1 repo behind main · ● running 14s` was cut, see R4). Segmented `Changes | Logs | Terminal |
-   Editor | Diagrams | Databases` (R4; the mock-up predates the latest tabs). One row per
+   Editor | Databases` (R4; the mock-up predates the latest tabs). One row per
    repo: name (150px), branch pill (`⎇ TASK-352 #218`), refresh icon button (only when on
    main), summary button (`4 files +84 −3 ›`) when it has changes else plain state text
    (`up to date` / `2 behind`), and — when running — its link(s) right-aligned.
@@ -2290,7 +3059,7 @@ and emptied.
    nested under it with `path:line` linking into All diffs. All diffs: the diffs with review comments inline under the
    lines they sit on.
 
-8. **Terminal** — the same header, segmented `Changes | Logs | Terminal | Editor | Diagrams | Databases`, and a
+8. **Terminal** — the same header, segmented `Changes | Logs | Terminal | Editor | Databases`, and a
    dark terminal filling the body: a login shell in the workspace directory. When the shell
    has exited, the `.exit` footer from screen 2 with a single `New shell` button. A bell
    from a background workspace's shell (Claude finishing a turn) turns that workspace's
@@ -2308,7 +3077,7 @@ and emptied.
     requested` when so, a checks dot, `3 comments`, `1d ago`, chevron. A row opens the
     pull request's Overview; Esc comes back.
 
-11. **Editor** — the same header, segmented `Changes | Logs | Terminal | Editor | Diagrams | Databases`, and
+11. **Editor** — the same header, segmented `Changes | Logs | Terminal | Editor | Databases`, and
     one slab filling the body, dark or light with the Terminal appearance. On the left
     the file tree: a folder per repo (a single repo starts open; of several, the one with
     the most changes), 24px rows, a chevron per folder, the git letter at the right of a
@@ -2331,10 +3100,37 @@ and emptied.
     will be, `↩` to commit and `esc` to cancel. Delete asks in the Editor's own bar —
     `move <name> to the Trash?` with `Move to Trash` and `Cancel` — never a dialog.
 
+12. **Whiteboards** (the Whiteboards mock-up's screen 1) — the rail's row under Pull
+    requests. Header `Whiteboards` with **New folder** and **New whiteboard** at the right
+    and `14 whiteboards · 3 folders · 2 archived` under it; a one-time notice bar after
+    the migration. Left, the folders: `All whiteboards 14`, `Recent`, `Folders` with a
+    row each (count; a `moved` chip on a migrated one), `No folder` when it has any,
+    `Archived`, dimmed. Right, the selected folder's name, `N whiteboards` and `Edited ⌄`,
+    then one row per board: a mini preview, the name, `Edited 2h ago · 12 boxes ·
+    answers read [sample-2]`, and `Open ›`. Rows drag onto folders.
+
+13. **An open whiteboard** (screen 2) — breadcrumb `Whiteboards › sample › Search
+    filters`, the name, `Saved locally · 12 boxes · answers read sample-2`; no workspace
+    tabs. Over the canvas, the bar: the quick switcher (`Search filters · sample`, ← →),
+    **New whiteboard**, full screen and **Actions** — Open terminal…, Show or hide
+    terminals `⌘A`, Rename…, Move to folder… ›, Duplicate, Archive, Delete. ✦ Answer's
+    chevron menu (screen 3) has the **Workspace** row: `sample-2`, `~/Projects/sample-2 ·
+    what a CLI reads`, **Change… ›**, the short picker opening beside it; a box an
+    answer made carries a `sample-2` tag under its corner.
+
+14. **Terminals on a whiteboard** (screen 4) — floating panels over the canvas, one per
+    workspace: header `sample-2 · ~/Projects/sample-2 · TASK-352`, the rail's dot, Pin,
+    Minimize, Close; a dark terminal below. Bottom right the tray: `Terminals`, a chip per
+    terminal (solid open, dashed minimized, a pin when pinned), Tile, +. A pinned
+    terminal is a node on the canvas with the same header (Float in place of Pin), moving
+    and zooming with the board; below readable size it shows `Zoom in to use`.
+
 Clicking the branch pill opens the PR screen on its Overview. Clicking a summary button
 opens Files. Clicking a file row opens Diff. The workspace name — the header title, the
 breadcrumb crumb, and the name strip on a Grid square — opens that workspace's Terminal.
-The back caret and Esc go back.
+The back caret and Esc go back — except on an open whiteboard, where Esc on the board
+itself never leaves it, and the breadcrumb's `Whiteboards` and folder crumbs are the way
+back to the list.
 
 ---
 
@@ -2378,4 +3174,15 @@ The back caret and Esc go back.
   closed, and `.git`, `..`, an absolute path and a symlink out of the repo are all
   refused with a sentence.
 - Renaming a symlink onto the file it points at is refused, not a destroyed file.
+- The first launch after Whiteboards moves every old per-workspace diagram into the
+  store — one folder per project, each board answering from the workspace it answered
+  from before, its documents and pictures with it — renames `diagrams` to
+  `diagrams-before-whiteboards`, and deletes nothing. A run that stops part way finishes
+  on the next launch, or on Try again, without a second copy of any board, and a second
+  run changes nothing.
+- A board's terminal — floating or pinned — is the workspace's own shell: what is typed
+  there shows on its Terminal tab, the shell's `startedAt` is unchanged across Pin,
+  Float, Minimize and Close, and Close leaves the tmux session running.
+- A pinned terminal's text stays crisp at every zoom, the pointer lands on the cell under
+  it, and panning or zooming never resizes its pty.
 - Every screen matches the mock-up's spacing, type and colour.

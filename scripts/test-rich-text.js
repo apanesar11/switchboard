@@ -263,3 +263,111 @@ test('document references validate and round-trip through canvas layout without 
   assert.equal(ordinary.ok, true);
   assert.equal(ordinary.value.nodes[0].documentId, undefined);
 });
+
+// ── Switchboard: the workspace an answer read, and pinned terminals ──
+
+test('the workspace an answer read round-trips while the box is still the AI’s, and is dropped once it is not', () => {
+  const parsed = parseDiagramSpec(spec({ label: 'Issued in the session module', ai: true, answeredIn: ' sample-2 ' }));
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.value.nodes[0].answeredIn, 'sample-2');
+  const canvas = layoutDiagram(parsed.value);
+  assert.equal(canvas.nodes[0].data.answeredIn, 'sample-2');
+  const saved = flowSpecFromCanvas({}, canvas.nodes, canvas.edges);
+  assert.equal(saved.nodes[0].answeredIn, 'sample-2');
+  const reloaded = parseDiagramSpec(JSON.parse(JSON.stringify(saved)));
+  assert.equal(reloaded.ok, true);
+  assert.equal(reloaded.value.nodes[0].answeredIn, 'sample-2');
+  assert.equal(reloaded.value.nodes[0].ai, true);
+
+  // Without the AI's mark the tag means nothing: not read, not laid out, not saved.
+  for (const ai of [undefined, false]) {
+    const plain = parseDiagramSpec(spec({ label: 'Edited by hand', ai, answeredIn: 'sample-2' }));
+    assert.equal(plain.ok, true);
+    assert.equal(plain.value.nodes[0].answeredIn, undefined);
+    assert.equal(layoutDiagram(plain.value).nodes[0].data.answeredIn, undefined);
+  }
+  const edited = { ...canvas.nodes[0], data: { ...canvas.nodes[0].data, ai: undefined } };
+  assert.equal(flowSpecFromCanvas({}, [edited], []).nodes[0].answeredIn, undefined);
+});
+
+test('an answeredIn that is not a workspace id is dropped without failing the whiteboard', () => {
+  for (const invalid of ['../sample-2', '/Users/example/sample-2', 'example\\sample-2', '.hidden', 'x'.repeat(201), 'two\nlines', '', '   ', 42, {}]) {
+    const parsed = parseDiagramSpec(spec({ label: 'An answer', ai: true, answeredIn: invalid }));
+    assert.equal(parsed.ok, true, JSON.stringify(invalid));
+    assert.equal(parsed.value.nodes[0].answeredIn, undefined, JSON.stringify(invalid));
+    assert.equal(parsed.value.nodes[0].ai, true);
+  }
+});
+
+test('republishing carries the workspace an answer read only while its words are unchanged', () => {
+  const previous = { kind: 'flow', nodes: [{ id: 'a', label: 'Answer', ai: true, answeredIn: 'example-1' }], edges: [] };
+  const same = carryOverFlowLayout(previous, { kind: 'flow', nodes: [{ id: 'a', label: 'Answer' }], edges: [] }).spec;
+  assert.equal(same.nodes[0].ai, true);
+  assert.equal(same.nodes[0].answeredIn, 'example-1');
+  const rewritten = carryOverFlowLayout(previous, { kind: 'flow', nodes: [{ id: 'a', label: 'Rewritten' }], edges: [] }).spec;
+  assert.equal(rewritten.nodes[0].ai, undefined);
+  assert.equal(rewritten.nodes[0].answeredIn, undefined);
+  const cleared = carryOverFlowLayout(previous, { kind: 'flow', nodes: [{ id: 'a', label: 'Answer', ai: false }], edges: [] }).spec;
+  assert.equal(cleared.nodes[0].answeredIn, undefined);
+});
+
+test('a pinned terminal round-trips with its workspace, size, type size and folded state', () => {
+  const terminal = { id: 'terminal-sample-2', label: 'anything', shape: 'terminal', workspace: 'sample-2', size: { width: 600, height: 360 }, font: 15.625, minimized: false, position: { x: 40, y: 80 } };
+  const parsed = parseDiagramSpec(spec(terminal));
+  assert.equal(parsed.ok, true);
+  const node = parsed.value.nodes[0];
+  assert.equal(node.label, 'sample-2', 'labelled with its workspace');
+  assert.equal(node.workspace, 'sample-2');
+  assert.deepEqual(node.size, { width: 600, height: 360 });
+  assert.equal(node.font, 15.625);
+  assert.equal(node.minimized, undefined);
+
+  const canvas = layoutDiagram(parsed.value);
+  assert.deepEqual({ width: canvas.nodes[0].width, height: canvas.nodes[0].height }, { width: 600, height: 360 });
+  const saved = flowSpecFromCanvas({}, canvas.nodes, canvas.edges);
+  assert.deepEqual(
+    { label: saved.nodes[0].label, shape: saved.nodes[0].shape, workspace: saved.nodes[0].workspace, size: saved.nodes[0].size, font: saved.nodes[0].font, minimized: saved.nodes[0].minimized },
+    { label: 'sample-2', shape: 'terminal', workspace: 'sample-2', size: { width: 600, height: 360 }, font: 15.625, minimized: undefined },
+  );
+  const reloaded = parseDiagramSpec(JSON.parse(JSON.stringify(saved)));
+  assert.equal(reloaded.ok, true);
+  assert.deepEqual(reloaded.value.nodes[0], { ...saved.nodes[0], labelRichText: undefined, detailRichText: undefined, detail: undefined });
+
+  // Folded to its title bar: only the header's height, its size kept for unfolding.
+  const folded = parseDiagramSpec(spec({ ...terminal, minimized: true }));
+  assert.equal(folded.value.nodes[0].minimized, true);
+  const foldedCanvas = layoutDiagram(folded.value);
+  assert.deepEqual({ width: foldedCanvas.nodes[0].width, height: foldedCanvas.nodes[0].height }, { width: 600, height: 30 });
+  const foldedSaved = flowSpecFromCanvas({}, foldedCanvas.nodes, foldedCanvas.edges);
+  assert.equal(foldedSaved.nodes[0].minimized, true);
+  assert.deepEqual(foldedSaved.nodes[0].size, { width: 600, height: 360 });
+
+  // No size of its own: the default.
+  assert.deepEqual(flowNodeSize({ label: 'demo', shape: 'terminal' }), { width: 560, height: 340 });
+  // Pinned at a high zoom, a panel's size on screen is fewer canvas units than the
+  // resize handles allow: it opens again at that size, not grown to their minimum.
+  assert.deepEqual(flowNodeSize({ label: 'demo', shape: 'terminal', size: { width: 224, height: 136 } }), { width: 224, height: 136 });
+  saved.nodes[0].size = { width: 224, height: 136 };
+  const small = layoutDiagram(parseDiagramSpec(JSON.parse(JSON.stringify(saved))).value);
+  assert.deepEqual({ width: small.nodes[0].width, height: small.nodes[0].height }, { width: 224, height: 136 });
+  // Never under its header's buttons and a sliver of body, though.
+  assert.deepEqual(flowNodeSize({ label: 'demo', shape: 'terminal', size: { width: 20, height: 20 } }), { width: 96, height: 46 });
+});
+
+test('a pinned terminal with no workspace id fails; its type size is clamped; its fields stay off other shapes', () => {
+  for (const invalid of [undefined, '', '/Users/example/demo', '../demo', 'demo/sub', '.demo', 'x'.repeat(201)]) {
+    const parsed = parseDiagramSpec(spec({ label: 'demo', shape: 'terminal', workspace: invalid }));
+    assert.equal(parsed.ok, false, JSON.stringify(invalid));
+    assert.match(parsed.error, /workspace/);
+  }
+  const big = parseDiagramSpec(spec({ label: 'demo', shape: 'terminal', workspace: 'demo', font: 1000 }));
+  assert.equal(big.value.nodes[0].font, 80);
+  const small = parseDiagramSpec(spec({ label: 'demo', shape: 'terminal', workspace: 'demo', font: 0.5 }));
+  assert.equal(small.value.nodes[0].font, 4);
+  const word = parseDiagramSpec(spec({ label: 'demo', shape: 'terminal', workspace: 'demo', font: 'large' }));
+  assert.equal(word.value.nodes[0].font, undefined);
+
+  const box = parseDiagramSpec(spec({ label: 'A step', workspace: 'demo', font: 12, minimized: true }));
+  assert.equal(box.ok, true);
+  assert.deepEqual([box.value.nodes[0].workspace, box.value.nodes[0].font, box.value.nodes[0].minimized], [undefined, undefined, undefined]);
+});

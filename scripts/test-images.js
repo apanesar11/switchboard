@@ -37,7 +37,9 @@ childProcess.execFile = function (file, args, ...rest) {
 };
 
 const images = require('../src/main/images');
-const diagrams = require('../src/main/diagrams');
+// For IMAGE_TYPES only. Requiring the store touches nothing on disk (test-whiteboards.js
+// checks), so it is safe here without a scratch SWITCHBOARD_CONFIG.
+const whiteboards = require('../src/main/whiteboards');
 
 const hex = h => Buffer.from(h, 'hex');
 // A 1×1 PNG and a 1×1 GIF, whole files.
@@ -362,7 +364,7 @@ test('every type fetchImage answers is one saveImage keeps', async () => {
   // sips refuses those; WHOLE's convert.)
   for (const [claimed, bytes] of [...Object.entries(MAGIC), ...Object.entries(WHOLE)]) {
     const fetched = await images.fetchImage(`data:${claimed};base64,${bytes.toString('base64')}`);
-    if (fetched.ok) assert.ok(diagrams.IMAGE_TYPES[fetched.type], `${claimed} came back as ${fetched.type}`);
+    if (fetched.ok) assert.ok(whiteboards.IMAGE_TYPES[fetched.type], `${claimed} came back as ${fetched.type}`);
   }
 });
 
@@ -459,7 +461,7 @@ test('the Referer is what a browser would send', () => {
 const labels = items => items.map(i => (i.type === 'separator' ? '—' : i.label));
 const NAV = ['Back', 'Forward', 'Reload'];
 
-test('an image result offers Add Image to Diagram first, then its link, then the page', () => {
+test('an image result offers Add Image to Whiteboard first, then its link, then the page', () => {
   const items = images.contextMenuItems({
     mediaType: 'image',
     hasImageContents: true,
@@ -468,12 +470,12 @@ test('an image result offers Add Image to Diagram first, then its link, then the
     editFlags: {},
   }, { canGoBack: true, canGoForward: false });
   assert.deepEqual(labels(items), [
-    'Add Image to Diagram', 'Copy Image', 'Copy Image Address', 'Open Image in Browser', '—',
+    'Add Image to Whiteboard', 'Copy Image', 'Copy Image Address', 'Open Image in Browser', '—',
     'Open Link in Browser', 'Copy Link Address', '—',
     ...NAV,
   ]);
   const byLabel = Object.fromEntries(items.filter(i => i.label).map(i => [i.label, i]));
-  assert.equal(byLabel['Add Image to Diagram'].enabled, true);
+  assert.equal(byLabel['Add Image to Whiteboard'].enabled, true);
   assert.equal(byLabel['Open Image in Browser'].enabled, false, 'a data: thumbnail cannot go to the browser');
   assert.equal(byLabel.Back.enabled, true);
   assert.equal(byLabel.Forward.enabled, false);
@@ -525,7 +527,7 @@ test("a Google result's link leads to its full picture, and says what page that 
   assert.equal(images.sourcePageOf('https://photos.example.test/coast/'), '');
 });
 
-test('Add Image to Diagram on a result offers the full picture, then its thumbnail', () => {
+test('Add Image to Whiteboard on a result offers the full picture, then its thumbnail', () => {
   const page = 'https://www.google.com/search?udm=2&q=lighthouse';
   assert.deepEqual(images.imageOffer(7, { srcURL: THUMB, linkURL: RESULT, pageURL: page, frameURL: page }), {
     guestId: 7, url: RESULT, fallback: THUMB, referrer: page,
@@ -594,7 +596,7 @@ test('a picture is named for where it ended up, past a redirect, when the sessio
 
 test('the Referer goes out only with the page the picture was on', async () => {
   const origin = await base();
-  // Add Image to Diagram knows the page; same origin, so all of it.
+  // Add Image to Whiteboard knows the page; same origin, so all of it.
   assert.equal((await images.fetchImage(origin + '/plain.png', origin + '/results?q=red+panda#top')).ok, true);
   assert.equal(seen['/plain.png'].referer, origin + '/results?q=red+panda');
   // A drop does not, and sends none.

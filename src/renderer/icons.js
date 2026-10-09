@@ -91,9 +91,8 @@ window.SB = window.SB || {};
   // A prompt in a rounded box for the Grid's Terminal mode.
   var term = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.9" y="3" width="12.2" height="10" rx="2.2"/><path d="M4.6 6.6L6.9 8.8 4.6 11"/><path d="M8.6 11.2h3"/></svg>';
 
-  // Grid cell modes: a clean plus/minus mark and a small branching diagram.
+  // Grid cell modes: a clean plus/minus mark. The third mode, a whiteboard, is `board`.
   var changes = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 4.5h5M4.5 2v5M9 11.5h5"/></svg>';
-  var diagram = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="6.25" width="3.5" height="3.5" rx=".7"/><rect x="11" y="2" width="3.5" height="3.5" rx=".7"/><rect x="11" y="10.5" width="3.5" height="3.5" rx=".7"/><path d="M5 8h3V3.75h3M8 8v4.25h3"/></svg>';
 
   // A folder with a + on it: the Editor tree's New folder. Same box and weight.
   var folderPlus = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.9 12.6V4.2a1 1 0 0 1 1-1h3.1l1.4 1.7h5.7a1 1 0 0 1 1 1v6.7a1 1 0 0 1-1 1H2.9a1 1 0 0 1-1-1z"/><path d="M8 7.4v4M6 9.4h4"/></svg>';
@@ -104,6 +103,53 @@ window.SB = window.SB || {};
 
   // A padlock: the Settings screen's line about where API keys are kept. 12x12 at 1.4.
   var lock = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>';
+
+  // ── Whiteboards (§4.17) ──
+  // Lifted verbatim from the approved Whiteboards mock-up's generator, which draws them
+  // in the rail glyphs' 14x14 box at stroke 1.4 (its `S` prefix); the chevrons and the
+  // check keep the mock-up's own sizes. `pin` and `float` are not in the mock-up and are
+  // drawn here in the same box and weight.
+  var W = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">';
+
+  // The rail's Whiteboards row, a Grid square's "Show a whiteboard", the home's notice:
+  // a board on an easel, a line chart drawn on it.
+  var board = W + '<rect x="1.5" y="2.6" width="13" height="9.6" rx="1.6"/><path d="M4.4 9.4l2.4-2.6 1.8 1.7 2.9-3.2"/><path d="M6 12.2l-1 1.9M10 12.2l1 1.9"/></svg>';
+
+  // A folder row on the Whiteboards screen, and Move to folder…; open for the selected one.
+  var folder = W + '<path d="M1.9 12.6V4.2a1 1 0 0 1 1-1h3.1l1.4 1.7h5.7a1 1 0 0 1 1 1v6.7a1 1 0 0 1-1 1H2.9a1 1 0 0 1-1-1z"/></svg>';
+  var folderOpen = W + '<path d="M1.9 12.6V4.2a1 1 0 0 1 1-1h3.1l1.4 1.7h5.7a1 1 0 0 1 1 1v1.4"/><path d="M1.9 12.6l1.7-5h11l-1.7 5z"/></svg>';
+
+  // New whiteboard, a terminal tray's +; Minimize.
+  var plus = W + '<path d="M8 3v10M3 8h10"/></svg>';
+  var minus = W + '<path d="M3.5 8h9"/></svg>';
+
+  // The Archived row and Archive; Recent.
+  var archive = W + '<rect x="2" y="3" width="12" height="3" rx=".8"/><path d="M3 6v6.3a.8.8 0 0 0 .8.8h8.4a.8.8 0 0 0 .8-.8V6M6.5 9h3"/></svg>';
+  var clock = W + '<circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.5"/></svg>';
+
+  // The terminal tray: Tile, and its label (two terminals, one behind the other).
+  var tile = W + '<rect x="2" y="2.5" width="5" height="11" rx="1.2"/><rect x="9" y="2.5" width="5" height="11" rx="1.2"/></svg>';
+  var termStack = W + '<rect x="1.9" y="4.6" width="10.6" height="8.6" rx="2"/><path d="M4.4 4.6V3.9a1.6 1.6 0 0 1 1.6-1.6h6.5a1.6 1.6 0 0 1 1.6 1.6v5.6a1.6 1.6 0 0 1-1.1 1.5"/><path d="M4.3 7.8l1.9 1.7-1.9 1.7M7.6 11.3h2.6"/></svg>';
+
+  // A picker's chosen row. 13x13 at 1.9, as the mock-up draws it.
+  var check = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3L13 4.5"/></svg>';
+
+  // The two directions `chev` and `chevD` do not cover: the quick switcher's previous
+  // step, and a minimized terminal's restore. Same 11x11 at 1.8 as their siblings.
+  var chevL = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5L5.5 8l4.5 4.5"/></svg>';
+  var chevU = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 10l4.5-4.5L12.5 10"/></svg>';
+
+  // Rename, Duplicate, Delete.
+  var edit = W + '<path d="M3 13l.9-3.3L11 2.6a1.3 1.3 0 0 1 1.9 0l.5.5a1.3 1.3 0 0 1 0 1.9L6.3 12.1z"/><path d="M9.6 4l2.4 2.4"/></svg>';
+  var copy = W + '<rect x="5.5" y="5.5" width="8" height="8" rx="1.4"/><path d="M10.5 5.5V3.7a1.2 1.2 0 0 0-1.2-1.2H3.7a1.2 1.2 0 0 0-1.2 1.2v5.6a1.2 1.2 0 0 0 1.2 1.2h1.8"/></svg>';
+  var trash = W + '<path d="M2.5 4.5h11M6.5 4.5V3h3v1.5M4 4.5l.7 8.3a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-8.3M6.6 7v4M9.4 7v4"/></svg>';
+
+  // A terminal panel's Pin to board: a push pin, its cap, body and needle.
+  var pin = W + '<path d="M5.4 2.3h5.2M6.6 2.3v4L4.6 8.9h6.8L9.4 6.3v-4M8 8.9v4.8"/></svg>';
+
+  // A pinned terminal's Float: a window lifted out of the one behind it, the way
+  // picture-in-picture is drawn.
+  var float = W + '<path d="M6.5 12.9H3.4a1.5 1.5 0 0 1-1.5-1.5V5.6a1.5 1.5 0 0 1 1.5-1.5h1.1"/><rect x="6.4" y="2.2" width="7.7" height="6.6" rx="1.4"/><path d="M8.8 11.3l2.3 2.3M8.8 13.6v-2.3h2.3"/></svg>';
 
   SB.icons = {
     publish: '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10V2m-3 3 3-3 3 3M3 10v3h10v-3"/></svg>',
@@ -131,9 +177,25 @@ window.SB = window.SB || {};
     note: note,
     term: term,
     changes: changes,
-    diagram: diagram,
     folderPlus: folderPlus,
     sliders: sliders,
-    lock: lock
+    lock: lock,
+    board: board,
+    folder: folder,
+    folderOpen: folderOpen,
+    plus: plus,
+    minus: minus,
+    archive: archive,
+    clock: clock,
+    tile: tile,
+    termStack: termStack,
+    check: check,
+    chevL: chevL,
+    chevU: chevU,
+    edit: edit,
+    copy: copy,
+    trash: trash,
+    pin: pin,
+    float: float
   };
 })(window.SB);

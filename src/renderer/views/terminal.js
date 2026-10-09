@@ -37,6 +37,10 @@ window.SB = window.SB || {};
   // how quitting the app closes all of them, the same as shutting an iTerm2 window.
   var STOP_SIGNALS = { SIGTERM: 1, SIGINT: 1, SIGHUP: 1 };
 
+  // The font every route host shows. A pinned whiteboard terminal is the one place it
+  // changes: it follows the canvas zoom (place() and setFontSize() below).
+  var BASE_FONT = 12.5;
+
   // node-pty's onExit reports the signal as a NUMBER alongside an exitCode of 0;
   // child_process reports the name alongside a null code. Either way the signal is
   // how the process ended, so it wins over the code when both are there.
@@ -174,7 +178,7 @@ window.SB = window.SB || {};
         macOptionIsMeta: true,
         scrollback: 10000,
         fontFamily: '"SF Mono", Menlo, Consolas, monospace',
-        fontSize: 12.5,
+        fontSize: BASE_FONT,
         // xterm multiplies the MEASURED character box, not the font size, and ceils
         // the result: SF Mono at 12.5px measures 15px, so 1.4 gives a 21px row — the
         // closest whole pixel to the mock-up's `12.5px/1.65` = 20.625px line box.
@@ -195,6 +199,18 @@ window.SB = window.SB || {};
       disposed: false,
       live: true,                     // no exit seen yet; a shell is about to be opened
       startedAt: null,                // the shell generation this pane last saw
+      // Who holds the host (see place() below): null for a route host — the Terminal
+      // tab or a Grid square, which take it with mount() — or a whiteboard layer's
+      // token ('wb:<boardId>'). `home` is the element it was last put into.
+      owner: null,
+      home: null,
+      fontSize: BASE_FONT,
+      // A pinned terminal's cols/rows. Set, a fit sizes the Terminal to exactly this
+      // instead of to its box: zooming a board changes the box every frame, and a pty
+      // that followed it would get a SIGWINCH per frame and redraw a TUI mid-frame.
+      fixed: null,
+      sent: null,                     // 'colsxrows' the pty was last told, for fixed mode only
+      held: false,                    // an edge drag is in progress: no fits until it ends
     };
 
     pane.term.loadAddon(pane.fit);
@@ -311,7 +327,9 @@ window.SB = window.SB || {};
     // Deliberately not memoised on the last size sent, for the reason views/logs.js
     // gives: a brand-new pty behind the same pane starts at main's default with
     // cols/rows unchanged, and a memo would never correct it. Resizing a pty to the
-    // size it already has costs one ioctl and sends no SIGWINCH.
+    // size it already has costs one ioctl and sends no SIGWINCH. The size IS recorded,
+    // for fixed mode alone (refit below), which has a reason of its own to skip one.
+    pane.sent = pane.term.cols + 'x' + pane.term.rows;
     var sent = api.shellResize(pane.wsId, pane.term.cols, pane.term.rows);
     Promise.resolve(sent)['catch'](function () {});
   }
@@ -357,6 +375,7 @@ window.SB = window.SB || {};
     // at the size main spawned it with and only a resize will tell it otherwise.
     if (liveShell(wsId)) { sendResize(pane); return; }
     opening.add(wsId);
+    pane.sent = (pane.term.cols || 80) + 'x' + (pane.term.rows || 24);
     Promise.resolve(api.openShell(wsId, pane.term.cols || 80, pane.term.rows || 24)).then(
       function (r) {
         opening['delete'](wsId);
@@ -374,6 +393,9 @@ window.SB = window.SB || {};
 
   function refit(pane) {
     if (pane.disposed || !pane.opened || !pane.host.isConnected) return;
+    // A whiteboard panel's edge is being dragged (hold() below): the same reasoning as
+    // the rail, for one pane. Its release asks for the one fit that matters.
+    if (pane.held) return;
     // The rail is mid-slide. Every frame of it fires the ResizeObserver, and acting
     // on them would hand the pty a new size twenty times in a fifth of a second.
     // app.js calls relayout() below when the layout has settled, and one fit there
@@ -381,7 +403,17 @@ window.SB = window.SB || {};
     if (SB.layout && SB.layout.busy()) return;
     var box = pane.host.getBoundingClientRect();
     if (!box.width || !box.height) return;   // mid-layout; the ResizeObserver refits
-    try { pane.fit.fit(); } catch (_) { /* nothing measurable yet; the next fit gets it */ }
+    var fixed = pane.fixed;
+    if (fixed) {
+      // A pinned terminal: its box follows the canvas zoom, its grid does not. The
+      // first-fit path below still runs, so a pinned terminal restored after a
+      // relaunch opens its shell at exactly these cols/rows.
+      if (pane.term.cols !== fixed.cols || pane.term.rows !== fixed.rows) {
+        try { pane.term.resize(fixed.cols, fixed.rows); } catch (_) { /* the next fit gets it */ }
+      }
+    } else {
+      try { pane.fit.fit(); } catch (_) { /* nothing measurable yet; the next fit gets it */ }
+    }
 
     var first = !pane.ready;
     // Nothing may be written before this point. A Terminal opens at xterm's default
@@ -391,7 +423,11 @@ window.SB = window.SB || {};
     drain(pane);
 
     if (first) openShell(pane);
-    else sendResize(pane);
+    // Fixed mode is the one place a resize is memoised: its box changes on every zoom
+    // frame while its size does not, and the ResizeObserver would otherwise put an
+    // ioctl on the IPC channel per frame. A new shell generation still gets one
+    // (onState), so the memo can never strand a fresh pty at main's default size.
+    else if (!fixed || pane.sent !== fixed.cols + 'x' + fixed.rows) sendResize(pane);
     focusIfShown(pane);
   }
 
@@ -572,7 +608,7 @@ window.SB = window.SB || {};
   function focusedPane() {
     var active = document.activeElement;
     if (!active) return null;
-    // A Grid square can show a diagram instead of its terminal. Keep edit commands
+    // A Grid square can show a whiteboard instead of its terminal. Keep edit commands
     // in the focused canvas rather than sending them to a shell parked off screen.
     if (active.isContentEditable === true) return null;
     var found = null;
@@ -669,8 +705,10 @@ window.SB = window.SB || {};
   // button is offered only where retrying could help — a workspace that failed to open —
   // and never for "the terminal did not load", which no amount of trying will fix.
   function blank(message, wsId) {
-    if (!wsId) return h('div.term.blank', null, message);
-    return h('div.term.blank', null, h('div.stack', null,
+    // data-msg lets place() keep a sentence that is already showing rather than
+    // rebuild it (and the focused Try again with it) on every whiteboard render.
+    if (!wsId) return h('div.term.blank', { 'data-msg': message }, message);
+    return h('div.term.blank', { 'data-msg': message }, h('div.stack', null,
       h('span', null, message),
       h('button.btn.sm', {
         type: 'button',
@@ -686,14 +724,64 @@ window.SB = window.SB || {};
     return null;
   }
 
+  function loaded() {
+    return !!(window.Terminal && window.FitAddon && window.WebLinksAddon);
+  }
+
+  // A pane's mode: fit (fixed null, the base font) everywhere but a pinned whiteboard
+  // terminal, which passes its own grid and zoomed font. A mode left over from one
+  // host must never leak into the next — the Terminal tab showing a pinned terminal's
+  // 7px text at its pinned cols/rows would be a bug — so every mount sets it whole.
+  function cleanSize(size) {
+    if (!size || typeof size !== 'object') return null;
+    var cols = Math.floor(Number(size.cols));
+    var rows = Math.floor(Number(size.rows));
+    if (!isFinite(cols) || !isFinite(rows) || cols < 2 || rows < 1) return null;
+    return { cols: cols, rows: rows };
+  }
+
+  function applyFont(pane, px) {
+    var size = Number(px);
+    if (!isFinite(size) || size <= 0) size = BASE_FONT;
+    if (pane.fontSize === size) return;
+    pane.fontSize = size;
+    // A live option: xterm re-measures the cell and repaints at the same cols/rows,
+    // so nothing reaches the pty until a fit says otherwise.
+    try { pane.term.options.fontSize = size; } catch (_) { /* a disposed Terminal */ }
+    syncScroll(pane);
+  }
+
+  // xterm 6's viewport works out its scroll range (rows × cell height) only when the
+  // buffer resizes or scrolls — not when the cell changes size with the font. A pinned
+  // terminal changes font on every zoom at fixed cols/rows, so its range stayed at the
+  // old cell height and the wheel could no longer scroll the scrollback until new
+  // output arrived. This asks the viewport to measure again. It is xterm's internal
+  // API (there is no public one); without it nothing breaks that was not already.
+  function syncScroll(pane) {
+    try {
+      var core = pane.term && pane.term._core;
+      var viewport = core && core._viewport;
+      if (viewport && typeof viewport.queueSync === 'function') viewport.queueSync();
+    } catch (_) { /* a disposed or unopened Terminal: its first fit syncs it */ }
+  }
+
+  function setMode(pane, fixed, fontSize) {
+    pane.fixed = cleanSize(fixed);
+    applyFont(pane, fontSize);
+  }
+
   // Puts a workspace's terminal — the pane, or the sentence standing in for it, and
-  // the exit footer when there is one — into `into`. The Terminal tab, Grid and
-  // floating diagram panel get the SAME pane: one xterm and one
-  // shell per workspace, whichever screen is showing it. Only one screen ever is, so
-  // the host simply moves. That is the whole reason the Grid can exist without a
-  // second copy of everything in this file.
+  // the exit footer when there is one — into `into`. The Terminal tab, Grid and the
+  // whiteboards' terminals get the SAME pane: one xterm and one shell per workspace,
+  // whichever screen is showing it, so the host moves between them. The route hosts
+  // (the Terminal tab and a Grid square) take it with mount() unconditionally, as the
+  // only screen on show; a whiteboard takes it with place() below, which yields to
+  // whoever holds it — several boards and a Grid square can be on screen together,
+  // and two hosts that both took it on every render would bounce it between them,
+  // refitting and resizing the pty each time. That is the whole reason the Grid and
+  // the whiteboards can exist without a second copy of everything in this file.
   function mount(wsId, shell, into) {
-    if (!window.Terminal || !window.FitAddon || !window.WebLinksAddon) {
+    if (!loaded()) {
       into.appendChild(blank('the terminal did not load'));
       return into;
     }
@@ -705,12 +793,146 @@ window.SB = window.SB || {};
     }
 
     var pane = panes.get(wsId) || createPane(wsId);
+    // A route host owns the pane outright, in fit mode at the base font, and releases
+    // any hold a whiteboard left behind.
+    pane.owner = null;
+    pane.home = into;
+    pane.held = false;
+    setMode(pane, null, BASE_FONT);
     into.appendChild(pane.host);
     activate(pane, 200);
 
     var foot = footer(shell, pane);
     if (foot) into.appendChild(foot);
     return into;
+  }
+
+  // The sentence standing in for a terminal, kept as it is when it already says this:
+  // a whiteboard re-places on every render while it shows one.
+  function showBlank(into, el) {
+    var only = into.children.length === 1 ? into.firstElementChild : null;
+    if (only && only.classList.contains('blank') &&
+        only.getAttribute('data-msg') === el.getAttribute('data-msg')) return;
+    into.replaceChildren(el);
+  }
+
+  // A whiteboard's YIELDING mount. `into` takes the host only when nothing on screen
+  // has it, when it is already in `into`, when the same owner put it somewhere else
+  // (a pinned terminal floating back out), or when `force` says the user asked for it
+  // here (the stand-in's Show here). Returns whether `into` now holds it; on false the
+  // caller draws its own stand-in and `into` is left as it is. A failed or unloaded
+  // terminal gets the sentence mount() shows, and counts as held.
+  //   opts = { owner: 'wb:<boardId>', fixed?: {cols, rows} | null, fontSize?: px, force?: bool }
+  function place(wsId, into, opts) {
+    var o = opts || {};
+    if (!wsId || !into || !into.isConnected) return false;
+    var shell = ((SB.state || {}).shell || {})[wsId] || null;
+    if (!loaded()) {
+      showBlank(into, blank('the terminal did not load'));
+      return true;
+    }
+    var problem = errorOf(wsId, shell);
+    if (problem) {
+      showBlank(into, blank(problem, wsId));
+      return true;
+    }
+
+    var owner = o.owner === null || o.owner === undefined ? null : String(o.owner);
+    var pane = panes.get(wsId);
+    if (pane && pane.disposed) pane = null;
+    if (pane && !into.contains(pane.host) && pane.host.isConnected &&
+        pane.owner !== owner && !o.force) return false;
+
+    if (!pane) pane = createPane(wsId);
+    // A placement ends any hold: a drag cut short (its panel hidden or minimized
+    // mid-drag never sees its pointerup) must not leave the pane unable to fit.
+    pane.held = false;
+    pane.owner = owner;
+    pane.home = into;
+    setMode(pane, o.fixed, o.fontSize);
+    // Whatever stood in for the terminal goes: a stand-in, an old sentence, the last
+    // exit footer (drawn again below if the shell is still exited).
+    Array.prototype.slice.call(into.childNodes).forEach(function (child) {
+      if (child !== pane.host && !child.contains(pane.host)) into.removeChild(child);
+    });
+    if (!into.contains(pane.host)) into.appendChild(pane.host);
+    var foot = footer(shell, pane);
+    if (foot) into.appendChild(foot);
+    activate(pane, 200);
+    return true;
+  }
+
+  // The pane `owner` is holding, on screen in the element it placed it into — or null.
+  // Every whiteboard call below goes through this, so a layer that lost its terminal to
+  // the Grid cannot reach across and shrink the Grid's font or pin its size.
+  function ownedPane(wsId, owner) {
+    var pane = panes.get(wsId);
+    if (!pane || pane.disposed || !pane.opened) return null;
+    if (owner === null || owner === undefined || pane.owner !== String(owner)) return null;
+    if (!pane.home || !pane.home.isConnected || !pane.home.contains(pane.host)) return null;
+    return pane;
+  }
+
+  // What a fit would make of the pane's box at its current font, without resizing
+  // anything. Null until the Terminal has been opened and measured.
+  function proposeOf(pane) {
+    var dims = null;
+    try { dims = pane.fit.proposeDimensions(); } catch (_) { dims = null; }
+    return cleanSize(dims);
+  }
+
+  function propose(wsId) {
+    var pane = panes.get(wsId);
+    if (!pane || pane.disposed || !pane.opened) return null;
+    return proposeOf(pane);
+  }
+
+  // A pinned terminal's font follows the zoom. Cell sizes are measured, rounded and
+  // ceil'd by xterm, so a font that is exactly proportional to the box can still need
+  // a pixel more than it has, and the prompt line is the one that gets clipped: step
+  // down a quarter pixel at a time, three times at most, until the fixed grid fits.
+  function setFontSize(wsId, px, owner) {
+    var pane = ownedPane(wsId, owner);
+    if (!pane) return false;
+    applyFont(pane, px);
+    if (pane.fixed) {
+      for (var i = 0; i < 3; i++) {
+        var p = proposeOf(pane);
+        if (!p || (p.cols >= pane.fixed.cols && p.rows >= pane.fixed.rows)) break;
+        applyFont(pane, pane.fontSize - 0.25);
+      }
+    }
+    return true;
+  }
+
+  // Fixed (a pinned terminal) or fit (null). The fit that follows applies it; a new
+  // fixed size is the one time a pinned terminal's pty is told anything.
+  function setFixed(wsId, size, owner) {
+    var pane = ownedPane(wsId, owner);
+    if (!pane) return false;
+    pane.fixed = cleanSize(size);
+    queueFit(pane);
+    return true;
+  }
+
+  // Suspends fits while a whiteboard panel's edge is dragged; the release fits once.
+  function hold(wsId, on, owner) {
+    var pane = ownedPane(wsId, owner);
+    if (!pane) return false;
+    var was = pane.held;
+    pane.held = !!on;
+    if (was && !pane.held) queueFit(pane);
+    return true;
+  }
+
+  // Who holds the pane: a whiteboard layer's token, or null for a route host or for
+  // no host at all. A layer reads it to word its stand-in — another board's terminal
+  // can be taken back with Show here; a Grid square or the Terminal tab cannot, since
+  // their next render would only take it again.
+  function ownerOf(wsId) {
+    var pane = panes.get(wsId);
+    if (!pane || pane.disposed || !pane.host.isConnected) return null;
+    return pane.owner;
   }
 
   function body(wsId, shell) {
@@ -748,6 +970,14 @@ window.SB = window.SB || {};
     render: render,
     relayout: relayout,
     mount: function (wsId, into) { return mount(wsId, ((SB.state || {}).shell || {})[wsId] || null, into); },
+    // The whiteboards' side of the same pane (views/wbterminals.js): a yielding mount,
+    // and the zoomed font, fixed grid and drag hold of a pinned or floating terminal.
+    place: place,
+    setFontSize: setFontSize,
+    propose: propose,
+    setFixed: setFixed,
+    hold: hold,
+    owner: ownerOf,
     focus: focus,
     write: write,
     onState: onState,

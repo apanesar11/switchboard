@@ -99,9 +99,12 @@ export function flowSpecFromCanvas(
   )
 
   const specNodes: FlowNodeSpec[] = nodes.filter((node) => !blank.has(node.id)).map((node) => {
-    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, detached } =
+    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, answeredIn, detached, workspace, font, minimized } =
       node.data
-    const cleanLabel = cleanBoxText(label) ?? (shape === "note" ? "" : UNTITLED_FLOW_LABEL)
+    // Switchboard: a pinned terminal is labelled with its workspace, as the
+    // validator labels it.
+    const terminal = shape === "terminal" ? (workspace ?? label) : undefined
+    const cleanLabel = terminal ?? cleanBoxText(label) ?? (shape === "note" ? "" : UNTITLED_FLOW_LABEL)
     const cleanDetail = cleanBoxText(detail)
     return {
       id: node.id,
@@ -121,6 +124,8 @@ export function flowSpecFromCanvas(
       bold: bold === true ? true : undefined,
       italic: italic === true ? true : undefined,
       ai: ai === true ? true : undefined,
+      // Switchboard: the workspace an answer read, while its words are still the AI's.
+      answeredIn: ai === true && answeredIn ? answeredIn : undefined,
       detached: detached === true ? true : undefined,
       position: { x: pixel(node.position.x), y: pixel(node.position.y) },
       src: shape === "image" ? src : undefined,
@@ -129,6 +134,10 @@ export function flowSpecFromCanvas(
         isFlowSizedShape(shape) && size
           ? { width: pixel(size.width), height: pixel(size.height) }
           : undefined,
+      // Switchboard: a pinned terminal's workspace, type size and folded state.
+      workspace: terminal,
+      font: terminal !== undefined && typeof font === "number" ? Math.round(font * 1000) / 1000 : undefined,
+      minimized: terminal !== undefined && minimized === true ? true : undefined,
     }
   })
 
@@ -283,7 +292,9 @@ function flowTrees(
   for (const edge of edges) {
     const from = byId.get(edge.source)
     const to = byId.get(edge.target)
-    if (!from || !to || to.x <= from.x || from.detached || to.detached || pinned.has(to.id)) continue
+    // Switchboard: nor is a pinned terminal ever one of a branch's boxes — it stays
+    // where it was put, whatever is laid out around it.
+    if (!from || !to || to.x <= from.x || from.detached || to.detached || pinned.has(to.id) || to.shape === "terminal") continue
     if (edge.sourceHandle !== "right" || edge.targetHandle !== "left") continue
     sources.set(to.id, (sources.get(to.id) ?? new Set()).add(from.id))
   }
@@ -424,7 +435,12 @@ function makeRoom(
     root.set(id, r)
     return r
   }
+  // Switchboard: an arrow to or from a pinned terminal holds nothing to it. The
+  // terminal alone stays where it was put, and a box wired to it is pushed out of
+  // the tree's way like any other (and clear of the terminal, which is settled).
+  const terminal = (id: string) => at.get(id)?.shape === "terminal"
   for (const edge of edges) {
+    if (terminal(edge.source) || terminal(edge.target)) continue
     if (root.has(edge.source) && root.has(edge.target)) {
       root.set(find(edge.source), find(edge.target))
     }
@@ -488,6 +504,51 @@ function makeRoom(
 }
 
 /**
+ * Switchboard: moves the boxes of a freshly laid-out tree down past any pinned
+ * terminal they would land on. A terminal never moves, and the live terminal the
+ * host lays over it hides whatever is under it, so a box laid out there would be
+ * out of sight and out of reach — and makeRoom never moves the tree itself.
+ * Going down the tree in order (top, then each branch in turn), the first box
+ * that lands on a terminal moves down past it, as Tab's clearOfBoxes does, and
+ * takes with it its own branch and every box laid out after it, so the tree
+ * below that point keeps its order and spacing. The top of the tree never moves.
+ * Boxes only ever move down, so each box passes each terminal at most once.
+ */
+function clearOfTerminals(
+  at: Map<string, FlowTreeBox>,
+  trees: FlowTrees,
+  topId: string,
+  terminals: FlowTreeBox[],
+): void {
+  if (terminals.length === 0) return
+  const order: string[] = []
+  const walk = (id: string) => {
+    order.push(id)
+    for (const child of trees.childrenOf.get(id) ?? []) walk(child)
+  }
+  walk(topId)
+  for (let pass = 0; pass <= order.length * terminals.length; pass += 1) {
+    let hit: { index: number; under: FlowTreeBox } | null = null
+    search: for (let index = 1; index < order.length; index += 1) {
+      const box = at.get(order[index])!
+      for (const under of terminals) {
+        if (under.id !== box.id && overlaps(box, under)) {
+          hit = { index, under }
+          break search
+        }
+      }
+    }
+    if (hit === null) return
+    const first = at.get(order[hit.index])!
+    const shift = hit.under.y + hit.under.height + FLOW_TAB_GAP_Y - first.y
+    for (const id of order.slice(hit.index)) {
+      const box = at.get(id)!
+      at.set(id, { ...box, y: box.y + shift })
+    }
+  }
+}
+
+/**
  * Lays out again the tree each of `anchors` is in, the way Tab lays one out,
  * and makes room for it — see layoutTree and makeRoom. `boxes` and `edges`
  * are the canvas as it now is, any new boxes (`fresh`) included at their x;
@@ -503,11 +564,17 @@ function tidyTrees(
   pinned: ReadonlySet<string> = new Set(),
 ): Map<string, FlowTreeBox> {
   const at = new Map(boxes.map((box) => [box.id, box]))
+  // Switchboard: a pinned terminal is pinned in every tidy, as images are while a
+  // branch folds — what would crowd it moves instead.
+  const terminals = boxes.filter((box) => box.shape === "terminal")
+  if (terminals.length > 0) pinned = new Set([...pinned, ...terminals.map((box) => box.id)])
   const trees = flowTrees(at, edges, fresh, pinned)
   const tops = new Set(anchors.filter((id) => at.has(id)).map((id) => topOf(trees, id)))
   for (const top of tops) {
     const placed = layoutTree(at, trees, top)
     for (const [id, box] of placed) at.set(id, box)
+    // Switchboard: never onto a pinned terminal (where it is now, as it never moves).
+    clearOfTerminals(at, trees, top, terminals.map((box) => at.get(box.id) ?? box))
     makeRoom(at, was, new Set(placed.keys()), edges, pinned)
   }
   return at
@@ -874,6 +941,11 @@ export function carryOverFlowLayout(
     const old = before.get(node.id.toLowerCase())
     if (!old) return node
     if (!node.position && old.position) carried += 1
+    // The AI's mark survives only while the words are still the AI's — and with
+    // it (Switchboard) the workspace that answer read.
+    const aiWords = old.ai === true && old.label === node.label && old.detail === node.detail
+    const ai = node.ai ?? (aiWords ? true : undefined)
+    const terminal = node.shape === "terminal" && old.shape === "terminal"
     return {
       ...node,
       position: node.position ?? old.position,
@@ -892,9 +964,12 @@ export function carryOverFlowLayout(
       italic: node.italic ?? old.italic,
       labelRichText: node.labelRichText ?? (node.label === old.label ? old.labelRichText : undefined),
       detailRichText: node.detailRichText ?? (node.detail === old.detail ? old.detailRichText : undefined),
-      // The AI's mark survives only while the words are still the AI's.
-      ai: node.ai ?? (old.ai && old.label === node.label && old.detail === node.detail ? true : undefined),
+      ai,
+      answeredIn: node.answeredIn ?? (ai === true && aiWords ? old.answeredIn : undefined),
       detached: node.detached ?? old.detached,
+      // Switchboard: a pinned terminal keeps its type size and whether it is folded.
+      font: node.font ?? (terminal ? old.font : undefined),
+      minimized: node.minimized ?? (terminal ? old.minimized : undefined),
     }
   })
   const edges = next.edges.map((edge) => {

@@ -1,15 +1,15 @@
 'use strict';
 
-// answer.js — ✦ Answer on the Diagrams tab: which AI answers a box's question, and the
+// answer.js — ✦ Answer on a whiteboard: which AI answers a box's question, and the
 // asking. ARCHITECTURE §4.18, §5 M11.
 //
 // Four ways to answer, picked on the Settings screen or under ✦ Answer's chevron:
 //
-//   claude-code   Claude Code's CLI, run in the workspace folder with ONLY its read and
-//                 search tools, so it reads the code before it answers. Slower — it
-//                 opens files first — and it knows the code.
+//   claude-code   Claude Code's CLI, run in the whiteboard's workspace folder with ONLY
+//                 its read and search tools, so it reads the code before it answers.
+//                 Slower — it opens files first — and it knows the code.
 //   codex         Codex's CLI, `codex exec` in its read-only sandbox, the same idea.
-//   claude-api    The Claude API with a key the user typed in. Sees only the diagram;
+//   claude-api    The Claude API with a key the user typed in. Sees only the whiteboard;
 //                 answers in seconds.
 //   openai-api    The OpenAI Responses API, likewise — the admin's ✦ Answer, with the
 //                 models and efforts the admin offers.
@@ -24,10 +24,16 @@
 // macOS Keychain — into keys.json beside the config, and nothing ever hands one back to
 // the renderer: it sees whether there is a key and its last four characters.
 //
+// Which workspace a CLI reads is the whiteboard's (each board remembers its own), and
+// resolveAnswerDir() turns that id into a folder through the rail's own list — never a
+// path the page hands over. A condensation reads no files at all, so it needs no
+// workspace: without one a CLI runs it in the system's temp folder.
+//
 // Nothing throws. Every export resolves to a value; a failure is
 // `{ ok: false, error: '<human sentence>', code? }`, where `code` is what the renderer
 // needs to offer the one action that fixes it: 'missing' (not installed), 'signed-out',
-// 'no-key', 'bad-key', 'timeout', 'stopped'.
+// 'no-key', 'bad-key', 'timeout', 'stopped', 'no-workspace' (a CLI was asked to read a
+// whiteboard's workspace and it has none, or that workspace is no longer on the rail).
 
 const { net, safeStorage } = require('electron');
 const { spawn, execFile } = require('child_process');
@@ -424,11 +430,41 @@ function webPrompt(on, provider, operation) {
 }
 
 /**
+ * resolveAnswerDir(req, lookup) → { ok, dir, wsId } — the folder a CLI answer runs in —
+ * or { ok:false, code:'no-workspace', error }.
+ *
+ * `req.wsId` is the whiteboard's workspace (null when it has none); `lookup(id)` is
+ * workspaces.lookup, which knows rail workspaces only, so an absolute path or an id the
+ * rail has never heard of resolves to nothing rather than to a folder. Only Claude Code
+ * and Codex read a folder: the APIs get `dir: null` without a lookup. A condensation
+ * reads no files, so it is never refused for a missing workspace — it runs in the
+ * workspace's folder when there is one, else in the system's temp folder. `wsId` in the
+ * answer is the workspace that resolved, or null.
+ */
+async function resolveAnswerDir(req, lookup) {
+  const r = req && typeof req === 'object' ? req : {};
+  const cli = r.provider === 'claude-code' || r.provider === 'codex';
+  const condense = r.operation === 'condense';
+  if (!cli) return { ok: true, dir: null, wsId: null };
+  const wsId = typeof r.wsId === 'string' ? r.wsId.trim() : '';
+  let ws = null;
+  if (wsId && typeof lookup === 'function') {
+    try { ws = await lookup(wsId); } catch (_) { ws = null; }
+  }
+  const dir = ws && typeof ws.dir === 'string' && ws.dir ? ws.dir : null;
+  if (dir) return { ok: true, dir, wsId };
+  if (condense) return { ok: true, dir: os.tmpdir(), wsId: null };
+  if (!wsId) return { ok: false, code: 'no-workspace', error: 'Pick a workspace for ✦ Answer to read' };
+  return { ok: false, code: 'no-workspace', error: `could not find the folder for ${wsId}` };
+}
+
+/**
  * start(id, req, onStep) → { ok, text } — the answer's JSON, for the renderer to read
  * into boxes — or { ok:false, error, code }.
  *
- * req: { provider, dir, system, user, schema, operation? }. `dir` is the workspace folder, resolved
- * by index.js from the workspace id; a CLI runs there and nowhere else.
+ * req: { provider, dir, system, user, schema, operation? }. `dir` is the workspace folder,
+ * resolved by index.js with resolveAnswerDir(); a CLI runs there and nowhere else. A
+ * condensation without one runs in the temp folder, since it reads nothing.
  */
 function start(id, req, onStep) {
   const key = String(id || '');
@@ -590,6 +626,15 @@ function claudeStep(dir, block) {
 const SIGNED_OUT_RE = /(not logged in|please run \/login|log in|invalid api key|authentication|unauthori[sz]ed|oauth token)/i;
 
 /**
+ * The folder a CLI runs in: the workspace's, or — for a condensation, which is told not
+ * to read any file and is handed no tool that could — the temp folder when there is none.
+ */
+function cliDir(r) {
+  if (r.dir) return r.dir;
+  return r.operation === 'condense' ? os.tmpdir() : null;
+}
+
+/**
  * Claude Code's arguments. Read and search only — nothing it can do changes a file or
  * runs a command — and with Web access, its two web tools too. A tool left out of
  * --tools is one it never sees: leaving it out of --allowedTools alone would not do,
@@ -615,7 +660,7 @@ function claudeCodeArgs(r, s, web) {
 }
 
 function askClaudeCode(r, s, web, step) {
-  const dir = r.dir;
+  const dir = cliDir(r);
   if (!dir) return { done: Promise.resolve({ ok: false, error: 'This workspace has no folder to read' }), stop: () => {} };
   const args = claudeCodeArgs(r, s, web);
 
@@ -698,7 +743,7 @@ function webStep(action, query) {
 }
 
 function askCodex(r, web, step) {
-  const dir = r.dir;
+  const dir = cliDir(r);
   if (!dir) return { done: Promise.resolve({ ok: false, error: 'This workspace has no folder to read' }), stop: () => {} };
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'switchboard-codex-'));
   const schemaFile = path.join(tmp, 'schema.json');
@@ -998,11 +1043,13 @@ module.exports = {
   start,
   stop,
   stopAll,
+  resolveAnswerDir,
   // For the tests.
   PROVIDERS,
   OPENAI_MODELS,
   CLAUDE_MODELS,
   claudeStep,
+  cliDir,
   openaiEffortFor,
   keysFile,
   webPrompt,

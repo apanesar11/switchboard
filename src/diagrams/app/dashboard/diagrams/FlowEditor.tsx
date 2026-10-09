@@ -36,8 +36,20 @@
 // in the saved spec remain readable, including partially folded older diagrams.
 // Switchboard: the image tool also offers Google Images (G), in a panel docked
 // on the canvas's right (ImageSearchPanel.tsx). A picture dragged out of it, or
-// right-clicked ▸ Add Image to Diagram, is fetched by main and goes on exactly
+// right-clicked ▸ Add Image to Whiteboard, is fetched by main and goes on exactly
 // as a dropped file does.
+// Switchboard: a whiteboard belongs to no workspace, so ✦ Answer reads the one the
+// whiteboard names (`answerWorkspace`, chosen in the who-answers menu's Workspace
+// row, kept on the board by the host) — taken at the moment of asking, and written
+// on each box the answer adds (`answeredIn`, the small tag under its corner). A CLI
+// with no workspace to read is told so before anything is asked.
+// Switchboard: a workspace's terminal can be pinned to the board as a node of its
+// own ("terminal"). The node is only a frame — header, buttons, a dark body — and
+// the host lays the live terminal over its body itself, from the geometry this
+// editor reports (onTerminalSlots): an xterm inside the canvas's CSS transform
+// would draw blurred and misread the pointer. Pinning, floating, undo and delete
+// move the node in and out of the board like any other edit; the host hears which
+// it was (onTerminalRemoved).
 //
 // It edits the SAME spec every other part of the Diagrams feature reads.
 // layoutDiagram() turns the spec into the canvas, and flowSpecFromCanvas()
@@ -61,6 +73,7 @@ import {
   useContext,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -87,6 +100,7 @@ import {
   applyEdgeChanges,
   applyNodeChanges,
   getSmoothStepPath,
+  getViewportForBounds,
   reconnectEdge,
   useConnection,
   useReactFlow,
@@ -111,6 +125,7 @@ import {
   RiArrowDownSLine,
   RiArrowGoBackLine,
   RiArrowGoForwardLine,
+  RiArrowUpSLine,
   RiContractRightLine,
   RiExpandRightLine,
   RiArrowLeftRightLine,
@@ -134,14 +149,17 @@ import {
   RiLinkUnlinkM,
   RiLoader4Line,
   RiListUnordered,
+  RiPictureInPictureExitLine,
   RiSearchLine,
   RiShapesLine,
   RiSparkling2Fill,
   RiStickyNoteLine,
   RiStopFill,
   RiSubtractLine,
+  RiTerminalBoxLine,
   RiText,
   RiTextBlock,
+  RiZoomInLine,
   type RemixiconComponentType,
 } from "@remixicon/react"
 import { toast } from "@/components/Toast"
@@ -178,6 +196,7 @@ import {
   type FlowCanvasEdge,
   type FlowCanvasNode,
   type FlowDirection,
+  type FlowFoldEdge,
   type FlowRect,
   type FlowSpecMeta,
 } from "@/lib/diagrams/flow-editor"
@@ -188,10 +207,20 @@ import {
   FLOW_BOX_SHAPES,
   FLOW_SIDES,
   FLOW_SIZE_MAX,
+  FLOW_TERMINAL_DEFAULT_SIZE,
+  FLOW_TERMINAL_FLOOR,
+  FLOW_TERMINAL_MIN_SIZE,
   FLOW_TEXT_ALIGNS,
   FLOW_TEXT_SIZES,
   FLOW_TONES,
+  TERMINAL_BASE_FONT,
+  TERMINAL_FONT_MAX,
+  TERMINAL_FONT_MIN,
+  TERMINAL_HEADER,
+  TERMINAL_MIN_FONT,
   isFlowBoxShape,
+  type ClientRect,
+  type TerminalSlot,
   type FlowBoxShape,
   type FlowShape,
   type FlowSide,
@@ -206,7 +235,7 @@ import {
   imageDisplaySize,
   uploadDiagramImage,
 } from "@/lib/diagrams/upload"
-import { normalizeFlowText } from "@/lib/diagrams/validate"
+import { normalizeFlowText, normalizeWorkspaceId } from "@/lib/diagrams/validate"
 import {
   FLOW_AI_MAX_EXISTING,
   flowQuestionPath,
@@ -222,11 +251,18 @@ import {
   useAnswerStatus,
 } from "@/lib/diagrams/ai-client"
 import { inspectFlowCondenseSelection, replaceFlowSelection } from "@/lib/diagrams/condense"
-import type { AnswerSettings, AnswerStatus, AnswerStep, ProviderId, ProviderStatus } from "@/lib/bridge"
+import type {
+  AnswerSettings,
+  AnswerStatus,
+  AnswerStep,
+  ProviderId,
+  ProviderStatus,
+  WorkspaceChoices,
+  WorkspaceStatus,
+} from "@/lib/bridge"
 import { call, writeClipboard } from "@/lib/bridge"
 // Switchboard: Google Images beside the canvas, and pictures dragged out of it.
 import { imageUrlsFromDrop, isUrlDrag } from "@/lib/diagrams/image-search"
-import type { ProductId } from "@/lib/products"
 import { FIT_VIEW_OPTIONS } from "./DiagramCanvas"
 import { ImageSearchPanel, type ImageSearchAsk } from "./ImageSearchPanel"
 import { DocumentPanel, type DocumentView } from "./DocumentPanel"
@@ -239,9 +275,12 @@ import {
   flowLabelStyle,
   FLOW_SIDE_POSITIONS,
   NOTE_TONE_STYLES,
+  TerminalDot,
   TEXT_TONE_STYLES,
   TONE_STYLES,
+  WorkspaceTag,
 } from "./DiagramNodes"
+import { PickerGlyph, WorkspacePicker, workspaceDir, workspaceGone } from "./WorkspacePicker"
 import { FLOW_EDGE_THEME } from "./DiagramEdges"
 import { RichTextField } from "./RichTextField"
 import { flowListState, formatActiveFlowText, type FlowTextCommand } from "@/lib/diagrams/rich-text-dom"
@@ -297,6 +336,12 @@ type Asking = {
   name: string
   /** A CLI reads the workspace first, and the strip shows what it is doing. */
   cli: boolean
+  /**
+   * Switchboard: the workspace a CLI is reading, as it was when asked — what the
+   * card over the strip names, the tag on the placeholder, and the tag each box the
+   * answer adds carries. Null for an API, which reads none.
+   */
+  workspace: string | null
   /** Web access was on when it was asked: it may look things up on the web too. */
   web: boolean
   /** Which answer this is, counted from 1 — keys its status, so its timer restarts. */
@@ -314,7 +359,31 @@ type AnswerNote = { by: string; files: number | null; seconds: number; condensed
  * fixes it — Settings for a CLI that isn't here or a missing key, the Terminal for a
  * CLI that isn't signed in.
  */
-type AnswerFailure = { message: string; code?: string }
+type AnswerFailure = {
+  message: string
+  code?: string
+  /** Switchboard: the workspace the failed answer was to read — where Open Terminal goes. */
+  workspace?: string | null
+  /** Switchboard: the box that asked — where Choose workspace… opens the menu. */
+  nodeId?: string
+}
+
+/**
+ * Switchboard: why a CLI can't answer a box on this whiteboard — it has no workspace
+ * to read, or the one it names has left the rail — or null when it can. Only ✦ Answer
+ * asks this: Condense reads nothing, so it never needs a workspace.
+ */
+function noWorkspace(provider: ProviderStatus, workspace: string | null, gone: boolean): AnswerFailure | null {
+  if (provider.kind !== "cli") return null
+  if (!workspace) return { message: `Pick a workspace for ${provider.name} to read`, code: "no-workspace" }
+  if (gone) {
+    return {
+      message: `${workspace} is no longer in the rail — pick a workspace for ${provider.name} to read`,
+      code: "no-workspace",
+    }
+  }
+  return null
+}
 
 /** Why `provider` can't answer right now, or null when it can. */
 function notReady(provider: ProviderStatus): AnswerFailure | null {
@@ -354,6 +423,21 @@ const IMAGE_CASCADE = 30
 const ANSWERED_NOTICE_MS = 8_000
 /** The placeholder drawn where an answer will land, while it is awaited. */
 const ANSWER_GHOST_SIZE = { width: FLOW_NODE_WIDTH, height: 52 }
+
+/**
+ * Switchboard: how far in from a pinned terminal's left, right and bottom edges the
+ * live terminal is laid, in screen pixels — the strip that keeps the node's own
+ * resize handles under the pointer rather than under the terminal.
+ */
+const TERMINAL_BODY_INSET = 5
+/** Switchboard: what in the canvas counts as floating over a pinned terminal. */
+const CANVAS_OVERLAY_SELECTOR = "[data-canvas-overlay], .flow-document-floating .flow-document-panel, .flow-document-focus"
+/**
+ * Switchboard: the canvas's own chrome — React Flow's panels (the tool rail, the
+ * undo bar, the zoom controls, the attribution) — which a pinned terminal's live
+ * overlay leaves uncovered (TerminalSlot.holes), as every other node passes under it.
+ */
+const CANVAS_CHROME_SELECTOR = ".react-flow__panel, .react-flow__controls"
 
 const HANDLE_STYLE: React.CSSProperties = {
   width: 11,
@@ -558,8 +642,11 @@ function boxSize(box: FlowBoxNodeData): FlowSize {
 // would give it. Height changes about the centre, so the arrows level with it
 // stay straight as a label wraps or a shape or type changes; width (free text
 // running wider as you type) from the left edge, so the text stays put.
+// Switchboard: a pinned terminal keeps its header where it is — folding it to its
+// title bar happens in place.
 function withBox(node: Node, box: FlowBoxNodeData): Node {
   const { width, height } = boxSize(box)
+  if (box.shape === "terminal") return { ...node, data: box, width, height }
   const grow = height - (node.height ?? height)
   const position =
     grow === 0
@@ -580,7 +667,93 @@ function isText(box: FlowBoxNodeData): boolean {
 
 /** Whether a node has text you can edit directly on the canvas. */
 function hasText(box: FlowBoxNodeData): boolean {
-  return box.shape !== "image" && box.shape !== "document"
+  // Switchboard: nor has a pinned terminal — its label is only its workspace.
+  return box.shape !== "image" && box.shape !== "document" && box.shape !== "terminal"
+}
+
+/** Switchboard: whether `node` is a pinned terminal. */
+function isTerminal(node: Node): boolean {
+  return (node.data as FlowBoxNodeData).shape === "terminal"
+}
+
+/** Switchboard: the workspace a pinned terminal shows. */
+function terminalWorkspace(node: Node): string {
+  const box = node.data as FlowBoxNodeData
+  return box.workspace ?? box.label
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
+}
+
+/** Rounded to `places` decimals — what the slots carry, so equal geometry compares equal. */
+function roundTo(value: number, places = 2): number {
+  const scale = 10 ** places
+  return Math.round(value * scale) / scale + 0
+}
+
+function intersects(a: ClientRect, b: DOMRect): boolean {
+  return a.left < b.right && b.left < a.left + a.width && a.top < b.bottom && b.top < a.top + a.height
+}
+
+/** Switchboard: how long re-framing the drawing takes (full screen in or out) — fitView's own. */
+const REFIT_DURATION_MS = 200
+
+/** React Flow's own easing for an animated view change (d3-ease's cubicInOut). */
+function easeInOutCubic(t: number): number {
+  return ((t *= 2) <= 1 ? t * t * t : (t -= 2) * t * t + 2) / 2
+}
+
+/**
+ * Switchboard: the view part-way (`t`, 0–1) from one to another in a pane this size —
+ * the canvas point at the pane's centre moving evenly, the zoom evenly in proportion,
+ * so a zoom in or out reads as one movement rather than a slide and a scale.
+ */
+function viewBetween(
+  from: { x: number; y: number; zoom: number },
+  to: { x: number; y: number; zoom: number },
+  t: number,
+  width: number,
+  height: number,
+): { x: number; y: number; zoom: number } {
+  const zoom = from.zoom * (to.zoom / from.zoom) ** t
+  // The canvas point under the pane's centre, in each view.
+  const fromX = (width / 2 - from.x) / from.zoom
+  const fromY = (height / 2 - from.y) / from.zoom
+  const toX = (width / 2 - to.x) / to.zoom
+  const toY = (height / 2 - to.y) / to.zoom
+  return {
+    x: width / 2 - (fromX + (toX - fromX) * t) * zoom,
+    y: height / 2 - (fromY + (toY - fromY) * t) * zoom,
+    zoom,
+  }
+}
+
+/** Switchboard: up to a whole number — but not for the dust a division leaves (230.0000001). */
+function wholeUp(value: number): number {
+  return Math.ceil(value - 1e-6)
+}
+
+/** Switchboard: a ClientRect a host handed over — finite, with some size — or not. */
+function isClientRect(value: unknown): value is ClientRect {
+  if (typeof value !== "object" || value === null) return false
+  const { left, top, width, height } = value as Record<string, unknown>
+  return (
+    [left, top, width, height].every((side) => typeof side === "number" && Number.isFinite(side)) &&
+    (width as number) > 0 &&
+    (height as number) > 0
+  )
+}
+
+/** Switchboard: the part of `b` inside `a`, as a slot's hole carries it — or null when they don't meet. */
+function overlap(a: ClientRect, b: DOMRect): TerminalSlot["holes"][number] | null {
+  if (!intersects(a, b)) return null
+  return {
+    left: roundTo(Math.max(a.left, b.left)),
+    top: roundTo(Math.max(a.top, b.top)),
+    right: roundTo(Math.min(a.left + a.width, b.right)),
+    bottom: roundTo(Math.min(a.top + a.height, b.bottom)),
+  }
 }
 
 function rectOf(node: Node): FlowRect {
@@ -754,6 +927,50 @@ type EditorContextValue = {
 // saved.
 const EditorContext = createContext<EditorContextValue | null>(null)
 
+/**
+ * Switchboard: what a pinned terminal's node needs from the editor and its host —
+ * apart from EditorContext, so the rail's dots changing redraws only the terminals.
+ */
+type TerminalContextValue = {
+  /** The rail's dot and branch for each workspace. */
+  status: WorkspaceStatus
+  /** Whether a terminal's workspace has left the rail (terminalGone). */
+  gone: (wsId: string) => boolean
+  /** The node's Float: the host lifts the terminal off the board. */
+  float: (wsId: string) => void
+  /** Minimize / Restore — an undoable canvas edit. */
+  toggleMinimized: (id: string) => void
+  /** Close — deletes the node, as Delete would. */
+  close: (id: string) => void
+  /** "Zoom in to use": to the zoom the terminal's type reads at, centred on it. */
+  zoomTo: (id: string) => void
+  /** A resize handle was pressed: the slot says so until the size is committed. */
+  startResize: (id: string) => void
+  /** The press ended without resizing anything: the slot stops saying so. */
+  endResize: (id: string) => void
+}
+
+const TerminalContext = createContext<TerminalContextValue | null>(null)
+
+/**
+ * Switchboard: workspaces pinned here that `over` — the choices the editor had at
+ * the time — didn't list. See terminalGone.
+ */
+type FreshPins = { over: WorkspaceChoices | null; ids: ReadonlySet<string> }
+
+/**
+ * Switchboard: whether a pinned terminal's workspace has left the rail. One the
+ * choices don't list, but that was pinned here since they came, is newer than them
+ * rather than gone: the tray's + and ⌘A pick through the host, which asks main
+ * itself and keeps what it heard, so a workspace added to the rail since the board
+ * loaded can be floated and pinned before these choices know of it. It counts as in
+ * the rail until main's next answer — asked for as it is pinned — replaces them,
+ * and that answer has the last word.
+ */
+function terminalGone(wsId: string, choices: WorkspaceChoices | null, fresh: FreshPins): boolean {
+  return workspaceGone(wsId, choices) && !(fresh.over === choices && fresh.ids.has(wsId))
+}
+
 // The text fields that stand in for a box's label and second line while you
 // edit it. Enter or clicking away keeps the text, Escape puts the original
 // back, and Shift+Enter starts a new line. Enter continues a bullet list (the
@@ -770,8 +987,9 @@ function TextEditor({
 }) {
   // The AI's mark too: Escape puts the AI's words back, and with them the mark
   // that says they are the AI's.
+  // Switchboard: and the workspace that answer read, which goes and comes with it.
   const [original] = useState(() => ({
-    label: box.label, detail: box.detail, ai: box.ai,
+    label: box.label, detail: box.detail, ai: box.ai, answeredIn: box.answeredIn,
     labelRichText: box.labelRichText, detailRichText: box.detailRichText,
     bold: box.bold, italic: box.italic,
   }))
@@ -942,7 +1160,224 @@ function Resizer({
   )
 }
 
-function EditableFlowNode({ id, data, selected }: NodeProps) {
+// Switchboard: a pinned terminal is a node of its own kind — a different component,
+// so a node that changes kind across an undo is mounted afresh rather than handed
+// the other's hooks.
+function EditableFlowNode(props: NodeProps) {
+  return (props.data as FlowBoxNodeData).shape === "terminal" ? (
+    <TerminalNode id={props.id} box={props.data as FlowBoxNodeData} selected={Boolean(props.selected)} />
+  ) : (
+    <EditableBoxNode {...props} />
+  )
+}
+
+/**
+ * Switchboard: a terminal pinned to the board — the frame the host lays the live
+ * terminal into. A header that drags it (the rail's dot, the workspace, its branch,
+ * then Float, Minimize or Restore, and Close), and under it a dark body the live
+ * terminal covers, inset a few pixels so the resize handles stay reachable. When
+ * the terminal can't be shown there the body says why: its type would be too small
+ * to read at this zoom ("Zoom in to use"), or its workspace has left the rail.
+ */
+function TerminalNode({ id, box, selected }: { id: string; box: FlowBoxNodeData; selected: boolean }) {
+  const editor = useContext(EditorContext)
+  const terminal = useContext(TerminalContext)
+  const zoom = useStore((state) => state.transform[2])
+  const connecting = useConnection((connection) => connection.inProgress)
+  const selectionRect = useStore((state) => state.nodesSelectionActive)
+  const interactive = editor?.interactive ?? true
+  const workspace = box.workspace ?? box.label
+  const gone = terminal?.gone(workspace) ?? false
+  const minimized = box.minimized === true
+  const tooSmall = (box.font ?? TERMINAL_BASE_FONT) * zoom < TERMINAL_MIN_FONT
+  const status = terminal?.status[workspace]
+  const resizable =
+    editor !== null &&
+    selected &&
+    editor.soleNodeId === id &&
+    !selectionRect &&
+    !connecting &&
+    !minimized &&
+    !gone
+  // The body's cards are drawn at screen size whatever the zoom — they show at
+  // all only when the board is zoomed out, where canvas-sized words can't be read.
+  const unscale = Math.min(1 / Math.max(zoom, 0.01), 4)
+  // A button in the header: never a drag, nor a click on the node beneath it.
+  const action = (label: string, run: () => void, icon: React.ReactNode) => (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      disabled={!interactive}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation()
+        run()
+      }}
+      onDoubleClick={(event) => event.stopPropagation()}
+      className={cx("nodrag nopan flow-terminal-btn", focusRing)}
+    >
+      {icon}
+    </button>
+  )
+
+  return (
+    <div
+      className={cx("relative size-full", interactive && "group")}
+      data-terminal-node={workspace}
+      role="group"
+      aria-label={`${workspace} terminal`}
+    >
+      <div className="flow-terminal-node flow-terminal-card-frame">
+        {/* As the floating panels' headers are: the workspace, its branch, the
+            rail's dot, then the buttons. */}
+        <div className="flow-terminal-head" style={{ height: TERMINAL_HEADER }}>
+          <RiTerminalBoxLine className="size-3.5 shrink-0 text-[#0969da]" aria-hidden="true" />
+          <b>{workspace}</b>
+          {status?.branch ? <small>{status.branch}</small> : null}
+          <TerminalDot dot={status?.dot} />
+          <span className="flow-terminal-actions">
+            {gone || !terminal
+              ? null
+              : action(`Float ${workspace} over the whiteboard`, () => terminal.float(workspace), (
+                  <RiPictureInPictureExitLine className="size-3.5" aria-hidden="true" />
+                ))}
+            {gone || !terminal
+              ? null
+              : action(minimized ? `Restore ${workspace}` : `Minimize ${workspace}`, () => terminal.toggleMinimized(id), (
+                  minimized ? (
+                    <RiArrowUpSLine className="size-4" aria-hidden="true" />
+                  ) : (
+                    <RiSubtractLine className="size-3.5" aria-hidden="true" />
+                  )
+                ))}
+            {terminal
+              ? action(`Close ${workspace}`, () => terminal.close(id), <RiCloseLine className="size-3.5" aria-hidden="true" />)
+              : null}
+          </span>
+        </div>
+        {minimized ? null : gone ? (
+          <div className="flow-terminal-body flow-terminal-card">
+            <p style={{ transform: `scale(${unscale})` }}>{workspace} is no longer in the rail</p>
+          </div>
+        ) : tooSmall ? (
+          <div className="flow-terminal-body flow-terminal-card">
+            <button
+              type="button"
+              disabled={!interactive || !terminal}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation()
+                terminal?.zoomTo(id)
+              }}
+              onDoubleClick={(event) => event.stopPropagation()}
+              style={{ transform: `scale(${unscale})` }}
+              className={cx("nodrag nopan flow-terminal-zoom", focusRing)}
+            >
+              <RiZoomInLine className="size-4" aria-hidden="true" />
+              Zoom in to use
+            </button>
+          </div>
+        ) : (
+          // Where the host lays the live terminal; dark beneath it, so nothing
+          // flashes while it moves in.
+          <div className="flow-terminal-body" data-terminal-body={workspace}>
+            <RiTerminalBoxLine className="flow-terminal-watermark" aria-hidden="true" />
+          </div>
+        )}
+      </div>
+      {resizable ? <TerminalResizer id={id} size={box.size} editor={editor} /> : null}
+      <div
+        aria-hidden="true"
+        className={cx(
+          "pointer-events-none absolute -inset-1 rounded-[13px] border-2 transition-opacity",
+          selected ? "border-brand opacity-100" : "border-brand/40 opacity-0 group-hover:opacity-100",
+        )}
+      />
+      {editor !== null && (editor.folds.get(id)?.arrows ?? 0) > 0 ? (
+        <FoldButton
+          fold={editor.folds.get(id)!}
+          label={workspace}
+          disabled={!interactive}
+          onClick={() => editor.expandFold(id)}
+        />
+      ) : null}
+      {FLOW_SIDES.map((side) => (
+        <Handle
+          key={side}
+          id={side}
+          type="source"
+          position={FLOW_SIDE_POSITIONS[side]}
+          style={HANDLE_STYLE}
+          className={cx(
+            "transition-opacity",
+            selected || connecting ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+          )}
+        />
+      ))}
+    </div>
+  )
+}
+
+/**
+ * Switchboard: a pinned terminal's resize handles — every edge and corner, no
+ * proportions kept, never smaller than a header and a few rows. Its size is only
+ * written once the handle is let go; until then React Flow resizes the node, and
+ * the host holds the live terminal's size still (TerminalSlot.resizing). One pinned
+ * at a high zoom can already be smaller than that: it keeps its size as the least,
+ * rather than jumping up to the minimum the moment a handle is touched.
+ */
+function TerminalResizer({ id, size, editor }: { id: string; size: FlowSize | undefined; editor: EditorContextValue }) {
+  const terminal = useContext(TerminalContext)
+  const { startResize, resize } = editor
+  const begin = terminal?.startResize
+  const end = terminal?.endResize
+  // Whether this press of a handle has changed the size yet.
+  const movedRef = useRef(false)
+  const handles = useMemo(
+    () => ({
+      onResizeStart: () => {
+        startResize()
+        begin?.(id)
+        // React Flow calls onResizeStart as a handle is pressed, but onResizeEnd only
+        // after a drag that changed the size: a press let go where it was (or a
+        // jiggle the grid snaps back) ends no resize, and the slot would go on saying
+        // "resizing" — the host holding the shell's size — until a real one. So the
+        // press's own release ends it when nothing moved (and a cancelled pointer
+        // always). Released after a move, onResizeEnd commits the size and ends it.
+        movedRef.current = false
+        const release = (event: PointerEvent) => {
+          window.removeEventListener("pointerup", release, true)
+          window.removeEventListener("pointercancel", release, true)
+          if (!movedRef.current || event.type === "pointercancel") end?.(id)
+        }
+        window.addEventListener("pointerup", release, true)
+        window.addEventListener("pointercancel", release, true)
+      },
+      onResize: (_: unknown, size: FlowSize) => {
+        movedRef.current = true
+        resize(id, { width: size.width, height: size.height }, false)
+      },
+      onResizeEnd: (_: unknown, size: FlowSize) =>
+        resize(id, { width: size.width, height: size.height }, true),
+    }),
+    [id, startResize, resize, begin, end],
+  )
+  return (
+    <NodeResizer
+      isVisible
+      minWidth={clampNumber(size?.width ?? Infinity, FLOW_TERMINAL_FLOOR.width, FLOW_TERMINAL_MIN_SIZE.width)}
+      minHeight={clampNumber(size?.height ?? Infinity, FLOW_TERMINAL_FLOOR.height, FLOW_TERMINAL_MIN_SIZE.height)}
+      maxWidth={FLOW_SIZE_MAX}
+      maxHeight={FLOW_SIZE_MAX}
+      lineClassName="!border-brand after:absolute after:-inset-1 after:content-['']"
+      handleClassName="!size-2.5 !rounded-[3px] !border-[1.5px] !border-brand !bg-white"
+      {...handles}
+    />
+  )
+}
+
+function EditableBoxNode({ id, data, selected }: NodeProps) {
   const box = data as FlowBoxNodeData
   const editor = useContext(EditorContext)
   // Every box shows its dots while an arrow is being drawn, so you can see
@@ -1088,6 +1523,27 @@ export type FlowEditorHandle = {
   pasteBoxes: (text: string) => boolean
   /** Switchboard: the diagram as the canvas now holds it — what Rename writes. */
   currentSpec: () => FlowSpec
+  /**
+   * Switchboard: pins `wsId`'s terminal to the board, as a node whose outer client
+   * rect is `rect` (the floating panel's), so nothing on screen moves: placed at
+   * the canvas point under its top-left corner, sized `rect` over the zoom, its type
+   * 12.5px over the zoom. Given `body` — where the live terminal sits in the panel,
+   * in client pixels — the node is placed and sized instead so that its slot's body
+   * is exactly `body`, and the text doesn't move at all. Either way it keeps the
+   * panel's size on screen, even where that is less than a hand resize allows. One
+   * undo step. A node for `wsId` already there is revealed instead, and false returned.
+   */
+  pinTerminal: (wsId: string, rect: ClientRect, body?: ClientRect | null) => boolean
+  /**
+   * Switchboard: takes `wsId`'s terminal off the board (one undo step), returning the
+   * node's outer client rect at that moment — where the floating panel goes — or null
+   * when there is no such node.
+   */
+  unpinTerminal: (wsId: string) => ClientRect | null
+  /** Switchboard: brings `wsId`'s node into view, restored if it was minimized, and selects it. */
+  revealTerminal: (wsId: string) => boolean
+  /** Switchboard: the pinned terminals' geometry now, for a host that can't wait for the next report. */
+  terminalSlots: () => TerminalSlot[]
 }
 
 type Props = {
@@ -1104,15 +1560,38 @@ type Props = {
   shown?: boolean
   /** Changes when the pane is resized from outside (full screen), to re-fit. */
   fitKey: string
-  /** Whose blob folder a dropped or pasted image is uploaded into. Switchboard: the workspace. */
-  productId: ProductId
+  /** Switchboard: which whiteboard this is — identity only, for keys and logs. */
+  boardId: string
   /** The diagram's name — part of what ✦ Answer tells the model. */
   diagramName?: string
-  /** Switchboard: the workspace's name, for "Reads sample-api first". */
-  workspaceName?: string
+  /**
+   * Switchboard: the workspace ✦ Answer's CLIs read for this whiteboard (the board's
+   * own, kept by the host), or null when it has none yet.
+   */
+  answerWorkspace: string | null
+  /** Switchboard: the rail's workspaces, for the Workspace row's picker; null while loading. */
+  workspaceChoices: WorkspaceChoices | null
+  /** Switchboard: a workspace picked in the Workspace row. The host keeps it on the board. */
+  onAnswerWorkspaceChange: (wsId: string) => void
   /** Switchboard: where a failed answer sends you to fix it. */
   onOpenSettings?: () => void
-  onOpenTerminal?: () => void
+  /** Switchboard: a terminal in `wsId` (to sign a CLI in), floated over the board. */
+  onOpenTerminal: (wsId: string) => void
+  /** Switchboard: the rail's dot and branch for each workspace, for pinned terminals' headers. */
+  workspaceStatus: WorkspaceStatus
+  /**
+   * Switchboard: where the pinned terminals are, in client pixels — called at most
+   * once a frame, only when something changed, and with [] as the editor goes.
+   */
+  onTerminalSlots: (slots: TerminalSlot[]) => void
+  /** Switchboard: a pinned terminal's Float, pressed. The host calls unpinTerminal. */
+  onTerminalFloat: (wsId: string) => void
+  /**
+   * Switchboard: a pinned terminal left the board other than through unpinTerminal —
+   * "undo" when undo or redo took it away, "delete" for Delete, Cut or its Close —
+   * with its outer client rect just before.
+   */
+  onTerminalRemoved: (wsId: string, reason: "undo" | "delete", rect: ClientRect) => void
   /**
    * Switchboard: in place of the admin's beforeunload, which Electron answers by
    * silently refusing to close the window. Main asks the page to save before a close
@@ -1138,17 +1617,48 @@ function FlowEditorCanvas({
   keyboardEnabled,
   shown = true,
   fitKey,
-  productId,
+  boardId,
   diagramName,
-  workspaceName,
+  answerWorkspace,
+  workspaceChoices,
+  onAnswerWorkspaceChange,
   onOpenSettings,
   onOpenTerminal,
+  workspaceStatus,
+  onTerminalSlots,
+  onTerminalFloat,
+  onTerminalRemoved,
   onDirtyChange,
   editorRef,
 }: Omit<Props, "ref"> & { editorRef?: React.Ref<FlowEditorHandle> }) {
-  const { screenToFlowPosition, fitView, deleteElements, getViewport, setViewport } =
+  const { screenToFlowPosition, deleteElements, getViewport, setViewport, setCenter, getNodesBounds } =
     useReactFlow()
   const wrapperRef = useRef<HTMLDivElement | null>(null)
+  // Switchboard: the whole editor — the canvas and the panels beside or over it —
+  // where the canvas's own floating UI is looked for (TerminalSlot.covered).
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  // Switchboard: the rail's workspaces. The rail may have changed since the host last
+  // asked, so each picker that opens asks main again — and what main said stands
+  // until the host hands over something newer.
+  const [fetchedChoices, setFetchedChoices] = useState<{ over: WorkspaceChoices | null; data: WorkspaceChoices } | null>(null)
+  const choices = fetchedChoices !== null && fetchedChoices.over === workspaceChoices ? fetchedChoices.data : workspaceChoices
+  const choicesPropRef = useRef(workspaceChoices)
+  useEffect(() => {
+    choicesPropRef.current = workspaceChoices
+  })
+  const refreshChoices = useCallback(() => {
+    const over = choicesPropRef.current
+    void call("whiteboardsWorkspaces").then((result) => {
+      if (result.ok && choicesPropRef.current === over) setFetchedChoices({ over, data: result.data })
+    })
+  }, [])
+  // Switchboard: the board's workspace for ✦ Answer, and whether it has left the rail.
+  const answerWorkspaceGone = workspaceGone(answerWorkspace, choices)
+  // Switchboard: workspaces pinned since the choices came that they don't list
+  // (terminalGone). In a ref as well, for the slots, which are worked out between
+  // renders — set at once by pinTerminal, before the slot it schedules.
+  const [freshPins, setFreshPins] = useState<FreshPins>(() => ({ over: null, ids: new Set() }))
+  const freshPinsRef = useRef(freshPins)
 
   // The parts of the spec the canvas doesn't show (title, summary, direction)
   // ride along untouched into every save.
@@ -1166,7 +1676,8 @@ function FlowEditorCanvas({
   const [documentStartsWriting, setDocumentStartsWriting] = useState(false)
   const documentNode = nodes.find((node) => node.id === documentNodeId && (node.data as FlowBoxNodeData).shape === "document")
   const documentBox = documentNode?.data as FlowBoxNodeData | undefined
-  const documents = useFlowDocuments(productId, documentBox?.documentId)
+  // Switchboard: one store of documents for every whiteboard, keyed by document id.
+  const documents = useFlowDocuments(documentBox?.documentId)
   const documentsFlush = documents.flush
   const alive = useRef(true)
   useEffect(() => () => { alive.current = false }, [])
@@ -1246,11 +1757,26 @@ function FlowEditorCanvas({
   const onSaveRef = useRef(onSave)
   const nodesRef = useRef(nodes)
   const edgesRef = useRef(edges)
+  // Switchboard: the host's callbacks and the rail's workspaces, for the terminal
+  // slots, which are worked out between renders.
+  const onTerminalSlotsRef = useRef(onTerminalSlots)
+  const onTerminalRemovedRef = useRef(onTerminalRemoved)
+  const choicesRef = useRef(choices)
+  // Switchboard: the handle's terminal calls, pointed at this render's functions.
+  const terminalsRef = useRef<{
+    pin: (wsId: string, rect: ClientRect, body?: ClientRect | null) => boolean
+    unpin: (wsId: string) => ClientRect | null
+    reveal: (wsId: string) => boolean
+    slots: () => TerminalSlot[]
+  }>({ pin: () => false, unpin: () => null, reveal: () => false, slots: () => [] })
   useEffect(() => {
     latestRef.current = json
     onSaveRef.current = onSave
     nodesRef.current = nodes
     edgesRef.current = edges
+    onTerminalSlotsRef.current = onTerminalSlots
+    onTerminalRemovedRef.current = onTerminalRemoved
+    choicesRef.current = choices
   })
 
   // ─── saving ───
@@ -1302,6 +1828,11 @@ function FlowEditorCanvas({
       cut: () => shortcutsRef.current.cut(),
       pasteBoxes: (text: string) => shortcutsRef.current.pasteBoxes(text),
       currentSpec: () => JSON.parse(latestRef.current) as FlowSpec,
+      pinTerminal: (wsId: string, rect: ClientRect, body?: ClientRect | null) =>
+        terminalsRef.current.pin(wsId, rect, body),
+      unpinTerminal: (wsId: string) => terminalsRef.current.unpin(wsId),
+      revealTerminal: (wsId: string) => terminalsRef.current.reveal(wsId),
+      terminalSlots: () => terminalsRef.current.slots(),
     }),
     [flush],
   )
@@ -1360,6 +1891,181 @@ function FlowEditorCanvas({
   // ─── text editing ───
 
   const store = useStoreApi()
+
+  // ─── Switchboard: where the pinned terminals are ───
+
+  // The pane React Flow draws in, on screen — what canvas coordinates are offset from.
+  const paneBounds = useCallback((): DOMRect | null => {
+    const pane = store.getState().domNode ?? wrapperRef.current
+    return pane ? pane.getBoundingClientRect() : null
+  }, [store])
+
+  // A node's outer rect on screen now: its canvas rect through the viewport.
+  const clientRectOf = useCallback((node: Node): ClientRect => {
+    const pane = paneBounds()
+    const [x, y, zoom] = store.getState().transform
+    const rect = rectOf(node)
+    return {
+      left: roundTo((pane?.left ?? 0) + rect.x * zoom + x),
+      top: roundTo((pane?.top ?? 0) + rect.y * zoom + y),
+      width: roundTo(rect.width * zoom),
+      height: roundTo(rect.height * zoom),
+    }
+  }, [paneBounds, store])
+
+  // Every pinned terminal's slot (TerminalSlot): worked out from the canvas as it
+  // is this moment — the nodes, the view, the pane on screen — never from a render.
+  const computeSlots = useCallback((): TerminalSlot[] => {
+    const terminals = nodesRef.current.filter(isTerminal)
+    if (terminals.length === 0) return []
+    const pane = paneBounds()
+    // Hidden (a board not on screen, a Grid square folded away): nowhere to lay a
+    // terminal, so none is live until the pane is back.
+    const laidOut = pane !== null && pane.width > 0 && pane.height > 0
+    const [x, y, zoom] = store.getState().transform
+    const { hidden } = foldOf(nodesRef.current, edgesRef.current)
+    const overlays = laidOut
+      ? [...(rootRef.current?.querySelectorAll(CANVAS_OVERLAY_SELECTOR) ?? [])]
+          .map((element) => element.getBoundingClientRect())
+          .filter((rect) => rect.width > 0 && rect.height > 0)
+      : []
+    // The rail, the undo bar and the zoom controls float over the board in a
+    // terminal's place too: they stay on top of its live overlay, through holes.
+    const chrome = laidOut
+      ? [...(store.getState().domNode?.querySelectorAll(CANVAS_CHROME_SELECTOR) ?? [])]
+          .map((element) => element.getBoundingClientRect())
+          .filter((rect) => rect.width > 0 && rect.height > 0)
+      : []
+    return terminals.map((node) => {
+      const box = node.data as FlowBoxNodeData
+      const wsId = terminalWorkspace(node)
+      const rect = rectOf(node)
+      const left = (pane?.left ?? 0) + rect.x * zoom + x
+      const top = (pane?.top ?? 0) + rect.y * zoom + y
+      const header = TERMINAL_HEADER * zoom
+      const body: ClientRect = {
+        left: roundTo(left + TERMINAL_BODY_INSET),
+        top: roundTo(top + header),
+        width: roundTo(Math.max(0, rect.width * zoom - TERMINAL_BODY_INSET * 2)),
+        height: roundTo(Math.max(0, rect.height * zoom - header - TERMINAL_BODY_INSET)),
+      }
+      const font = roundTo((box.font ?? TERMINAL_BASE_FONT) * zoom, 3)
+      const minimized = box.minimized === true
+      const size = box.size ?? FLOW_TERMINAL_DEFAULT_SIZE
+      return {
+        wsId,
+        nodeId: node.id,
+        body,
+        clip: {
+          left: roundTo(pane?.left ?? 0),
+          top: roundTo(pane?.top ?? 0),
+          right: roundTo(pane?.right ?? 0),
+          bottom: roundTo(pane?.bottom ?? 0),
+        },
+        zoom: roundTo(zoom, 4),
+        size: { width: size.width, height: size.height },
+        font,
+        minimized,
+        selected: Boolean(node.selected),
+        resizing: terminalResizingRef.current === node.id,
+        covered: !minimized && overlays.some((overlay) => intersects(body, overlay)),
+        holes: chrome.flatMap((rect) => overlap(body, rect) ?? []),
+        live:
+          laidOut &&
+          !minimized &&
+          !hidden.has(node.id) &&
+          !terminalGone(wsId, choicesRef.current, freshPinsRef.current) &&
+          font >= TERMINAL_MIN_FONT &&
+          body.width > 0 &&
+          body.height > 0,
+      }
+    })
+  }, [paneBounds, store])
+
+  // Reported at most once a frame, and only when something in them changed. A frame
+  // in a hidden window never comes, so a short timer stands in for it.
+  const slotsRef = useRef<{ frame: number; timer: ReturnType<typeof setTimeout> | null; last: string }>({
+    frame: 0,
+    timer: null,
+    last: "",
+  })
+  const scheduleSlots = useCallback(() => {
+    const pending = slotsRef.current
+    if (pending.frame !== 0 || pending.timer !== null) return
+    // Nothing pinned and the host already told so: nothing to say.
+    if (pending.last === "[]" && !nodesRef.current.some(isTerminal)) return
+    const run = () => {
+      cancelAnimationFrame(pending.frame)
+      if (pending.timer !== null) clearTimeout(pending.timer)
+      pending.frame = 0
+      pending.timer = null
+      const slots = computeSlots()
+      const json = JSON.stringify(slots)
+      if (json === pending.last) return
+      pending.last = json
+      onTerminalSlotsRef.current?.(slots)
+    }
+    pending.frame = requestAnimationFrame(run)
+    pending.timer = setTimeout(run, 50)
+  }, [computeSlots])
+
+  // What moves a slot: the view panning or zooming (and the pane React Flow draws
+  // in), the pane changing size or place (full screen, a Grid square, the window),
+  // the canvas's own floating UI opening or closing over it, and its chrome (the
+  // panels a slot's holes are cut for) coming, going or changing size. The nodes
+  // and the rail's workspaces are watched below, with the render that changes them.
+  useEffect(() => {
+    const unsubscribe = store.subscribe((state, before) => {
+      if (state.transform !== before.transform || state.domNode !== before.domNode) scheduleSlots()
+    })
+    const resized = new ResizeObserver(() => scheduleSlots())
+    if (wrapperRef.current) resized.observe(wrapperRef.current)
+    // The chrome's panels change size as their contents do (the undo bar's status,
+    // the strip of what an answer is reading) — and a centred one moves as it does.
+    const watchChrome = (within: ParentNode) => {
+      if (within instanceof Element && within.matches(CANVAS_CHROME_SELECTOR)) resized.observe(within)
+      for (const panel of within.querySelectorAll(CANVAS_CHROME_SELECTOR)) resized.observe(panel)
+    }
+    if (wrapperRef.current) watchChrome(wrapperRef.current)
+    const matching = (node: globalThis.Node, selector: string) =>
+      node instanceof Element && (node.matches(selector) || node.querySelector(selector) !== null)
+    const mutations = new MutationObserver((records) => {
+      let changed = false
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (matching(node, CANVAS_CHROME_SELECTOR)) watchChrome(node as Element)
+        }
+        changed ||= [...record.addedNodes, ...record.removedNodes].some(
+          (node) => matching(node, CANVAS_OVERLAY_SELECTOR) || matching(node, CANVAS_CHROME_SELECTOR),
+        )
+      }
+      if (changed) scheduleSlots()
+    })
+    if (rootRef.current) mutations.observe(rootRef.current, { childList: true, subtree: true })
+    const onWindow = () => scheduleSlots()
+    window.addEventListener("resize", onWindow)
+    scheduleSlots()
+    const pending = slotsRef.current
+    return () => {
+      unsubscribe()
+      resized.disconnect()
+      mutations.disconnect()
+      window.removeEventListener("resize", onWindow)
+      cancelAnimationFrame(pending.frame)
+      if (pending.timer !== null) clearTimeout(pending.timer)
+      pending.frame = 0
+      pending.timer = null
+      // Gone from the page: whatever the host laid over the board comes off.
+      pending.last = "[]"
+      onTerminalSlotsRef.current?.([])
+    }
+  }, [store, scheduleSlots])
+  // Switchboard: a pinned terminal moved, resized, selected, folded or minimized —
+  // or its workspace left the rail, or a document opened over it — moves or changes
+  // its slot.
+  useEffect(() => {
+    scheduleSlots()
+  }, [nodes, edges, choices, freshPins, documentNodeId, documentView, scheduleSlots])
 
   // After the editor moves the selection itself (Tab, Shift+Tab, Duplicate,
   // starting to type), two things React Flow keeps would otherwise point at
@@ -1446,6 +2152,11 @@ function FlowEditorCanvas({
       run.controller.abort()
       doneAsking(serial)
     }
+    // Switchboard: where each pinned terminal is now, for the host to float any the
+    // step takes off the board exactly there.
+    const pinned = new Map(
+      nodesRef.current.filter(isTerminal).map((node) => [terminalWorkspace(node), clientRectOf(node)] as const),
+    )
     const next = toCanvas(JSON.parse(snapshot) as FlowSpec)
     nodesRef.current = next.nodes
     edgesRef.current = next.edges
@@ -1455,6 +2166,10 @@ function FlowEditorCanvas({
     setEdges(next.edges)
     changeEditing(null)
     lastRecordAt.current = 0
+    const kept = new Set(next.nodes.filter(isTerminal).map(terminalWorkspace))
+    for (const [wsId, rect] of pinned) {
+      if (!kept.has(wsId)) onTerminalRemovedRef.current?.(wsId, "undo", rect)
+    }
   }
 
   // Steps back to the most recent snapshot that differs from the canvas. A
@@ -1643,7 +2358,8 @@ function FlowEditorCanvas({
           const ownWords =
             !("ai" in patch) &&
             (!sameWords(before.label, box.label) || !sameWords(before.detail, box.detail))
-          return withBox(node, ownWords ? { ...box, ai: undefined } : box)
+          // Switchboard: and the tag naming the workspace the AI read goes with it.
+          return withBox(node, ownWords ? { ...box, ai: undefined, answeredIn: undefined } : box)
         })
       // Ahead of the render too: Escape reverts a text and stops editing it in
       // one go, and the stop has to judge the text it is reverted to.
@@ -1706,6 +2422,8 @@ function FlowEditorCanvas({
   const startResize = useCallback(() => {
     resizePendingRef.current = true
   }, [])
+  // Switchboard: the pinned terminal whose resize handle is held — its slot says so.
+  const terminalResizingRef = useRef<string | null>(null)
 
   // Keeps the size a note, text or image was dragged to, then re-sizes it the
   // way the read-only canvas will: a note no shorter than its text needs, a
@@ -1734,19 +2452,26 @@ function FlowEditorCanvas({
         // drag (sent with the size from before a text re-wrapped) would
         // otherwise leave stale.
         if (done) return { ...node, data: box, ...drawn, measured: { ...drawn } }
+        // Switchboard: a pinned terminal's size is written only once it is let go —
+        // its slot reports the committed size, and the host sizes the shell to it then.
+        if (box.shape === "terminal") return node
         return box.shape === "text"
           ? { ...node, data: box, height: drawn.height }
           : { ...node, data: box }
       }),
     )
+    if (done && terminalResizingRef.current === id) {
+      terminalResizingRef.current = null
+      scheduleSlots()
+    }
   }, [record])
 
   // Pans just far enough that `rect` sits clear of the canvas's own chrome —
   // a box Tab added off the edge of the view is a box you'd be typing into
-  // blind.
-  function reveal(rect: FlowRect) {
+  // blind. Switchboard: says whether it had to.
+  function reveal(rect: FlowRect): boolean {
     const bounds = wrapperRef.current?.getBoundingClientRect()
-    if (!bounds) return
+    if (!bounds) return false
     const { x, y, zoom } = getViewport()
     const left = rect.x * zoom + x
     const right = (rect.x + rect.width) * zoom + x
@@ -1763,6 +2488,7 @@ function FlowEditorCanvas({
     }
     if (top + dy < REVEAL_MARGIN.top) dy = REVEAL_MARGIN.top - top
     if (dx !== 0 || dy !== 0) void setViewport({ x: x + dx, y: y + dy, zoom }, { duration: 200 })
+    return dx !== 0 || dy !== 0
   }
 
   useEffect(() => {
@@ -1775,7 +2501,9 @@ function FlowEditorCanvas({
         if (node) reveal(rectOf(node))
       })
     }
-    const observer = new ResizeObserver(show)
+    // Switchboard: a document panel resized over the canvas may now cover a pinned
+    // terminal, or no longer.
+    const observer = new ResizeObserver(() => { show(); scheduleSlots() })
     const panel = wrapperRef.current?.parentElement?.querySelector(".flow-document-panel")
     if (panel) observer.observe(panel)
     show()
@@ -1938,7 +2666,7 @@ function FlowEditorCanvas({
       try {
         const [size, src] = await Promise.all([
           imageDisplaySize(file),
-          uploadDiagramImage(file, productId, uploadsRef.current?.signal),
+          uploadDiagramImage(file, uploadsRef.current?.signal),
         ])
         const { width, height } = size ?? FLOW_IMAGE_DEFAULT_SIZE
         const label = file.name.replace(/\.[^.]+$/, "").trim() || "Image"
@@ -1969,7 +2697,7 @@ function FlowEditorCanvas({
         if (uploadsRef.current?.signal.aborted) {
           toast({
             title: `${file.name || "An image"} wasn't added`,
-            description: "You left the diagram before it finished uploading.",
+            description: "You left the whiteboard before it finished uploading.",
           })
           setUploading((count) => count - (usable.length - index - 1))
           return
@@ -2117,8 +2845,9 @@ function FlowEditorCanvas({
     // The next of the same kind — but after a picture, a plain box, since
     // there is no picture to repeat. A note keeps its size; a text runs as
     // wide as its own words.
+    // Switchboard: after a pinned terminal too — there is no second shell to add.
     const box: FlowBoxNodeData =
-      from.shape === "image" || from.shape === "document"
+      from.shape === "image" || from.shape === "document" || from.shape === "terminal"
         ? plainBox({ label: "", shape: "rounded", tone: "default" })
         : {
             ...from,
@@ -2126,8 +2855,10 @@ function FlowEditorCanvas({
             detail: undefined,
             labelRichText: undefined,
             detailRichText: undefined,
-            // No words yet, so none of them are the AI's.
+            // No words yet, so none of them are the AI's — nor (Switchboard) the
+            // workspace an answer read.
             ai: undefined,
+            answeredIn: undefined,
             // Switchboard: in the branch it is added to.
             detached: undefined,
             size: from.shape === "note" ? from.size : undefined,
@@ -2287,6 +3018,8 @@ function FlowEditorCanvas({
 
   function duplicate(node: Node, documentCopied = false) {
     const original = node.data as FlowBoxNodeData
+    // Switchboard: one terminal per workspace on a board — a pinned one has no copy.
+    if (original.shape === "terminal") return
     if (original.shape === "document" && original.documentId && !documentCopied) {
       void (async () => {
         const content = await documents.read(original.documentId!)
@@ -2335,7 +3068,9 @@ function FlowEditorCanvas({
   // ⌘C: the boxes selected, and the arrows between them, kept for ⌘V — and
   // their words, top to bottom, on the clipboard for pasting anywhere else.
   function copyBoxes(): boolean {
-    const chosen = nodesRef.current.filter((node) => node.selected)
+    // Switchboard: never a pinned terminal — pasting one would put a second node for
+    // its workspace on a board, and there is only the one shell to show in it.
+    const chosen = nodesRef.current.filter((node) => node.selected && !isTerminal(node))
     if (chosen.length === 0) return false
     const ids = new Set(chosen.map((node) => node.id))
     const text = [...chosen]
@@ -2400,6 +3135,17 @@ function FlowEditorCanvas({
         } catch (error) { if (alive.current) toast({ title: error instanceof Error ? error.message : "Could not copy document", variant: "error" }) }
       })()
       return true
+    }
+    // Switchboard: a copy taken by an older editor might hold a terminal; never paste one.
+    if (copy.nodes.some((node) => node.data.shape === "terminal")) {
+      const kept = copy.nodes.filter((node) => node.data.shape !== "terminal")
+      if (kept.length === 0) return false
+      const ids = new Set(kept.map((node) => node.id))
+      return pasteBoxes(text, {
+        ...copy,
+        nodes: kept,
+        edges: copy.edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target)),
+      }, position)
     }
     record()
     lastRecordAt.current = 0
@@ -2486,19 +3232,24 @@ function FlowEditorCanvas({
       toast({ title: "Switchboard is still looking for who can answer — try again in a moment" })
       return
     }
-    const blocked = notReady(provider)
+    // Switchboard: and a CLI needs a workspace to read — the one this whiteboard names,
+    // taken now, so changing it while the answer is on its way changes only the next.
+    const workspace = provider.kind === "cli" ? answerWorkspace : null
+    const blocked = notReady(provider) ?? noWorkspace(provider, answerWorkspace, answerWorkspaceGone)
     if (blocked) {
       setAnswered(null)
-      setFailure(blocked)
+      setFailure({ ...blocked, workspace, nodeId: node.id })
       return
     }
     const settings = known.settings
     const canvasNodes = nodesRef.current
     const canvasEdges = edgesRef.current
-    // Named to the model so it doesn't repeat what is already there.
+    // Named to the model so it doesn't repeat what is already there. Switchboard: a
+    // pinned terminal hanging off it says nothing.
     const existing = canvasEdges
       .filter((edge) => edge.source === node.id && edge.sourceHandle === "right")
       .map((edge) => canvasNodes.find((other) => other.id === edge.target))
+      .filter((other) => other !== undefined && !isTerminal(other))
       .map((other) => (other?.data as FlowBoxNodeData | undefined)?.label.trim() ?? "")
       .filter((label) => label.length > 0)
       .slice(0, FLOW_AI_MAX_EXISTING)
@@ -2521,6 +3272,7 @@ function FlowEditorCanvas({
         provider: provider.id,
         name: provider.name,
         cli: provider.kind === "cli",
+        workspace,
         web: settings.web,
         serial,
       },
@@ -2529,7 +3281,7 @@ function FlowEditorCanvas({
       const { parts, files } = await requestFlowAnswer(
         {
           provider,
-          wsId: productId,
+          wsId: answerWorkspace,
           question: {
             question,
             detail: box.detail?.trim() || undefined,
@@ -2562,12 +3314,14 @@ function FlowEditorCanvas({
         files: provider.kind === "cli" ? files : null,
         seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
       })
-      addAnswers(node.id, parts)
+      addAnswers(node.id, parts, workspace)
     } catch (err) {
       if (!live()) return
       setFailure({
         message: err instanceof Error ? err.message : "Couldn't answer that",
         code: err instanceof AnswerError ? err.code : undefined,
+        workspace,
+        nodeId: node.id,
       })
     } finally {
       if (live()) {
@@ -2614,10 +3368,12 @@ function FlowEditorCanvas({
       toast({ title: "Switchboard is still looking for who can answer — try again in a moment" })
       return
     }
+    // Switchboard: Condense reads nothing, so it needs no workspace — only the CLI.
+    const workspace = provider.kind === "cli" && !answerWorkspaceGone ? answerWorkspace : null
     const blocked = notReady(provider)
     if (blocked) {
       setAnswered(null)
-      setFailure(blocked)
+      setFailure({ ...blocked, workspace })
       return
     }
     const requested = currentSpec()
@@ -2637,6 +3393,7 @@ function FlowEditorCanvas({
       provider: provider.id,
       name: provider.name,
       cli: provider.kind === "cli",
+      workspace,
       web: false,
       serial,
       mode: "condense",
@@ -2645,7 +3402,7 @@ function FlowEditorCanvas({
     try {
       const { parts } = await requestFlowCondense({
         provider,
-        wsId: productId,
+        wsId: workspace,
         selection: {
           nodes: selection.nodes.map(({ id, label, detail }) => ({ id, label, detail })),
           edges: selection.edges,
@@ -2750,7 +3507,7 @@ function FlowEditorCanvas({
         reveal({ x: left, y: top, width: Math.max(...summaries.map((node) => node.position.x + (node.width ?? FLOW_NODE_WIDTH))) - left, height: Math.max(...summaries.map((node) => node.position.y + (node.height ?? 0))) - top })
       }
     } catch (err) {
-      if (live()) setFailure({ message: err instanceof Error ? err.message : "Couldn't condense that discussion", code: err instanceof AnswerError ? err.code : undefined })
+      if (live()) setFailure({ message: err instanceof Error ? err.message : "Couldn't condense that discussion", code: err instanceof AnswerError ? err.code : undefined, workspace })
     } finally {
       if (live()) {
         askRef.current.delete(serial)
@@ -2788,7 +3545,9 @@ function FlowEditorCanvas({
   // them — all one undo step. They arrive selected, so the toolbar restyles
   // them or ⌫ throws them away; but if you are typing somewhere by then, they
   // go in without taking the keyboard, the selection or the view from you.
-  function addAnswers(parentId: string, parts: FlowAiPart[]) {
+  // Switchboard: each box carries the workspace a CLI read for it (`workspace`, taken
+  // when it was asked) — the tag under its corner. Null for an API's answer.
+  function addAnswers(parentId: string, parts: FlowAiPart[], workspace: string | null) {
     // Switchboard: answering a detached box makes it a branch again.
     const settle = (node: Node) => (node.id === parentId ? attached(node) : node)
     const current = nodesRef.current.map(settle)
@@ -2806,6 +3565,7 @@ function FlowEditorCanvas({
         ...plainBox({ label: part.label, shape: "rounded", tone: "default" }),
         detail: part.detail,
         ai: true,
+        answeredIn: workspace ?? undefined,
       }
       const id = nextFlowNodeId(taken, part.label)
       taken.push(id)
@@ -2927,33 +3687,35 @@ function FlowEditorCanvas({
   // One node click closes every direct branch, or reopens them all. Fold flags
   // remain on the edges so older diagrams (including partial folds) load as
   // they were. The whole action is one undo step and one layout pass.
-  const toggleFold = useCallback(
-    (id: string, expand = false) => {
+  //
+  // Switchboard: the change itself is commitFold — the arrows at `toggled` collapsed
+  // (or opened), the trees of `anchors` laid out again — which revealTerminal's
+  // unfoldTo shares.
+  const commitFold = useCallback(
+    (
+      toggled: ReadonlySet<number>,
+      collapsed: boolean,
+      anchors: string[],
+      hiddenAfter: ReadonlySet<string>,
+      newlyShown: Iterable<string>,
+    ) => {
       const current = nodesRef.current
       const before = edgesRef.current
-      const action = toggleFlowNodeFold(
-        current.map((node) => node.id),
-        before.map((edge) => ({ source: edge.source, target: edge.target, collapsed: isCollapsed(edge) })),
-        id,
-        { expand },
-      )
-      if (!action.changed) return
-      const toggled = new Set(action.edgeIndexes)
       const next = before.map((edge, index) => {
         const folded = toggled.has(index)
-          ? editableEdge(edge, { ...(edge.data as FlowEdgeData), collapsed: action.collapsed || undefined })
+          ? editableEdge(edge, { ...(edge.data as FlowEdgeData), collapsed: collapsed || undefined })
           : edge
-        return toggled.has(index) || action.hiddenAfter.has(edge.source) || action.hiddenAfter.has(edge.target)
+        return toggled.has(index) || hiddenAfter.has(edge.source) || hiddenAfter.has(edge.target)
           ? { ...folded, selected: false }
           : folded
       })
       record()
-      const shown = showing(current, next, action.hiddenAfter)
+      const shown = showing(current, next, new Set(hiddenAfter))
       const moved = tidyFlowTree(
         shown.boxes,
         shown.edges,
-        [id],
-        action.newlyShown,
+        anchors,
+        newlyShown,
         { pinImages: true },
       )
       for (const pending of tabMovesRef.current.values()) {
@@ -2967,7 +3729,7 @@ function FlowEditorCanvas({
           now,
           now.map((node) => {
             const to = moved.get(node.id)
-            const selected = Boolean(node.selected) && !action.hiddenAfter.has(node.id)
+            const selected = Boolean(node.selected) && !hiddenAfter.has(node.id)
             if (!to && Boolean(node.selected) === selected) return node
             return { ...node, ...(to ? { position: to } : {}), selected }
           }),
@@ -2978,7 +3740,55 @@ function FlowEditorCanvas({
     },
     [record, changeEditing, settleSelection],
   )
+  const toggleFold = useCallback(
+    (id: string, expand = false) => {
+      const action = toggleFlowNodeFold(
+        nodesRef.current.map((node) => node.id),
+        edgesRef.current.map((edge) => ({ source: edge.source, target: edge.target, collapsed: isCollapsed(edge) })),
+        id,
+        { expand },
+      )
+      if (!action.changed) return
+      commitFold(new Set(action.edgeIndexes), action.collapsed, [id], action.hiddenAfter, action.newlyShown)
+    },
+    [commitFold],
+  )
   const expandFold = useCallback((id: string) => toggleFold(id, true), [toggleFold])
+
+  // Switchboard: opens whatever folds the box `id` away — the collapsed arrows out of
+  // the showing box that hides it, as a click on its +N would, then those of the box
+  // that brings into view, and so on in — as one fold change. Says whether `id` is
+  // showing now. revealTerminal's: a pinned terminal can sit behind a fold, as any
+  // box an arrow points at can.
+  function unfoldTo(id: string): boolean {
+    const ids = nodesRef.current.map((node) => node.id)
+    let arrows: FlowFoldEdge[] = edgesRef.current.map((edge) => ({
+      source: edge.source,
+      target: edge.target,
+      collapsed: isCollapsed(edge),
+    }))
+    const before = foldFlow(ids, arrows).hidden
+    let hidden = before
+    const toggled = new Set<number>()
+    const anchors: string[] = []
+    for (let step = 0; step < arrows.length && hidden.has(id); step += 1) {
+      const { folded } = foldFlow(ids, arrows)
+      const index = arrows.findIndex(
+        (arrow, at) => arrow.collapsed === true && !hidden.has(arrow.source) && (folded.get(at)?.has(id) ?? false),
+      )
+      if (index < 0) break
+      const action = toggleFlowNodeFold(ids, arrows, arrows[index].source, { expand: true })
+      if (!action.changed) break
+      for (const at of action.edgeIndexes) toggled.add(at)
+      anchors.push(arrows[index].source)
+      arrows = action.edges
+      hidden = action.hiddenAfter
+    }
+    if (toggled.size > 0) {
+      commitFold(toggled, false, anchors, hidden, [...before].filter((box) => !hidden.has(box)))
+    }
+    return !hidden.has(id)
+  }
 
   // The boxes folded away behind any of `going`, which go with them.
   function foldedBehind(going: Node[]): Node[] {
@@ -3029,7 +3839,7 @@ function FlowEditorCanvas({
       targetY: position.y + ANSWER_GHOST_SIZE.height / 2,
       targetPosition: Position.Left,
     })
-    return [{ serial: asking.serial, rect: { ...position, ...ANSWER_GHOST_SIZE }, path }]
+    return [{ serial: asking.serial, rect: { ...position, ...ANSWER_GHOST_SIZE }, path, workspace: asking.workspace }]
   }), [askings, nodes, edges, fold])
 
   // What the canvas accepts dropped on it: a box, note or text dragged off
@@ -3121,6 +3931,273 @@ function FlowEditorCanvas({
     if (now) now.focus()
     else requestAnimationFrame(() => field()?.focus())
   }
+
+  // ─── Switchboard: pinned terminals ───
+
+  const onTerminalFloatRef = useRef(onTerminalFloat)
+  useEffect(() => {
+    onTerminalFloatRef.current = onTerminalFloat
+  })
+
+  /** The board's pinned terminal for `wsId` — there is never more than one. */
+  function terminalNodeFor(wsId: string): Node | undefined {
+    return nodesRef.current.find((node) => isTerminal(node) && terminalWorkspace(node) === wsId)
+  }
+
+  // Folds a pinned terminal to its title bar, or opens it out again — in place, as
+  // one undo step.
+  const setTerminalMinimized = useCallback((id: string, minimized: boolean) => {
+    const node = nodesRef.current.find((candidate) => candidate.id === id)
+    if (!node || !isTerminal(node)) return
+    if (((node.data as FlowBoxNodeData).minimized === true) === minimized) return
+    record()
+    lastRecordAt.current = 0
+    const apply = (current: Node[]) =>
+      current.map((candidate) =>
+        candidate.id === id
+          ? withBox(candidate, { ...(candidate.data as FlowBoxNodeData), minimized: minimized || undefined })
+          : candidate,
+      )
+    nodesRef.current = apply(nodesRef.current)
+    latestRef.current = canvasJson(meta, nodesRef.current, edgesRef.current)
+    setNodes(apply)
+  }, [record, meta])
+
+  const terminalContext = useMemo<TerminalContextValue>(
+    () => ({
+      status: workspaceStatus,
+      gone: (wsId) => terminalGone(wsId, choices, freshPins),
+      float: (wsId) => onTerminalFloatRef.current(wsId),
+      toggleMinimized: (id) => {
+        const node = nodesRef.current.find((candidate) => candidate.id === id)
+        if (node) setTerminalMinimized(id, (node.data as FlowBoxNodeData).minimized !== true)
+      },
+      // As Delete would: one undo step, and the host closes the terminal.
+      close: (id) => void deleteElements({ nodes: [{ id }] }),
+      // To the zoom its type reads at the Terminal tab's size, centred on it.
+      zoomTo: (id) => {
+        const node = nodesRef.current.find((candidate) => candidate.id === id)
+        if (!node) return
+        const rect = rectOf(node)
+        const font = (node.data as FlowBoxNodeData).font ?? TERMINAL_BASE_FONT
+        const zoom = clampNumber(TERMINAL_BASE_FONT / font, FIT_VIEW_OPTIONS.minZoom, 2.5)
+        void setCenter(rect.x + rect.width / 2, rect.y + rect.height / 2, { zoom, duration: 200 })
+      },
+      startResize: (id) => {
+        terminalResizingRef.current = id
+        scheduleSlots()
+      },
+      endResize: (id) => {
+        if (terminalResizingRef.current !== id) return
+        terminalResizingRef.current = null
+        scheduleSlots()
+      },
+    }),
+    [workspaceStatus, choices, freshPins, setTerminalMinimized, deleteElements, setCenter, scheduleSlots],
+  )
+
+  // The handle's pinTerminal: the floating panel's rect becomes a node in the same
+  // place on screen, its type the same size — so the shell needs no resize. Given
+  // where the live terminal sits inside the panel (`body`), the node is fitted round
+  // that instead: computeSlots' body worked backwards — the header above it, the
+  // inset on the other three sides — so the text itself doesn't move by a pixel.
+  // Never clamped up to what the resize handles allow: at a high zoom that would
+  // make the node bigger on screen than the panel it replaces.
+  function pinTerminal(wsId: string, rect: ClientRect, body?: ClientRect | null): boolean {
+    if (normalizeWorkspaceId(wsId) !== wsId) return false
+    if (terminalNodeFor(wsId)) {
+      revealTerminal(wsId)
+      return false
+    }
+    const zoom = store.getState().transform[2]
+    const outer: ClientRect | null = isClientRect(body)
+      ? {
+          left: body.left - TERMINAL_BODY_INSET,
+          top: body.top - TERMINAL_HEADER * zoom,
+          width: body.width + TERMINAL_BODY_INSET * 2,
+          height: body.height + TERMINAL_HEADER * zoom + TERMINAL_BODY_INSET,
+        }
+      : isClientRect(rect)
+        ? rect
+        : null
+    // Nowhere on screen to put it: nothing is pinned, and the panel stays.
+    if (outer === null || !(zoom > 0)) return false
+    const at = screenToFlowPosition({ x: outer.left, y: outer.top }, { snapToGrid: false })
+    const box: FlowBoxNodeData = {
+      ...plainBox({ label: wsId, shape: "terminal", tone: "default" }),
+      workspace: wsId,
+      // Whole canvas units, as the spec keeps them — so undo and a reopen give back
+      // this very node — rounded up, so the body is never less than the grid of
+      // rows and columns the terminal keeps (exact at zoom 1; at another zoom, under
+      // a unit more on the right and at the foot, never anywhere the text is).
+      size: {
+        width: wholeUp(clampNumber(outer.width / zoom, FLOW_TERMINAL_FLOOR.width, FLOW_SIZE_MAX)),
+        height: wholeUp(clampNumber(outer.height / zoom, FLOW_TERMINAL_FLOOR.height, FLOW_SIZE_MAX)),
+      },
+      font: roundTo(clampNumber(TERMINAL_BASE_FONT / zoom, TERMINAL_FONT_MIN, TERMINAL_FONT_MAX), 3),
+    }
+    record()
+    lastRecordAt.current = 0
+    const node: Node = {
+      id: nextFlowNodeId(nodesRef.current.map((other) => other.id), `terminal ${wsId}`),
+      type: EDIT_NODE_TYPE,
+      // Exactly where worked out above — not on the grid, which would nudge it.
+      position: { x: at.x, y: at.y },
+      ...boxSize(box),
+      data: box,
+    }
+    // A workspace these choices don't list was just floated through the host's own
+    // picker, so it is newer than them, not gone: live meanwhile, and main asked.
+    const over = choicesRef.current
+    if (workspaceGone(wsId, over)) {
+      const before = freshPinsRef.current
+      const fresh: FreshPins = { over, ids: new Set([...(before.over === over ? before.ids : []), wsId]) }
+      freshPinsRef.current = fresh
+      setFreshPins(fresh)
+      refreshChoices()
+    }
+    nodesRef.current = [...nodesRef.current, node]
+    latestRef.current = canvasJson(meta, nodesRef.current, edgesRef.current)
+    setNodes((current) => [...current, node])
+    scheduleSlots()
+    return true
+  }
+
+  // The handle's unpinTerminal: off the board, as one undo step, saying where it was
+  // so the floating panel can take its place. Not a delete — the host hears nothing
+  // more about it (onTerminalRemoved is for every other way a terminal leaves).
+  function unpinTerminal(wsId: string): ClientRect | null {
+    const node = terminalNodeFor(wsId)
+    if (!node) return null
+    const rect = clientRectOf(node)
+    record()
+    lastRecordAt.current = 0
+    const keep = (current: Node[]) => current.filter((candidate) => candidate.id !== node.id)
+    const unwire = (current: Edge[]) =>
+      current.filter((edge) => edge.source !== node.id && edge.target !== node.id)
+    nodesRef.current = keep(nodesRef.current)
+    edgesRef.current = unwire(edgesRef.current)
+    latestRef.current = canvasJson(meta, nodesRef.current, edgesRef.current)
+    setNodes(keep)
+    setEdges(unwire)
+    scheduleSlots()
+    return rect
+  }
+
+  // The handle's revealTerminal: a tray chip or Open terminal… for a pinned one —
+  // restored if it was minimized (one undo step), selected, and panned into view.
+  function revealTerminal(wsId: string): boolean {
+    const node = terminalNodeFor(wsId)
+    if (!node) return false
+    // One whose workspace had left the rail may be back in it (the host just offered
+    // it): main is asked, and its answer brings the terminal back to life.
+    if (workspaceGone(wsId, choicesRef.current)) refreshChoices()
+    // Folded away behind a collapsed arrow (one can point at a terminal): opened
+    // first. A node that can't be brought into view is never selected — the next
+    // Delete would take what nobody can see.
+    if (!unfoldTo(node.id)) return false
+    if ((node.data as FlowBoxNodeData).minimized) setTerminalMinimized(node.id, false)
+    const shown = nodesRef.current.find((candidate) => candidate.id === node.id) ?? node
+    changeEditing(null)
+    if (tool === "hand") setTool("select")
+    select(shown)
+    reveal(rectOf(shown))
+    return true
+  }
+
+  useEffect(() => {
+    terminalsRef.current = {
+      pin: pinTerminal,
+      unpin: unpinTerminal,
+      reveal: revealTerminal,
+      slots: computeSlots,
+    }
+  })
+
+  // ─── Switchboard: the workspace ✦ Answer reads ───
+
+  // "Choose workspace…" in the strip opens the who-answers menu over the box that
+  // asked, with its picker already showing. A box that is gone (or folded away) has
+  // no menu to open, so the picker opens over the strip instead.
+  const [aiMenuRequest, setAiMenuRequest] = useState(0)
+  const aiMenuTakenRef = useRef(0)
+  const takeAiMenuRequest = useCallback((serial: number) => {
+    if (serial <= aiMenuTakenRef.current) return false
+    aiMenuTakenRef.current = serial
+    return true
+  }, [])
+  const pickerFirstRef = useRef(false)
+  const takePickerFirst = useCallback(() => {
+    const first = pickerFirstRef.current
+    pickerFirstRef.current = false
+    return first
+  }, [])
+  const [stripPicker, setStripPicker] = useState(false)
+
+  const aiMenuSerialRef = useRef(0)
+
+  function chooseWorkspace() {
+    const asked = failure?.nodeId
+      ? nodesRef.current.find((node) => node.id === failure.nodeId)
+      : undefined
+    // Its toolbar offers who answers only while the box is idle: one being answered
+    // shows Stop, and one in a condense on its way shows Condense — no menu there to
+    // take the request, so the picker opens over the strip, as for a box that's gone.
+    if (
+      !asked ||
+      !hasText(asked.data as FlowBoxNodeData) ||
+      fold.hidden.has(asked.id) ||
+      answeringIds.has(asked.id)
+    ) {
+      setStripPicker(true)
+      return
+    }
+    changeEditing(null)
+    if (tool !== "select") setTool("select")
+    select(asked)
+    pickerFirstRef.current = true
+    // Once the toolbar has come up over the box — and the view stopped, if it had to
+    // move: the menu closes whenever the toolbar moves.
+    const delay = reveal(rectOf(asked)) ? 260 : 60
+    const serial = (aiMenuSerialRef.current += 1)
+    setTimeout(() => setAiMenuRequest(serial), delay)
+    // Not taken (the box was unselected first): the request lapses — counted as
+    // taken, or the next who-answers menu to come up (the box selected again, maybe
+    // minutes later) would open by itself — and the next menu opened by hand opens as
+    // it always does.
+    setTimeout(() => {
+      if (aiMenuTakenRef.current < serial) aiMenuTakenRef.current = serial
+      if (aiMenuSerialRef.current === serial) pickerFirstRef.current = false
+    }, delay + 1_000)
+  }
+
+  function pickAnswerWorkspace(wsId: string) {
+    setStripPicker(false)
+    // Fixed now, so the strip's "Pick a workspace" isn't left saying so.
+    if (failure?.code === "no-workspace") setFailure(null)
+    onAnswerWorkspaceChange(wsId)
+  }
+
+  // What the who-answers menu shows and changes about the board's workspace.
+  const answerWorkspaceBar = {
+    workspace: answerWorkspace,
+    workspaceGone: answerWorkspaceGone,
+    choices,
+    refreshChoices,
+    workspaceStatus,
+    onWorkspace: pickAnswerWorkspace,
+    openRequest: aiMenuRequest,
+    takeOpenRequest: takeAiMenuRequest,
+    takePickerFirst,
+  }
+
+  // Where Open Terminal (a CLI to sign in) goes: the workspace the answer was to
+  // read, or the board's — and only one still in the rail.
+  const failureTerminalCandidate = failure?.workspace ?? answerWorkspace
+  const failureTerminal =
+    failureTerminalCandidate && !workspaceGone(failureTerminalCandidate, choices)
+      ? failureTerminalCandidate
+      : null
 
   // ─── what is selected ───
 
@@ -3463,15 +4540,113 @@ function FlowEditorCanvas({
 
   // Re-frame the drawing when full screen changes the size of the pane. Not on
   // mount — the fitView prop has that covered.
+  // Switchboard: animated here, a frame at a time, rather than by fitView's own
+  // d3 transition — which measures the pane only as its first frame begins, a frame
+  // or two after the call. A board taken off screen in between (left right after
+  // full screen; the host leaving full screen for a board no longer on screen) was
+  // interpolated over a pane of no size, and every frame of it was NaN. Here the
+  // frame is worked out once, from the pane on screen, and each step is set
+  // outright; a pane that goes away part-way jumps to the end, and one already off
+  // screen is framed — at once, not animated — as soon as it is back.
+  const refitRef = useRef<{ pending: boolean; stop: () => void }>({ pending: false, stop: () => {} })
+  const paneOnScreen = useCallback((): HTMLElement | null => {
+    const pane = store.getState().domNode
+    return pane && pane.isConnected && pane.offsetWidth > 0 && pane.offsetHeight > 0 ? pane : null
+  }, [store])
+  const refit = useCallback(
+    (animate: boolean) => {
+      const state = refitRef.current
+      state.stop()
+      const pane = paneOnScreen()
+      state.pending = pane === null
+      if (pane === null) return
+      // What fitView would land on: every box drawn, framed in the pane as it is now.
+      const drawn = [...store.getState().nodeLookup.values()].filter(
+        (node) => !node.hidden && node.measured.width && node.measured.height,
+      )
+      if (drawn.length === 0) return
+      const width = pane.offsetWidth
+      const height = pane.offsetHeight
+      const to = getViewportForBounds(
+        getNodesBounds(drawn),
+        width,
+        height,
+        FIT_VIEW_OPTIONS.minZoom,
+        FIT_VIEW_OPTIONS.maxZoom,
+        FIT_VIEW_OPTIONS.padding,
+      )
+      const from = getViewport()
+      if (!animate || !(from.zoom > 0)) {
+        void setViewport(to)
+        return
+      }
+      const start = performance.now()
+      let last = from
+      let frame = 0
+      let timer: ReturnType<typeof setTimeout> | null = null
+      const stop = () => {
+        cancelAnimationFrame(frame)
+        if (timer !== null) clearTimeout(timer)
+        frame = 0
+        timer = null
+        state.stop = () => {}
+      }
+      const step = () => {
+        const now = getViewport()
+        // Panned or zoomed by hand meanwhile: the hand wins.
+        if (Math.abs(now.x - last.x) > 0.01 || Math.abs(now.y - last.y) > 0.01 || Math.abs(now.zoom - last.zoom) > 1e-4) {
+          stop()
+          return
+        }
+        const t = (performance.now() - start) / REFIT_DURATION_MS
+        if (t >= 1 || paneOnScreen() === null) {
+          stop()
+          void setViewport(to)
+          return
+        }
+        last = viewBetween(from, to, easeInOutCubic(t), width, height)
+        void setViewport(last)
+        frame = requestAnimationFrame(step)
+      }
+      frame = requestAnimationFrame(step)
+      // A hidden window draws no frames: it still ends up where it was going.
+      timer = setTimeout(step, REFIT_DURATION_MS + 100)
+      state.stop = stop
+    },
+    [paneOnScreen, store, getNodesBounds, getViewport, setViewport],
+  )
   const fittedFor = useRef(fitKey)
   useEffect(() => {
     if (fittedFor.current === fitKey) return
     fittedFor.current = fitKey
-    const frame = requestAnimationFrame(() => {
-      void fitView({ ...FIT_VIEW_OPTIONS, duration: 200 })
-    })
+    // A frame later, once the pane has its new size.
+    const frame = requestAnimationFrame(() => refit(true))
     return () => cancelAnimationFrame(frame)
-  }, [fitKey, fitView])
+  }, [fitKey, refit])
+  // A re-frame that found the board off screen waits for it to be back: shown again,
+  // or the pane given a size again.
+  useEffect(() => {
+    const pane = wrapperRef.current
+    let frame = 0
+    const retry = () => {
+      if (!refitRef.current.pending) return
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        if (refitRef.current.pending) refit(false)
+      })
+    }
+    const back = new ResizeObserver(retry)
+    if (pane) back.observe(pane)
+    if (shown) retry()
+    return () => {
+      back.disconnect()
+      cancelAnimationFrame(frame)
+    }
+  }, [shown, refit])
+  useEffect(() => {
+    const state = refitRef.current
+    return () => state.stop()
+  }, [])
 
   const context = useMemo<EditorContextValue>(
     () => ({
@@ -3516,16 +4691,21 @@ function FlowEditorCanvas({
   // The boxes the floating toolbar sits over: the one being typed in, or the
   // selection.
   const barNodes = editingNode ? [editingNode] : selectedNodes
+  // Switchboard: a pinned terminal has its own buttons in its header; with nothing
+  // but terminals selected there is nothing for the toolbar to offer.
+  const terminalsOnly =
+    !editingNode && selectedEdges.length === 0 && selectedNodes.length > 0 && selectedNodes.every(isTerminal)
 
   return (
     <DiagramFileCopyContext.Provider value={documents.getPath}>
     <EditorContext.Provider value={context}>
+    <TerminalContext.Provider value={terminalContext}>
       {/* Switchboard: a row — the canvas, and Google Images docked on its right
           while open, so the canvas narrows beside the panel rather than hiding
           under it. Everything measured from wrapperRef is the canvas alone. In a
           narrow window the panel gives way first: the canvas keeps 360px, room
           for the rail and the menus beside it, which it clips. */}
-      <div className="relative flex size-full min-w-0">
+      <div ref={rootRef} className="relative flex size-full min-w-0" data-board-id={boardId}>
         <div
           ref={wrapperRef}
           className={cx(
@@ -3576,6 +4756,15 @@ function FlowEditorCanvas({
               // rather than leaving it to reappear somewhere with nothing pointing
               // at it.
               const behind = foldedBehind(going)
+              // Switchboard: a pinned terminal deleted (Delete, Cut, its Close, or
+              // folded away behind a box deleted) is closed by the host — told
+              // where it was, while it still is.
+              for (const node of [...going, ...behind]) {
+                const pinned = nodesRef.current.find((candidate) => candidate.id === node.id)
+                if (pinned && isTerminal(pinned)) {
+                  onTerminalRemovedRef.current?.(terminalWorkspace(pinned), "delete", clientRectOf(pinned))
+                }
+              }
               if (behind.length === 0) return true
               const ids = new Set(behind.map((node) => node.id))
               const cutting = new Set(goingEdges.map((edge) => edge.id))
@@ -3636,7 +4825,7 @@ function FlowEditorCanvas({
             onDragOver={onDragOver}
             onDrop={onDrop}
             attributionPosition="bottom-left"
-            aria-label="Flow diagram editor"
+            aria-label="Whiteboard editor"
           >
             <Background
               variant={BackgroundVariant.Dots}
@@ -3648,7 +4837,10 @@ function FlowEditorCanvas({
             {/* Bottom right, clear of the toolbar down the left on a short canvas. */}
             <Controls showInteractive={false} position="bottom-right" />
 
-            <Panel position="center-left" className="!my-0 !ml-4">
+            {/* Switchboard: centred for real. React Flow lifts a centred panel by the
+                15px margin !my-0 takes away, which on a short canvas (a Grid square)
+                pushed the rail's first tool off the top. */}
+            <Panel position="center-left" className="!my-0 !ml-4 ![transform:translateY(-50%)]">
               <ToolRail
                 tool={tool}
                 shape={shapeChoice}
@@ -3665,7 +4857,7 @@ function FlowEditorCanvas({
               />
             </Panel>
 
-            <FloatingBar nodes={barNodes} hidden={dragging || tool === "hand"}>
+            <FloatingBar nodes={barNodes} hidden={dragging || tool === "hand" || terminalsOnly}>
               {editingNode ? (
                 <TextBar
                   box={editingNode.data as FlowBoxNodeData}
@@ -3691,7 +4883,7 @@ function FlowEditorCanvas({
                       : undefined
                   }
                   onOpenDocument={soleNode && (soleNode.data as FlowBoxNodeData).shape === "document" ? () => openDocument(soleNode) : undefined}
-                  onDuplicate={soleNode ? () => duplicate(soleNode) : undefined}
+                  onDuplicate={soleNode && !isTerminal(soleNode) ? () => duplicate(soleNode) : undefined}
                   onDelete={deleteSelection}
                   branch={
                     soleNode && inBranch(soleNode, edges)
@@ -3716,7 +4908,7 @@ function FlowEditorCanvas({
                           hasQuestion: !condenseProblem && !selectedIds.some(isAnswering),
                           disabledReason: condenseProblem ?? (selectedIds.some(isAnswering) ? "Wait for the selected nodes' answers or stop them first" : undefined),
                           status: answerStatus,
-                          workspaceName,
+                          ...answerWorkspaceBar,
                           onSettings: (patch) => void updateAnswerSettings(patch),
                           onOpenSettings,
                           onAnswer: () => void condense(selectedIds),
@@ -3728,7 +4920,7 @@ function FlowEditorCanvas({
                           state: answeringIds.has(soleNode.id) ? "answering" : "idle",
                           hasQuestion: (soleNode.data as FlowBoxNodeData).label.trim().length > 0,
                           status: answerStatus,
-                          workspaceName,
+                          ...answerWorkspaceBar,
                           onSettings: (patch) => void updateAnswerSettings(patch),
                           onOpenSettings,
                           onAnswer: () => void ask(soleNode),
@@ -3767,11 +4959,25 @@ function FlowEditorCanvas({
                 >
                   <span className="h-2 w-4/5 animate-pulse rounded bg-violet-200 dark:bg-violet-900/70" />
                   <span className="h-2 w-3/5 animate-pulse rounded bg-violet-100 dark:bg-violet-900/50" />
+                  {/* Switchboard: the workspace the answer is reading, dashed until it lands. */}
+                  {ghost.workspace ? <WorkspaceTag id={ghost.workspace} ghost /> : null}
                 </div>
               </ViewportPortal>
             ))}
 
             <Panel position="bottom-center">
+              {/* Switchboard: Choose workspace… when the box that asked has no menu to
+                  open — the same picker, over the strip. */}
+              {stripPicker ? (
+                <StripPicker
+                  choices={choices}
+                  onOpen={refreshChoices}
+                  current={answerWorkspace}
+                  status={workspaceStatus}
+                  onPick={pickAnswerWorkspace}
+                  onClose={() => setStripPicker(false)}
+                />
+              ) : null}
               {/* Switchboard: while a CLI reads the workspace, what it is doing — over the
                   strip, so a minute-long wait never looks stuck. */}
               {followed !== null ? (
@@ -3780,7 +4986,6 @@ function FlowEditorCanvas({
                   asking={followed}
                   steps={steps[followed.serial] ?? []}
                   others={askings.length - 1}
-                  workspaceName={workspaceName}
                 />
               ) : null}
               <div className="mx-auto flex w-fit items-center gap-1 rounded-md border border-gray-200 bg-white/95 p-1 text-xs shadow-sm backdrop-blur-sm dark:border-gray-800 dark:bg-gray-950/95">
@@ -3824,7 +5029,8 @@ function FlowEditorCanvas({
                     <AnswerFailureLine
                       failure={failure}
                       onOpenSettings={onOpenSettings}
-                      onOpenTerminal={onOpenTerminal}
+                      onOpenTerminal={failureTerminal ? () => onOpenTerminal(failureTerminal) : undefined}
+                      onChooseWorkspace={chooseWorkspace}
                       onDismiss={() => setFailure(null)}
                     />
                     <span className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-800" aria-hidden="true" />
@@ -3934,6 +5140,7 @@ function FlowEditorCanvas({
           />
         ) : null}
       </div>
+    </TerminalContext.Provider>
     </EditorContext.Provider>
     </DiagramFileCopyContext.Provider>
   )
@@ -3978,6 +5185,8 @@ function Bar({ children }: { children: React.ReactNode }) {
   return (
     <div
       role="toolbar"
+      // Switchboard: floating over the canvas — a pinned terminal under it steps aside.
+      data-canvas-overlay
       className="pointer-events-auto flex items-center gap-0.5 rounded-xl bg-gray-900 p-1 text-gray-100 shadow-lg ring-1 ring-black/5 dark:bg-gray-800 dark:ring-white/10"
       // Buttons never take focus, so pressing one mid-edit leaves you typing
       // where you were. A text input in the bar still can.
@@ -4047,6 +5256,8 @@ function BarMenu({
   className,
   openClassName = "bg-white/10",
   panelClassName,
+  openRequest,
+  takeOpenRequest,
 }: {
   label: string
   trigger: React.ReactNode
@@ -4057,6 +5268,12 @@ function BarMenu({
   openClassName?: string
   /** On the panel, merged over its own (e.g. to anchor it left, not centred). */
   panelClassName?: string
+  /**
+   * Switchboard: opens the panel from outside — each new number once, the first
+   * time a menu here takes it (`takeOpenRequest` says whether this one did).
+   */
+  openRequest?: number
+  takeOpenRequest?: (serial: number) => boolean
 }) {
   // Open where the toolbar was when it opened, and only there: panning,
   // zooming or the selection moving (arrow keys, a nudge) carries the toolbar
@@ -4077,6 +5294,12 @@ function BarMenu({
     })
   }, [openAt, store])
 
+  // Switchboard: Choose workspace… in the strip asks for the who-answers menu.
+  useEffect(() => {
+    if (!openRequest || !takeOpenRequest?.(openRequest)) return
+    setOpenAt(toolbarPlace(store.getState()))
+  }, [openRequest, takeOpenRequest, store])
+
   useEffect(() => {
     if (!open) return
     function onPointerDown(event: PointerEvent) {
@@ -4086,6 +5309,8 @@ function BarMenu({
     }
     function onKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return
+      // Switchboard: a workspace picker open in the panel closes first, on its own.
+      if (ref.current?.querySelector("[data-workspace-picker]")) return
       event.stopPropagation()
       setOpenAt(null)
     }
@@ -4111,6 +5336,7 @@ function BarMenu({
         <div
           ref={keepInCanvas}
           data-flow-popover
+          data-canvas-overlay
           className={cx(
             "absolute left-1/2 top-full z-10 mt-2 -translate-x-1/2 rounded-xl bg-gray-900 p-1.5 shadow-lg ring-1 ring-black/5 dark:bg-gray-800 dark:ring-white/10",
             panelClassName,
@@ -4139,13 +5365,19 @@ function toolbarPlace(state: ReactFlowState): string {
 // opens, slide it sideways back inside, and open it upwards instead when there
 // is more room above the toolbar than below. Done to the element directly, on
 // mount: it is measuring the page, not anything React renders from.
-function keepInCanvas(panel: HTMLDivElement | null) {
-  if (!panel) return
+//
+// Switchboard: once per panel (marked `data-placed`). React attaches the panel's
+// ref only after every layout effect inside it has run, so something inside that
+// measures the panel as it mounts — the Workspace row's picker, when Choose
+// workspace… opens the menu with it showing — places the panel first by calling
+// this itself, and the ref's call then leaves it be.
+function keepInCanvas(panel: HTMLElement | null) {
+  if (!panel || panel.hasAttribute("data-placed")) return
   const bounds = panel.closest(".react-flow")?.getBoundingClientRect()
   if (!bounds) return
+  panel.setAttribute("data-placed", "")
   const margin = 8
-  // From where the classes put it, so measuring twice (React's dev double
-  // call) lands in the same place.
+  // From where the classes put it.
   panel.style.marginLeft = ""
   panel.style.maxHeight = ""
   panel.style.overflowY = ""
@@ -4270,7 +5502,8 @@ function BoxBar({
   const tone = shared(boxes, "tone")
   const dashed = shared(boxes, "dashed")
   const allBoxes = boxes.every((box) => isFlowBoxShape(box.shape))
-  const colourable = boxes.every((box) => box.shape !== "image" && box.shape !== "document")
+  // Switchboard: nor a pinned terminal, which is the terminal's colours.
+  const colourable = boxes.every((box) => box.shape !== "image" && box.shape !== "document" && box.shape !== "terminal")
   // Swatches drawn as notes or ink only when every node selected is one.
   const swatch: "box" | "note" | "text" =
     sharedShape === "note" ? "note" : sharedShape === "text" ? "text" : "box"
@@ -4429,8 +5662,20 @@ type AiBar = {
   hasQuestion: boolean
   /** Switchboard: who can answer on this Mac, and the settings — null until main has said. */
   status: AnswerStatus | null
-  /** The workspace a CLI reads, for "Reads sample-api first". */
-  workspaceName?: string
+  /** Switchboard: the workspace a CLI reads for this whiteboard, for "Reads sample-2 first". */
+  workspace: string | null
+  /** Switchboard: that workspace has left the rail. */
+  workspaceGone: boolean
+  /** Switchboard: the rail's workspaces and their branches, for the Workspace row's picker. */
+  choices: WorkspaceChoices | null
+  /** Switchboard: asks main for the rail's workspaces again, as the picker opens. */
+  refreshChoices: () => void
+  workspaceStatus: WorkspaceStatus
+  onWorkspace: (wsId: string) => void
+  /** Switchboard: Choose workspace… — the menu opens with the picker showing. */
+  openRequest: number
+  takeOpenRequest: (serial: number) => boolean
+  takePickerFirst: () => boolean
   onSettings: (patch: Partial<AnswerSettings>) => void
   onOpenSettings?: () => void
   onAnswer: () => void
@@ -4491,12 +5736,20 @@ function AiControls({ ai }: { ai: AiBar }) {
         className={cx("ml-px rounded-l-none px-1", AI_TINT)}
         openClassName="bg-violet-500/40"
         panelClassName="left-0 translate-x-0"
+        openRequest={condensing ? undefined : ai.openRequest}
+        takeOpenRequest={ai.takeOpenRequest}
       >
         {(close) => (
           <AiSettingsMenu
             condensing={condensing}
             status={ai.status}
-            workspaceName={ai.workspaceName}
+            workspace={ai.workspace}
+            workspaceGone={ai.workspaceGone}
+            choices={ai.choices}
+            refreshChoices={ai.refreshChoices}
+            workspaceStatus={ai.workspaceStatus}
+            onWorkspace={ai.onWorkspace}
+            takePickerFirst={ai.takePickerFirst}
             onChange={ai.onSettings}
             onOpenSettings={
               ai.onOpenSettings
@@ -4570,16 +5823,22 @@ function KindTag({ kind }: { kind: ProviderStatus["kind"] }) {
   )
 }
 
-/** The line under each way to answer: what it does, or why it can't right now. */
-function providerLine(provider: ProviderStatus, workspaceName?: string): string {
+/**
+ * The line under each way to answer: what it does, or why it can't right now.
+ * Switchboard: a CLI reads the whiteboard's workspace — or says there is none to
+ * read, or that it has left the rail; an API sees only the whiteboard.
+ */
+function providerLine(provider: ProviderStatus, workspace: string | null, gone: boolean): string {
   if (provider.kind === "cli") {
     if (provider.state === "missing") return "Not installed on this Mac"
     if (provider.state === "signed-out") return "Not signed in on this Mac"
-    return `Reads ${workspaceName ?? "the workspace"} first · slower`
+    if (!workspace) return "Pick a workspace to read"
+    if (gone) return `${workspace} is no longer in the rail`
+    return `Reads ${workspace} first, then answers`
   }
   if (!provider.ready) return "No key yet · add one in Settings"
   const model = provider.models?.find((option) => option.id === provider.model)
-  return `${model?.name ?? provider.model} · only this diagram · fast`
+  return `${model?.name ?? provider.model} · sees only the whiteboard · fast`
 }
 
 // One on/off line in the menu below: what it is, a hint, and the switch.
@@ -4621,19 +5880,42 @@ function MenuSwitch({
 // before the question, writes a line under each box, and may go on the web. Kept by
 // main, on this Mac, for every diagram; the Settings screen shows and changes the same
 // things.
+// Switchboard: and which workspace a CLI reads — the whiteboard's own, kept with the
+// whiteboard rather than on this Mac — in a row of its own, whose Change… opens a
+// short picker beside the menu.
 function AiSettingsMenu({
   status,
   condensing = false,
-  workspaceName,
+  workspace,
+  workspaceGone: gone,
+  choices,
+  refreshChoices,
+  workspaceStatus,
+  onWorkspace,
+  takePickerFirst,
   onChange,
   onOpenSettings,
 }: {
   status: AnswerStatus | null
   condensing?: boolean
-  workspaceName?: string
+  workspace: string | null
+  workspaceGone: boolean
+  choices: WorkspaceChoices | null
+  refreshChoices?: () => void
+  workspaceStatus: WorkspaceStatus
+  onWorkspace: (wsId: string) => void
+  /** True once, when the menu was opened to choose a workspace. */
+  takePickerFirst?: () => boolean
   onChange: (patch: Partial<AnswerSettings>) => void
   onOpenSettings?: () => void
 }) {
+  const [picking, setPicking] = useState(() => !condensing && (takePickerFirst?.() ?? false))
+  const pickerRef = useRef<HTMLDivElement | null>(null)
+  const changeRef = useRef<HTMLButtonElement | null>(null)
+  // The rail as it is now, each time the picker opens.
+  useEffect(() => {
+    if (picking) refreshChoices?.()
+  }, [picking, refreshChoices])
   if (!status) {
     return (
       <p className="flex w-[32rem] items-center gap-2 p-3 text-sm text-gray-300">
@@ -4644,10 +5926,24 @@ function AiSettingsMenu({
   }
   const settings = status.settings
   const current = status.providers.find((option) => option.id === settings.provider) ?? null
+  // An API reads no workspace: the row stays, dimmed, saying so.
+  const api = current?.kind === "api"
+  const dir = workspaceDir(workspace, choices)
   return (
-    <div className="w-[33rem] text-sm text-gray-200">
-      <div className="grid grid-cols-[1.08fr_1fr]">
-        <div className="flex flex-col pr-1.5">
+    <div
+      className="relative w-[33rem] text-sm text-gray-200"
+      // A click elsewhere in the menu puts the picker away (outside it, the menu goes too).
+      onPointerDown={(event) => {
+        if (!picking || !(event.target instanceof globalThis.Node)) return
+        if (pickerRef.current?.contains(event.target) || changeRef.current?.contains(event.target)) return
+        setPicking(false)
+      }}
+    >
+      {/* Switchboard: minmax(0, …) — a bare fr track can't shrink below its longest
+          unbreakable line, and the Workspace row's folder runs as long as a path is,
+          which would take the menu's width from the right column. */}
+      <div className="grid grid-cols-[minmax(0,1.08fr)_minmax(0,1fr)]">
+        <div className="flex min-w-0 flex-col pr-1.5">
           <div role="radiogroup" aria-label="Answer with" className="flex flex-col gap-0.5">
             <MenuHeading>Answer with</MenuHeading>
             {status.providers.map((option) => {
@@ -4684,17 +5980,67 @@ function AiSettingsMenu({
                         option.ready ? "text-gray-400" : "text-gray-500",
                       )}
                     >
-                      {condensing && option.ready ? "Condenses the selected discussion" : providerLine(option, workspaceName)}
+                      {condensing && option.ready ? "Condenses the selected discussion" : providerLine(option, workspace, gone)}
                     </span>
                   </span>
                 </button>
               )
             })}
           </div>
-          {/* Whichever of the four answers — what it may do, beside who it is (and outside
-              the radio group, which holds only the four). */}
+          {/* Whichever of the four answers — the workspace a CLI reads, and what it may
+              do, beside who it is (and outside the radio group, which holds only the
+              four). Condensing reads nothing, so neither is offered then. */}
           {!condensing ? (
             <div className="mt-auto border-t border-white/10 pt-1">
+              <MenuHeading>Workspace</MenuHeading>
+              <div
+                className={cx(
+                  "mx-0.5 mb-1 flex items-center gap-2 rounded-[9px] border border-white/10 bg-white/[.07] px-2 py-[7px]",
+                  api && "opacity-60",
+                )}
+              >
+                <PickerGlyph name="folderOpen" className={gone ? "text-amber-300" : "text-violet-300"} />
+                <span className="min-w-0 flex-1">
+                  <span
+                    className={cx(
+                      "block truncate text-xs font-semibold",
+                      workspace ? "font-mono text-white" : "text-gray-300",
+                    )}
+                  >
+                    {workspace ?? "None chosen"}
+                  </span>
+                  <span
+                    className={cx(
+                      "block truncate text-[11px] leading-4",
+                      gone && !api ? "text-amber-300" : "text-gray-400",
+                    )}
+                    // Cut short to the row, so the whole folder is a hover away.
+                    title={!api && !gone && workspace && dir ? dir : undefined}
+                  >
+                    {api
+                      ? "Claude API and OpenAI API see only the whiteboard"
+                      : gone
+                        ? "No longer in the rail — choose another"
+                        : workspace
+                          ? `${dir ? `${dir} · ` : ""}what a CLI reads`
+                          : "What Claude Code and Codex read"}
+                  </span>
+                </span>
+                <button
+                  ref={changeRef}
+                  type="button"
+                  aria-haspopup="dialog"
+                  aria-expanded={picking}
+                  onClick={() => setPicking((open) => !open)}
+                  className={cx(
+                    "flex shrink-0 items-center gap-0.5 rounded px-0.5 text-xs font-medium text-violet-300 hover:text-violet-200",
+                    focusRing,
+                  )}
+                >
+                  Change…
+                  <PickerGlyph name="chev" />
+                </button>
+              </div>
               <MenuSwitch
                 label="Web access"
                 hint="Opens links and searches when needed"
@@ -4704,7 +6050,7 @@ function AiSettingsMenu({
             </div>
           ) : null}
         </div>
-        <div className="flex flex-col gap-1 border-l border-white/10 pl-2.5">
+        <div className="flex min-w-0 flex-col gap-1 border-l border-white/10 pl-2.5">
           {current ? <HowItAnswers provider={current} settings={settings} onChange={onChange} /> : null}
           {!condensing ? (
             <>
@@ -4738,7 +6084,11 @@ function AiSettingsMenu({
         </div>
       </div>
       <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-white/10 px-2 pb-0.5 pt-2 text-[11px] text-gray-400">
-        <span>{condensing ? "Uses the selected nodes and their parent. Undo restores the discussion." : "A box for each part an answer has. Remembered on this Mac."}</span>
+        <span>
+          {condensing
+            ? "Uses the selected nodes and their parent. Undo restores the discussion."
+            : "A box for each part an answer has. Workspace is kept with this whiteboard; the rest on this Mac."}
+        </span>
         {onOpenSettings ? (
           <button
             type="button"
@@ -4750,6 +6100,82 @@ function AiSettingsMenu({
           </button>
         ) : null}
       </div>
+      {picking && !condensing ? (
+        <BesideMenu pickerRef={pickerRef}>
+          <WorkspacePicker
+            choices={choices}
+            current={workspace}
+            currentLabel="This whiteboard's workspace"
+            title="Workspace for this whiteboard"
+            footer="Applies to the next answers on this whiteboard. Boxes already answered keep their tag."
+            tone="dark"
+            status={workspaceStatus}
+            onPick={(wsId) => {
+              setPicking(false)
+              onWorkspace(wsId)
+              changeRef.current?.focus({ preventScroll: true })
+            }}
+            onClose={() => {
+              setPicking(false)
+              changeRef.current?.focus({ preventScroll: true })
+            }}
+          />
+        </BesideMenu>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * Switchboard: where the Workspace row's picker sits — a child of the menu's own
+ * panel, so a click in it is a click in the menu, placed just past the menu's right
+ * edge as the mock-up has it. The canvas clips whatever hangs past its edges, so
+ * with no room there (or a menu cut short and scrolling) it lies over the menu's
+ * right-hand column instead; and it is moved up as far as it must be to end above
+ * the canvas's foot.
+ */
+function BesideMenu({
+  pickerRef,
+  children,
+}: {
+  pickerRef: React.RefObject<HTMLDivElement | null>
+  children: React.ReactNode
+}) {
+  const [place, setPlace] = useState<{ beside: boolean; top: number }>({ beside: true, top: -6 })
+  useLayoutEffect(() => {
+    const picker = pickerRef.current
+    const menu = picker?.parentElement
+    if (!picker || !menu) return
+    const canvas = menu.closest(".react-flow")?.getBoundingClientRect()
+    const panel = menu.closest<HTMLElement>("[data-flow-popover]")
+    // Opened with the menu (Choose workspace…), this runs before the panel's own
+    // ref has slid it, flipped it or made it scroll: place it now, so what is
+    // measured here is where it will be.
+    keepInCanvas(panel)
+    const box = menu.getBoundingClientRect()
+    const width = picker.offsetWidth
+    const height = picker.offsetHeight
+    // A scrolling panel clips sideways too, and would scroll the picker's search
+    // box into view, taking the menu's left column out of it.
+    const scrolls = panel ? getComputedStyle(panel).overflowY !== "visible" : false
+    const beside = !scrolls && (!canvas || box.right + 14 + width <= canvas.right - 8)
+    let top = beside ? -6 : 0
+    // Within what shows of the menu: the canvas, or a scrolling panel's own box.
+    const room = scrolls && panel ? panel.getBoundingClientRect() : canvas
+    if (room) {
+      const bottom = box.top + top + height
+      if (bottom > room.bottom - 8) top -= bottom - (room.bottom - 8)
+      if (box.top + top < room.top + 8) top = room.top + 8 - box.top
+    }
+    setPlace((last) => (last.beside === beside && last.top === top ? last : { beside, top }))
+  }, [pickerRef])
+  return (
+    <div
+      ref={pickerRef}
+      className={cx("absolute z-20", place.beside ? "left-[calc(100%+14px)]" : "right-0")}
+      style={{ top: place.top }}
+    >
+      {children}
     </div>
   )
 }
@@ -4924,26 +6350,27 @@ function AnswerActivity({
   asking,
   steps,
   others,
-  workspaceName,
 }: {
   asking: Asking
   steps: AnswerStep[]
   /** Switchboard: how many other answers are on their way too. */
   others: number
-  workspaceName?: string
 }) {
   const seconds = useSeconds(asking.startedAt)
   const shown = steps.slice(-4)
   const reads = steps.filter((step) => step.kind === "read").length
   const done = steps.filter((step) => step.kind !== "think").length
   return (
-    <div className="mx-auto mb-2 w-[27rem] max-w-[calc(100vw-6rem)] rounded-xl border border-gray-200 bg-white p-3 text-xs shadow-lg dark:border-gray-800 dark:bg-gray-950">
+    <div
+      data-canvas-overlay
+      className="mx-auto mb-2 w-[27rem] max-w-[calc(100vw-6rem)] rounded-xl border border-gray-200 bg-white p-3 text-xs shadow-lg dark:border-gray-800 dark:bg-gray-950"
+    >
       <p className="mb-1.5 flex items-center gap-2 font-semibold text-gray-900 dark:text-gray-50">
         <RiSparkling2Fill className="size-3.5 shrink-0 text-violet-500" aria-hidden="true" />
         <span className="truncate">
           {asking.mode === "condense"
             ? `${asking.name} is condensing ${asking.selectedIds?.length ?? 0} nodes`
-            : asking.cli ? `${asking.name} is reading ${workspaceName ?? "the workspace"}` : `${asking.name} is looking it up`}
+            : asking.cli ? `${asking.name} is reading ${asking.workspace ?? "the workspace"}` : `${asking.name} is looking it up`}
         </span>
         <span className="ml-auto font-medium tabular-nums text-gray-500" aria-hidden="true">
           {seconds}s
@@ -4997,7 +6424,7 @@ function AnswerActivity({
         {asking.mode === "condense"
           ? "The original discussion stays until its summary is ready. You can undo the replacement."
           : !asking.cli
-          ? "It sees only the diagram, and the web when the question needs it."
+          ? "It sees only the whiteboard, and the web when the question needs it."
           : asking.web
             ? "Read-only: it can open and search files, never change them, and look things up on the web."
             : "Read-only: it can open and search files, never change them."}
@@ -5006,16 +6433,19 @@ function AnswerActivity({
   )
 }
 
-// Switchboard: why the last answer didn't come, with the one thing that fixes it.
+// Switchboard: why the last answer didn't come, with the one thing that fixes it —
+// and for a CLI with no workspace to read, Choose workspace….
 function AnswerFailureLine({
   failure,
   onOpenSettings,
   onOpenTerminal,
+  onChooseWorkspace,
   onDismiss,
 }: {
   failure: AnswerFailure
   onOpenSettings?: () => void
   onOpenTerminal?: () => void
+  onChooseWorkspace?: () => void
   onDismiss: () => void
 }) {
   const action =
@@ -5027,7 +6457,9 @@ function AnswerFailureLine({
         ? onOpenSettings
           ? { label: "Settings", run: onOpenSettings }
           : null
-        : null
+        : failure.code === "no-workspace" && onChooseWorkspace
+          ? { label: "Choose workspace…", run: onChooseWorkspace }
+          : null
   return (
     <span className="flex max-w-[34rem] items-center gap-1.5 px-1 text-red-600 dark:text-red-400" title={failure.message}>
       <RiErrorWarningLine className="size-3.5 shrink-0" aria-hidden="true" />
@@ -5054,6 +6486,56 @@ function AnswerFailureLine({
         <RiCloseLine className="size-3.5" aria-hidden="true" />
       </button>
     </span>
+  )
+}
+
+/**
+ * Switchboard: the Workspace picker over the strip — Choose workspace… when the box
+ * that asked is no longer there to open the who-answers menu over. Closes on a pick,
+ * a click anywhere else, or Escape (the picker's own).
+ */
+function StripPicker({
+  choices,
+  onOpen,
+  current,
+  status,
+  onPick,
+  onClose,
+}: {
+  choices: WorkspaceChoices | null
+  /** As it opens: the rail as it is now. */
+  onOpen: () => void
+  current: string | null
+  status: WorkspaceStatus
+  onPick: (wsId: string) => void
+  onClose: () => void
+}) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    onOpen()
+  }, [onOpen])
+  useEffect(() => {
+    function onPointerDown(event: PointerEvent) {
+      if (event.target instanceof globalThis.Node && ref.current?.contains(event.target)) return
+      onClose()
+    }
+    document.addEventListener("pointerdown", onPointerDown, true)
+    return () => document.removeEventListener("pointerdown", onPointerDown, true)
+  }, [onClose])
+  return (
+    <div ref={ref} data-flow-popover className="mx-auto mb-2 w-fit">
+      <WorkspacePicker
+        choices={choices}
+        current={current}
+        currentLabel="This whiteboard's workspace"
+        title="Workspace for this whiteboard"
+        footer="Applies to the next answers on this whiteboard. Boxes already answered keep their tag."
+        tone="dark"
+        status={status}
+        onPick={onPick}
+        onClose={onClose}
+      />
+    </div>
   )
 }
 
@@ -5359,122 +6841,168 @@ function ToolRail({
   // The shape menu is open while the shape tool is out, so the box it will
   // place can be swapped before clicking the canvas.
   const [helpOpen, setHelpOpen] = useState(false)
+  // Switchboard: how much height the canvas gives the rail. Only a change of it
+  // re-renders the rail; a Grid square or a short window is where it runs short.
+  const fit = railFit(useStore((state) => state.height))
+  // In two columns, what a tool opens sits beside the whole rail (its wrapper is
+  // not positioned then) rather than over the tool in the next column.
+  const anchor = fit === "columns" ? undefined : "relative"
 
   return (
-    <div
-      role="toolbar"
-      aria-label="Tools"
-      aria-orientation="vertical"
-      className="flex flex-col items-center gap-1 rounded-xl bg-gray-900 p-1 shadow-xl ring-1 ring-black/10 dark:bg-gray-800 dark:ring-white/10"
-    >
-      <RailButton label="Select" shortcut="V" active={tool === "select"} onClick={() => onTool("select")}>
-        <RiCursorLine className="size-4" aria-hidden="true" />
-      </RailButton>
-      <RailButton label="Pan" shortcut="H" active={tool === "hand"} onClick={() => onTool("hand")}>
-        <RiHand className="size-4" aria-hidden="true" />
-      </RailButton>
-
-      <RailDivider />
-
-      <div className="relative">
-        <RailButton
-          label="Shape"
-          shortcut="R"
-          active={tool === "shape"}
-          onClick={() => onTool(tool === "shape" ? "select" : "shape")}
-          drag={shape}
-          // Its menu sits where the tip would.
-          tip={tool !== "shape"}
-        >
-          <ShapeGlyph shape={shape} className="h-4 w-5" />
+    <RailFitContext.Provider value={fit}>
+      <div
+        role="toolbar"
+        aria-label="Tools"
+        aria-orientation="vertical"
+        data-rail-fit={fit}
+        className={cx(
+          "relative rounded-xl bg-gray-900 shadow-xl ring-1 ring-black/10 dark:bg-gray-800 dark:ring-white/10",
+          fit === "full" && "flex flex-col items-center gap-1 p-1",
+          fit === "compact" && "flex flex-col items-center gap-0.5 p-0.5",
+          fit === "columns" && "grid grid-cols-2 place-items-center gap-0.5 p-0.5",
+        )}
+      >
+        <RailButton label="Select" shortcut="V" active={tool === "select"} onClick={() => onTool("select")}>
+          <RiCursorLine className="size-4" aria-hidden="true" />
         </RailButton>
-        {tool === "shape" ? (
-          <div
-            role="radiogroup"
-            aria-label="Which shape"
-            className="absolute left-full top-1/2 ml-3 flex -translate-y-1/2 flex-col gap-0.5 rounded-xl bg-gray-900 p-1.5 shadow-xl ring-1 ring-black/10 dark:bg-gray-800 dark:ring-white/10"
+        <RailButton label="Pan" shortcut="H" active={tool === "hand"} onClick={() => onTool("hand")}>
+          <RiHand className="size-4" aria-hidden="true" />
+        </RailButton>
+
+        <RailDivider />
+
+        <div className={anchor}>
+          <RailButton
+            label="Shape"
+            shortcut="R"
+            active={tool === "shape"}
+            onClick={() => onTool(tool === "shape" ? "select" : "shape")}
+            drag={shape}
+            // Its menu sits where the tip would.
+            tip={tool !== "shape"}
           >
-            {PALETTE.map((item) => (
-              <button
-                key={item.shape}
-                type="button"
-                role="radio"
-                aria-checked={shape === item.shape}
-                draggable
-                onDragStart={(event) => {
-                  event.dataTransfer.setData(DRAG_MIME, item.shape)
-                  event.dataTransfer.effectAllowed = "copy"
-                }}
-                onClick={() => onShape(item.shape)}
-                title="Click the canvas to place it, or drag it there"
-                className={cx(
-                  "flex items-center gap-2.5 whitespace-nowrap rounded-lg py-1.5 pl-2 pr-3 text-left text-sm transition-colors",
-                  shape === item.shape
-                    ? "bg-white/15 text-white"
-                    : "text-gray-300 hover:bg-white/10 hover:text-white",
-                  focusRing,
-                )}
-              >
-                <ShapeGlyph shape={item.shape} />
-                {item.name}
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </div>
-      <RailButton label="Sticky note" shortcut="S" active={tool === "note"} onClick={() => onTool(tool === "note" ? "select" : "note")} drag="note">
-        <RiStickyNoteLine className="size-4" aria-hidden="true" />
-      </RailButton>
-      <RailButton label="Text" shortcut="T" active={tool === "text"} onClick={() => onTool(tool === "text" ? "select" : "text")} drag="text">
-        <RiText className="size-4" aria-hidden="true" />
-      </RailButton>
-      <RailButton label="Document" active={tool === "document"} onClick={() => onTool(tool === "document" ? "select" : "document")} drag="document">
-        <RiFileTextLine className="size-4" aria-hidden="true" />
-      </RailButton>
-      <div className="relative">
-        <RailButton
-          label={uploading ? "Uploading…" : "Image"}
-          shortcut="I"
-          active={imageMenu}
-          expanded={imageMenu}
-          onClick={() => onImageMenu(!imageMenu)}
-          // Its menu sits where the tip would.
-          tip={!imageMenu}
-        >
-          {uploading ? (
-            <RiLoader4Line className="size-4 animate-spin" aria-hidden="true" />
-          ) : (
-            <RiImageAddLine className="size-4" aria-hidden="true" />
-          )}
+            <ShapeGlyph shape={shape} className="h-4 w-5" />
+          </RailButton>
+          {tool === "shape" ? (
+            <div
+              role="radiogroup"
+              aria-label="Which shape"
+              data-canvas-overlay
+              className="absolute left-full top-1/2 ml-3 flex -translate-y-1/2 flex-col gap-0.5 rounded-xl bg-gray-900 p-1.5 shadow-xl ring-1 ring-black/10 dark:bg-gray-800 dark:ring-white/10"
+            >
+              {PALETTE.map((item) => (
+                <button
+                  key={item.shape}
+                  type="button"
+                  role="radio"
+                  aria-checked={shape === item.shape}
+                  draggable
+                  onDragStart={(event) => {
+                    event.dataTransfer.setData(DRAG_MIME, item.shape)
+                    event.dataTransfer.effectAllowed = "copy"
+                  }}
+                  onClick={() => onShape(item.shape)}
+                  title="Click the canvas to place it, or drag it there"
+                  className={cx(
+                    "flex items-center gap-2.5 whitespace-nowrap rounded-lg py-1.5 pl-2 pr-3 text-left text-sm transition-colors",
+                    shape === item.shape
+                      ? "bg-white/15 text-white"
+                      : "text-gray-300 hover:bg-white/10 hover:text-white",
+                    focusRing,
+                  )}
+                >
+                  <ShapeGlyph shape={item.shape} />
+                  {item.name}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        <RailButton label="Sticky note" shortcut="S" active={tool === "note"} onClick={() => onTool(tool === "note" ? "select" : "note")} drag="note">
+          <RiStickyNoteLine className="size-4" aria-hidden="true" />
         </RailButton>
-        {imageMenu ? (
-          <ImageMenu
-            onFile={onImageFile}
-            onSearch={onImageSearch}
-            onClose={() => onImageMenu(false)}
-          />
-        ) : null}
-      </div>
-
-      <RailDivider />
-
-      <div className="relative">
-        <RailButton
-          label="Keyboard shortcuts"
-          active={helpOpen}
-          onClick={() => setHelpOpen((open) => !open)}
-          tip={!helpOpen}
-        >
-          <RiKeyboardLine className="size-4" aria-hidden="true" />
+        <RailButton label="Text" shortcut="T" active={tool === "text"} onClick={() => onTool(tool === "text" ? "select" : "text")} drag="text">
+          <RiText className="size-4" aria-hidden="true" />
         </RailButton>
-        {helpOpen ? <ShortcutHelp onClose={() => setHelpOpen(false)} /> : null}
+        <RailButton label="Document" active={tool === "document"} onClick={() => onTool(tool === "document" ? "select" : "document")} drag="document">
+          <RiFileTextLine className="size-4" aria-hidden="true" />
+        </RailButton>
+        <div className={anchor}>
+          <RailButton
+            label={uploading ? "Uploading…" : "Image"}
+            shortcut="I"
+            active={imageMenu}
+            expanded={imageMenu}
+            onClick={() => onImageMenu(!imageMenu)}
+            // Its menu sits where the tip would.
+            tip={!imageMenu}
+          >
+            {uploading ? (
+              <RiLoader4Line className="size-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <RiImageAddLine className="size-4" aria-hidden="true" />
+            )}
+          </RailButton>
+          {imageMenu ? (
+            <ImageMenu
+              onFile={onImageFile}
+              onSearch={onImageSearch}
+              onClose={() => onImageMenu(false)}
+            />
+          ) : null}
+        </div>
+
+        {/* In two columns the image tool and this one share the last row. */}
+        {fit === "columns" ? null : <RailDivider />}
+
+        <div className={anchor}>
+          <RailButton
+            label="Keyboard shortcuts"
+            active={helpOpen}
+            onClick={() => setHelpOpen((open) => !open)}
+            tip={!helpOpen}
+          >
+            <RiKeyboardLine className="size-4" aria-hidden="true" />
+          </RailButton>
+          {helpOpen ? <ShortcutHelp onClose={() => setHelpOpen(false)} /> : null}
+        </div>
       </div>
-    </div>
+    </RailFitContext.Provider>
   )
 }
 
+/**
+ * Switchboard: how the tool rail fits the canvas's height — at full size; with
+ * smaller tools packed closer ("compact"); or, shorter still, in two columns —
+ * rather than running off the top and bottom of a short canvas (a Grid square,
+ * a small window), where its first tools would be out of reach.
+ */
+type RailFit = "full" | "compact" | "columns"
+const RailFitContext = createContext<RailFit>("full")
+// The rail's height in the first two, from the classes above, RailButton's and
+// RailDivider's — 8 tools, 9 gaps, 2 dividers, the padding — with 8px clear above
+// and below. In two columns it is 125px.
+const RAIL_FULL_HEIGHT = 8 * 32 + 9 * 4 + 2 * 5 + 8 + 16
+const RAIL_COMPACT_HEIGHT = 8 * 28 + 9 * 2 + 2 * 1 + 4 + 16
+function railFit(paneHeight: number): RailFit {
+  // Not measured yet: as it always was.
+  if (!(paneHeight > 0) || paneHeight >= RAIL_FULL_HEIGHT) return "full"
+  return paneHeight >= RAIL_COMPACT_HEIGHT ? "compact" : "columns"
+}
+
 function RailDivider() {
-  return <span className="my-0.5 h-px w-5 bg-white/15" aria-hidden="true" />
+  const fit = useContext(RailFitContext)
+  return (
+    <span
+      className={cx(
+        "h-px bg-white/15",
+        fit === "full" && "my-0.5 w-5",
+        fit === "compact" && "w-5",
+        fit === "columns" && "col-span-2 w-10",
+      )}
+      aria-hidden="true"
+    />
+  )
 }
 
 // Switchboard: the image tool's menu, laid out as the shape menu is, to the
@@ -5526,6 +7054,7 @@ function ImageMenu({
       role="group"
       aria-label="Add an image"
       data-flow-popover
+      data-canvas-overlay
       className="absolute left-full top-1/2 ml-3 flex -translate-y-1/2 flex-col gap-0.5 rounded-xl bg-gray-900 p-1.5 shadow-xl ring-1 ring-black/10 dark:bg-gray-800 dark:ring-white/10"
     >
       <ImageMenuItem label="Choose a file…" shortcut="I" onClick={() => done(onFile)}>
@@ -5597,6 +7126,7 @@ function RailButton({
   tip?: boolean
   children: React.ReactNode
 }) {
+  const fit = useContext(RailFitContext)
   return (
     <button
       type="button"
@@ -5614,7 +7144,9 @@ function RailButton({
             }
       }
       className={cx(
-        "group/tool relative flex size-8 items-center justify-center rounded-lg transition-colors",
+        "group/tool relative flex items-center justify-center rounded-lg transition-colors",
+        // Switchboard: a little smaller on a canvas too short for the rail (railFit).
+        fit === "full" ? "size-8" : "size-7",
         // White rather than the brand colour, which for some products is as
         // dark as the toolbar itself.
         active ? "bg-white text-gray-900 shadow-sm" : "text-gray-300 hover:bg-white/10 hover:text-white",
@@ -5681,6 +7213,7 @@ function ShortcutHelp({ onClose }: { onClose: () => void }) {
     <div
       ref={ref}
       data-flow-popover
+      data-canvas-overlay
       className="absolute bottom-0 left-full z-20 ml-3 w-64 rounded-xl bg-gray-900 p-3 text-xs text-gray-300 shadow-xl ring-1 ring-black/10 dark:bg-gray-800 dark:ring-white/10"
     >
       <p className="mb-2 font-semibold text-white">Shortcuts</p>

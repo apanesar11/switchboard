@@ -1,7 +1,9 @@
-// The admin's lib/diagrams/actions.ts, with the same names and the same answers, over
-// Switchboard's bridge instead of server actions and Postgres. `productId` is the
-// workspace id (lib/products.ts says why); the files live in
-// ~/.switchboard/diagrams/ (src/main/diagrams.js).
+// The admin's lib/diagrams/actions.ts, over Switchboard's bridge instead of server
+// actions and Postgres. Switchboard: a whiteboard is addressed by its own id alone —
+// it lives in a folder the user made, not under a product or a workspace — and the
+// files are in ~/.switchboard/whiteboards/ (src/main/whiteboards.js). The admin's
+// single "update" is split in two: autosave writes the spec only and Rename the name
+// only, so neither can carry a stale copy of the other back over a newer one.
 //
 // The admin's actions validate on the server, the only place it trusts. Here the
 // renderer and main are one app on one Mac, so the spec is validated HERE, with the
@@ -9,86 +11,181 @@
 // out, as getDiagram does there, so a file edited by hand into something the canvas
 // can't draw is reported rather than drawn.
 
-import { call } from "../bridge"
-import type { DiagramDetail, DiagramSummary, ServerActionResult } from "./types"
+import {
+  call,
+  type WhiteboardDetail,
+  type WhiteboardSummary,
+  type WhiteboardsIndex,
+  type WorkspaceChoices,
+} from "../bridge"
+import type { DiagramSpec, ServerActionResult } from "./types"
 import { isUuid, normalizeDiagramName, parseDiagramSpec } from "./validate"
 
-export async function listDiagrams(input: {
-  productId: string
-}): Promise<ServerActionResult<DiagramSummary[]>> {
-  return call("diagramsList", input.productId)
+const INVALID_ID = "Invalid whiteboard id"
+
+/**
+ * A whiteboard as the page opens it. A spec that no longer validates is kept as
+ * `specError` rather than failing the whole fetch: the canvas says what is wrong with
+ * it, and the board can still be renamed, moved, archived or deleted.
+ */
+export type OpenedWhiteboard = WhiteboardSummary & {
+  spec: DiagramSpec | null
+  specError: string | null
 }
 
-export async function getDiagram(input: {
-  productId: string
+/** A just-written whiteboard with the spec it was written with, validated. */
+export type SavedWhiteboard = WhiteboardSummary & { spec: DiagramSpec }
+
+/** Main's answer when a board's file is gone — told apart from one it can't read. */
+export function isMissingWhiteboard(result: { ok: false; error: string; code?: string }): boolean {
+  return result.code === "not-found" || /not found|no longer exists/i.test(result.error)
+}
+
+/** Only the summary's own fields: main may add a spec, and a list never carries one. */
+function summaryOf(data: WhiteboardSummary): WhiteboardSummary {
+  return {
+    id: data.id,
+    name: data.name,
+    kind: data.kind,
+    folderId: data.folderId ?? null,
+    workspace: data.workspace ?? null,
+    createdAt: data.createdAt,
+    updatedAt: data.updatedAt,
+    archivedAt: data.archivedAt ?? null,
+    boxes: typeof data.boxes === "number" ? data.boxes : 0,
+    reads: Array.isArray(data.reads) ? data.reads : [],
+    thumb: Array.isArray(data.thumb) ? data.thumb : [],
+  }
+}
+
+function folderIdProblem(folderId: string | null): string | null {
+  return folderId === null || isUuid(folderId) ? null : "Invalid folder id"
+}
+
+export async function listWhiteboards(): Promise<ServerActionResult<WhiteboardsIndex>> {
+  return call("whiteboardsList")
+}
+
+export async function getWhiteboard(input: {
   id: string
-}): Promise<ServerActionResult<DiagramDetail>> {
-  if (!isUuid(input.id)) return { ok: false, error: "Invalid diagram id" }
-  const result = await call("diagramsGet", input.productId, input.id)
+}): Promise<ServerActionResult<OpenedWhiteboard> & { code?: string }> {
+  if (!isUuid(input.id)) return { ok: false, error: INVALID_ID, code: "not-found" }
+  const result = await call("whiteboardsGet", input.id)
   if (!result.ok) return result
   const parsed = parseDiagramSpec(result.data.spec)
-  if (!parsed.ok) {
-    return { ok: false, error: `This diagram's spec is no longer valid — ${parsed.error}` }
+  return {
+    ok: true,
+    data: parsed.ok
+      ? { ...summaryOf(result.data), spec: parsed.value, specError: null }
+      : {
+          ...summaryOf(result.data),
+          spec: null,
+          specError: `This whiteboard's spec is no longer valid — ${parsed.error}`,
+        },
   }
-  return { ok: true, data: { ...result.data, spec: parsed.value } }
 }
 
-async function write(
-  productId: string,
-  name: string,
-  spec: unknown,
-  id: string | null,
-): Promise<ServerActionResult<DiagramDetail>> {
-  const cleanName = normalizeDiagramName(name)
+export async function createWhiteboard(input: {
+  folderId: string | null
+  name: string
+  spec: unknown
+  /** Left out, main gives the board the workspace ✦ Answer used last. */
+  workspace?: string | null
+}): Promise<ServerActionResult<SavedWhiteboard>> {
+  const folder = folderIdProblem(input.folderId)
+  if (folder) return { ok: false, error: folder }
+  const cleanName = normalizeDiagramName(input.name)
   if (!cleanName.ok) return { ok: false, error: cleanName.error }
-  const parsed = parseDiagramSpec(spec)
+  const parsed = parseDiagramSpec(input.spec)
   if (!parsed.ok) return { ok: false, error: parsed.error }
-  const result =
-    id === null
-      ? await call("diagramsCreate", productId, cleanName.value, parsed.value)
-      : await call("diagramsUpdate", productId, id, cleanName.value, parsed.value)
+  const result = await call("whiteboardsCreate", {
+    folderId: input.folderId,
+    name: cleanName.value,
+    spec: parsed.value,
+    ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
+  })
   if (!result.ok) return result
-  return { ok: true, data: { ...result.data, spec: parsed.value } }
+  return { ok: true, data: { ...summaryOf(result.data), spec: parsed.value } }
 }
 
-export async function createDiagram(input: {
-  productId: string
-  name: string
+/** The editor's autosave: the spec only. */
+export async function saveWhiteboardSpec(input: {
+  id: string
   spec: unknown
-}): Promise<ServerActionResult<DiagramDetail>> {
-  return write(input.productId, input.name, input.spec, null)
+}): Promise<ServerActionResult<SavedWhiteboard>> {
+  if (!isUuid(input.id)) return { ok: false, error: INVALID_ID }
+  const parsed = parseDiagramSpec(input.spec)
+  if (!parsed.ok) return { ok: false, error: parsed.error }
+  const result = await call("whiteboardsSaveSpec", input.id, parsed.value)
+  if (!result.ok) return result
+  return { ok: true, data: { ...summaryOf(result.data), spec: parsed.value } }
 }
 
-export async function updateDiagram(input: {
-  productId: string
+/** The name only — the drawing on disk is left exactly as the last autosave wrote it. */
+export async function renameWhiteboard(input: {
   id: string
   name: string
-  spec: unknown
-}): Promise<ServerActionResult<DiagramDetail>> {
-  if (!isUuid(input.id)) return { ok: false, error: "Invalid diagram id" }
-  return write(input.productId, input.name, input.spec, input.id)
+}): Promise<ServerActionResult<WhiteboardSummary>> {
+  if (!isUuid(input.id)) return { ok: false, error: INVALID_ID }
+  const cleanName = normalizeDiagramName(input.name)
+  if (!cleanName.ok) return { ok: false, error: cleanName.error }
+  const result = await call("whiteboardsRename", input.id, cleanName.value)
+  return result.ok ? { ok: true, data: summaryOf(result.data) } : result
 }
 
-export async function archiveDiagram(input: {
-  productId: string
+/** The workspace ✦ Answer reads on this board, or null for none. */
+export async function setWhiteboardWorkspace(input: {
   id: string
-}): Promise<ServerActionResult<DiagramSummary>> {
-  if (!isUuid(input.id)) return { ok: false, error: "Invalid diagram id" }
-  return call("diagramsArchive", input.productId, input.id, true)
+  workspace: string | null
+}): Promise<ServerActionResult<WhiteboardSummary>> {
+  if (!isUuid(input.id)) return { ok: false, error: INVALID_ID }
+  const result = await call("whiteboardsSetWorkspace", input.id, input.workspace)
+  return result.ok ? { ok: true, data: summaryOf(result.data) } : result
 }
 
-export async function unarchiveDiagram(input: {
-  productId: string
+export async function moveWhiteboard(input: {
   id: string
-}): Promise<ServerActionResult<DiagramSummary>> {
-  if (!isUuid(input.id)) return { ok: false, error: "Invalid diagram id" }
-  return call("diagramsArchive", input.productId, input.id, false)
+  folderId: string | null
+}): Promise<ServerActionResult<WhiteboardSummary>> {
+  if (!isUuid(input.id)) return { ok: false, error: INVALID_ID }
+  const folder = folderIdProblem(input.folderId)
+  if (folder) return { ok: false, error: folder }
+  const result = await call("whiteboardsMove", input.id, input.folderId)
+  return result.ok ? { ok: true, data: summaryOf(result.data) } : result
 }
 
-export async function deleteDiagram(input: {
-  productId: string
+/** A copy in the same folder, named "X copy", with its own copies of every document. */
+export async function duplicateWhiteboard(input: {
+  id: string
+}): Promise<ServerActionResult<WhiteboardDetail>> {
+  if (!isUuid(input.id)) return { ok: false, error: INVALID_ID }
+  return call("whiteboardsDuplicate", input.id)
+}
+
+export async function archiveWhiteboard(input: {
+  id: string
+}): Promise<ServerActionResult<WhiteboardSummary>> {
+  if (!isUuid(input.id)) return { ok: false, error: INVALID_ID }
+  const result = await call("whiteboardsArchive", input.id, true)
+  return result.ok ? { ok: true, data: summaryOf(result.data) } : result
+}
+
+export async function unarchiveWhiteboard(input: {
+  id: string
+}): Promise<ServerActionResult<WhiteboardSummary>> {
+  if (!isUuid(input.id)) return { ok: false, error: INVALID_ID }
+  const result = await call("whiteboardsArchive", input.id, false)
+  return result.ok ? { ok: true, data: summaryOf(result.data) } : result
+}
+
+export async function deleteWhiteboard(input: {
   id: string
 }): Promise<ServerActionResult<{ id: string }>> {
-  if (!isUuid(input.id)) return { ok: false, error: "Invalid diagram id" }
-  return call("diagramsDelete", input.productId, input.id)
+  if (!isUuid(input.id)) return { ok: false, error: INVALID_ID }
+  return call("whiteboardsDelete", input.id)
+}
+
+/** The rail's workspaces for a picker: recent first, then all of them. */
+export async function listWorkspaceChoices(): Promise<ServerActionResult<WorkspaceChoices>> {
+  return call("whiteboardsWorkspaces")
 }

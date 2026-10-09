@@ -35,10 +35,11 @@ const usage = require('./usage.js');
 // The Editor tab's file access (§4.14) — the in-app editor. Not sb:editor, which is
 // "open this folder in Visual Studio Code" and predates it.
 const editor = require('./editor.js');
-// The Diagrams tab's files (§4.17) — one per diagram, per workspace, outside every repo —
-// and ✦ Answer (§4.18): who answers a box's question, a CLI in the workspace or an API.
-const diagrams = require('./diagrams.js');
-// Google Images beside a diagram (§4.17): the panel's <webview>, its session, and the
+// The Whiteboards screen's files (§4.17) — folders, boards, documents and pictures, beside
+// the config and outside every repo — and ✦ Answer (§4.18): who answers a box's question,
+// a CLI in the whiteboard's workspace or an API.
+const whiteboards = require('./whiteboards.js');
+// Google Images beside a whiteboard (§4.17): the panel's <webview>, its session, and the
 // fetch that turns a picture dragged out of it into bytes saveImage() keeps.
 const images = require('./images.js');
 const answer = require('./answer.js');
@@ -63,19 +64,26 @@ let quitting = false;
 // cleared wherever a failed quit leaves the app running.
 let editorDirty = 0;
 let discardOk = false;
-// A diagram's autosave can still be pending when the window closes. Ask the renderer
+// A whiteboard's autosave can still be pending when the window closes. Ask the renderer
 // to flush it while the page is live, then wait for its acknowledgment.
 let diagramFlush = null;
 let diagramFlushId = 0;
 // Set once the renderer has been asked to flush for a close that is not a quit, so
 // the second pass through 'close' lets the window go.
 let diagramClose = false;
-// How many diagrams hold edits the renderer has not written yet (sb:diagrams:dirty) — 0
-// or 1, one being open at a time. This is usually just the editor's 700 ms autosave in
-// flight, so it is FLUSHED before anything is asked: a close holds for the renderer
-// to write it, and only a diagram that
-// still could not be written by then joins the question.
+// How many whiteboards hold edits the renderer has not written yet (sb:diagrams:dirty) —
+// 0 or 1, as the renderer reports it across every open canvas. This is usually just the
+// editor's 700 ms autosave in flight, so it is FLUSHED before anything is asked: a close
+// holds for the renderer to write it, and only a whiteboard that still could not be
+// written by then joins the question.
 let diagramDirty = 0;
+// The Whiteboards store is migrated (whiteboards.migrate()) before the first window, and
+// every sb:wb:* handler waits for that. Set in the single-instance branch at the bottom:
+// a second instance quits without ever touching the store.
+let whiteboardsReady = null;
+function wbReady() {
+  return whiteboardsReady || Promise.resolve();
+}
 
 process.on('unhandledRejection', reason => {
   console.error('[switchboard] unhandled rejection:', reason);
@@ -279,7 +287,7 @@ function createWindow() {
       preload: path.join(__dirname, '..', 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      // For the Diagrams tab's Google Images panel, and nothing else: 'will-attach-webview'
+      // For a whiteboard's Google Images panel, and nothing else: 'will-attach-webview'
       // below refuses every <webview> but that one, and strips what it may not have.
       webviewTag: true,
     },
@@ -304,7 +312,7 @@ function createWindow() {
       // itself; asking here as well would put the same question up twice.
       return;
     }
-    // Closing WITHOUT quitting — ⌘W, the red button — can interrupt a diagram's
+    // Closing WITHOUT quitting — ⌘W, the red button — can interrupt a whiteboard's
     // autosave. Hold the close for one round trip while the renderer writes it.
     if (!quitting && !diagramClose && diagramDirty > 0) {
       event.preventDefault();
@@ -361,7 +369,7 @@ function createWindow() {
   mainWindow.webContents.on('did-attach-webview', (_event, guest) => {
     images.attachGuest(guest, {
       openExternal,
-      // "Add Image to Diagram": the bundle fetches it (sb:diagrams:fetchImage) and puts it
+      // "Add Image to Whiteboard": the bundle fetches it (sb:diagrams:fetchImage) and puts it
       // in the middle of the view; guestId says which panel it came from.
       offerImage: offer => send('sb:evt:diagramsImageOffer', offer),
       window: () => mainWindow,
@@ -527,7 +535,7 @@ function smokeTest(win) {
       // dev script that ignores SIGHUP survives the same way.  Outside the try/catch on
       // purpose: teardown must run even when the capture failed.  stopEverything() never
       // rejects, and app.exit(0) still guarantees a deterministic exit. Flush the
-      // diagram before teardown while the window is still live.
+      // whiteboard before teardown while the window is still live.
       await flushDiagrams();
       await stopEverything();
       app.exit(0);
@@ -749,7 +757,7 @@ function guestEdit(action) {
  * by SB_SMOKE_MENU goes to it as before. And a crashed renderer cannot answer ⌘W with
  * sb.closeWindow(), so a dead page's window is closed from here; ⌘W is the way out of it.
  *
- * The Diagrams tab's Google Images panel (§4.17) is a third webContents of the same
+ * A whiteboard's Google Images panel (§4.17) is a third webContents of the same
  * kind: a <webview> guest the renderer cannot reach into. While its page has the keyboard
  * Undo, Redo and Cut — and Copy, Paste and Select All, through guestEdit() — run the
  * native command on it, so ⌘V pastes into Google's search box instead of putting copied
@@ -1301,33 +1309,64 @@ handle('sb:code:delete', (id, repoName, filePath) =>
   editor.remove(id, repoName, filePath, { trash: target => shell.trashItem(target) }));
 
 // ---------------------------------------------------------------------------
-// Diagrams (§4.17)
-// The Diagrams tab's flow diagrams, in <config dir>/diagrams/<workspace>/. diagrams.js
-// hashes the workspace id into its folder name, so these pass their arguments
-// through; the bundle has validated a spec before it asks for a write.
+// Whiteboards (§4.17)
+// The Whiteboards screen's folders and boards, in <config dir>/whiteboards/. A board is
+// addressed by its id alone, wherever its folder is; whiteboards.js keeps names unique
+// per folder and answers every write with the board's summary. The bundle has validated
+// a spec before it asks for a write. Each handler waits for the migration that runs
+// before the first window (whiteboardsReady), so nothing reads a half-moved store.
 // ---------------------------------------------------------------------------
 
-handle('sb:diagrams:list', id => diagrams.list(id));
-handle('sb:diagrams:get', (id, diagramId) => diagrams.get(id, diagramId));
-handle('sb:diagrams:create', (id, name, spec) => diagrams.create(id, name, spec));
-handle('sb:diagrams:update', (id, diagramId, name, spec) => diagrams.update(id, diagramId, name, spec));
-handle('sb:diagrams:archive', (id, diagramId, archived) => diagrams.setArchived(id, diagramId, archived));
-handle('sb:diagrams:delete', (id, diagramId) => diagrams.remove(id, diagramId));
-handle('sb:diagrams:createDocument', (id, text) => diagrams.createDocument(id, text));
-handle('sb:diagrams:getDocument', (id, documentId) => diagrams.getDocument(id, documentId));
-handle('sb:diagrams:saveDocument', (id, documentId, text, revision) => diagrams.saveDocument(id, documentId, text, revision));
-handle('sb:diagrams:saveImage', (bytes, type) => diagrams.saveImage(bytes, type));
+/** A sb:wb:* handler: the store's answer, once the migration has had its turn. */
+function handleWb(channel, fn) {
+  handle(channel, async (...args) => {
+    await wbReady();
+    return fn(...args);
+  });
+}
+
+// Every write's { reason, boardId?, folderId? }, for the screens that show the store:
+// the home list, an open board's switcher and breadcrumb, a Grid square's picker.
+whiteboards.onChange(change => send('sb:evt:wbChanged', change));
+
+handleWb('sb:wb:list', () => whiteboards.list());
+handleWb('sb:wb:get', id => whiteboards.get(id));
+handleWb('sb:wb:create', req => whiteboards.create(req));
+handleWb('sb:wb:saveSpec', (id, spec) => whiteboards.saveSpec(id, spec));
+handleWb('sb:wb:rename', (id, name) => whiteboards.rename(id, name));
+handleWb('sb:wb:setWorkspace', (id, wsId) => whiteboards.setWorkspace(id, wsId));
+handleWb('sb:wb:move', (id, folderId) => whiteboards.move(id, folderId));
+handleWb('sb:wb:duplicate', id => whiteboards.duplicate(id));
+handleWb('sb:wb:archive', (id, archived) => whiteboards.setArchived(id, archived));
+handleWb('sb:wb:delete', id => whiteboards.remove(id));
+handleWb('sb:wb:createFolder', name => whiteboards.createFolder(name));
+handleWb('sb:wb:renameFolder', (id, name) => whiteboards.renameFolder(id, name));
+handleWb('sb:wb:deleteFolder', id => whiteboards.removeFolder(id));
+handleWb('sb:wb:dismissNotice', () => whiteboards.dismissNotice());
+handleWb('sb:wb:noteWorkspace', wsId => whiteboards.noteWorkspace(wsId));
+handleWb('sb:wb:workspaces', () => whiteboards.workspaceChoices());
+handleWb('sb:wb:createDocument', text => whiteboards.createDocument(text));
+handleWb('sb:wb:getDocument', id => whiteboards.getDocument(id));
+handleWb('sb:wb:saveDocument', (id, text, revision) => whiteboards.saveDocument(id, text, revision));
+// The screen's Try again, after a migration that stopped part way: it resumes where the
+// last run left off (whiteboards.js says how) and list() then reports how it went.
+handleWb('sb:wb:migrate', () => whiteboards.migrate());
+
+// Pictures, the clipboard, the Google Images fetch and the dirty count keep their
+// sb:diagrams:* channels: they are internal names the bundle mirrors, not anything a
+// user reads.
+handle('sb:diagrams:saveImage', (bytes, type) => whiteboards.saveImage(bytes, type));
 handle('sb:diagrams:getImagePath', async src => {
   // Imported specs can name an HTTPS picture. Keep a local copy before handing
   // its path to a terminal, using the same fetch and storage as a canvas drop.
   if (typeof src === 'string' && /^https:\/\//i.test(src)) {
     const fetched = await images.fetchImage(src);
     if (!fetched.ok) return fetched;
-    const saved = await diagrams.saveImage(fetched.bytes, fetched.type);
+    const saved = await whiteboards.saveImage(fetched.bytes, fetched.type);
     if (!saved.ok) return saved;
     src = saved.src;
   }
-  return diagrams.getImagePath(src);
+  return whiteboards.getImagePath(src);
 });
 
 // The clipboard's picture, for Edit ▸ Paste over a canvas. The same read as
@@ -1348,7 +1387,7 @@ handle('sb:diagrams:clipboardImage', async () => {
 });
 
 // A picture from the Google Images panel, by its address — a drag out of a <webview>
-// carries no File, and "Add Image to Diagram" only the image's URL. Fetched through the
+// carries no File, and "Add Image to Whiteboard" only the image's URL. Fetched through the
 // panel's session and answered as { ok, bytes, type, name } in a type saveImage() keeps,
 // which the bundle then saves like a dropped file. images.js says what it accepts.
 handle('sb:diagrams:fetchImage', (url, referrer) => images.fetchImage(url, referrer));
@@ -1366,8 +1405,10 @@ handle('sb:diagrams:dirty', count => {
 // ---------------------------------------------------------------------------
 // ✦ Answer (§4.18)
 // Who answers a box's question, and the asking. answer.js owns the four providers,
-// the stored choice and the keys; a CLI runs in the workspace's folder, which is
-// resolved HERE from the workspace id — never a path the page hands over.
+// the stored choice and the keys; a CLI runs in the folder of the whiteboard's workspace,
+// which is resolved HERE from the workspace id through the rail's own list
+// (workspaces.lookup) — never a path the page hands over, and never dirOf(), which would
+// take one.
 // ---------------------------------------------------------------------------
 
 /** After any change, every window hears the new status: the menu and Settings agree. */
@@ -1382,11 +1423,17 @@ handle('sb:answer:setKey', async (provider, key) => broadcastAnswer(await answer
 handle('sb:answer:removeKey', async provider => broadcastAnswer(await answer.removeKey(provider)));
 handle('sb:answer:start', async (id, req) => {
   const r = req && typeof req === 'object' ? req : {};
-  const dir = r.wsId ? await workspaces.dirOf(r.wsId) : null;
-  if ((r.provider === 'claude-code' || r.provider === 'codex') && !dir) {
-    return { ok: false, error: `could not find the folder for ${r.wsId || 'this workspace'}` };
+  const where = await answer.resolveAnswerDir(r, wsId => workspaces.lookup(wsId));
+  if (!where.ok) return where;
+  // A CLI about to read a workspace makes it the one used last: the next new whiteboard
+  // starts with it, and it leads the pickers' Recent group. Not awaited — the answer does
+  // not wait on a bookkeeping write.
+  if (where.wsId && r.operation !== 'condense') {
+    whiteboards.noteWorkspace(where.wsId, { last: true }).then(res => {
+      if (!res.ok) console.error('[switchboard] could not remember the workspace:', res.error);
+    });
   }
-  return answer.start(id, Object.assign({}, r, { dir }), step => send('sb:evt:answerStep', id, step));
+  return answer.start(id, Object.assign({}, r, { dir: where.dir }), step => send('sb:evt:answerStep', id, step));
 });
 handle('sb:answer:stop', id => answer.stop(id));
 
@@ -1397,10 +1444,10 @@ handle('sb:diagrams:flushed', id => {
   return { ok: true };
 });
 
-/** Ask the renderer to save its diagram, and wait — but never for long. */
+/** Ask the renderer to save its whiteboards, and wait — but never for long. */
 function flushDiagrams() {
   const win = mainWindow;
-  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return diagrams.settle();
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return whiteboards.settle();
   const id = ++diagramFlushId;
   return new Promise(resolve => {
     const done = () => { diagramFlush = null; clearTimeout(timer); resolve(); };
@@ -1411,7 +1458,7 @@ function flushDiagrams() {
     } catch (_) {
       done();
     }
-  }).then(() => diagrams.settle());
+  }).then(() => whiteboards.settle());
 }
 
 // ⌘W anywhere the Editor does not want it (File ▸ Close is an item now — buildMenu says
@@ -1590,7 +1637,7 @@ handle('sb:editor', dir => new Promise(resolve => {
 // and neither must be skipped because the other threw.
 async function stopEverything() {
   const closeDatabases = databases.close();
-  // A CLI still answering a diagram's box is a process of ours, with children of its
+  // A CLI still answering a whiteboard's box is a process of ours, with children of its
   // own: it goes with the app, on every way out (§4.18).
   answer.stopAll();
   const stopSessions = (async () => {
@@ -1620,9 +1667,10 @@ async function stopEverything() {
   await Promise.all([stopSessions, closeShells, closeDatabases]);
 }
 
-// sbimg://image/<file> — a picture on a diagram, kept on this Mac (diagrams.js). A
+// sbimg://image/<file> — a picture on a whiteboard, kept on this Mac (whiteboards.js). A
 // standard, secure scheme so the page can show it like any image; registered before
-// `ready`, as Electron requires, and served from the images folder and nowhere else.
+// `ready`, as Electron requires, and served from the images folder and nowhere else —
+// whiteboards.imagePath() also finds a picture the migration left in the old tree.
 protocol.registerSchemesAsPrivileged([
   { scheme: 'sbimg', privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ]);
@@ -1631,7 +1679,7 @@ function serveDiagramImage(request) {
   let file = null;
   try {
     const url = new URL(request.url);
-    if (url.host === 'image') file = diagrams.imagePath(decodeURIComponent(url.pathname.replace(/^\/+/, '')));
+    if (url.host === 'image') file = whiteboards.imagePath(decodeURIComponent(url.pathname.replace(/^\/+/, '')));
   } catch (_) { file = null; }
   if (!file) return new Response('not found', { status: 404 });
   return net.fetch(pathToFileURL(file).toString()).catch(() => new Response('not found', { status: 404 }));
@@ -1644,13 +1692,24 @@ if (!app.requestSingleInstanceLock()) {
   // the user's terminal has.  A Dock launch does not get one.
   repairPath();
 
+  // The per-workspace diagrams move into the Whiteboards store once (whiteboards.js says
+  // how), started now so it runs while Electron gets ready. Only the instance that holds
+  // the lock gets here, so two copies of the app can never migrate at once. It never
+  // rejects; a run that stops part way is reported on the Whiteboards screen and resumed
+  // by its Try again or the next launch.
+  whiteboardsReady = whiteboards.migrate().then(result => {
+    if (result && !result.ok) console.error('[switchboard] whiteboards migration stopped:', result.error);
+  }, err => {
+    console.error('[switchboard] whiteboards migration failed:', err);
+  });
+
   app.on('second-instance', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     const cfg = config.load();
     if (cfg.configError) console.error('[switchboard] starting with the default config');
     // Before the window and before any shell: shells.js reads this at spawn, and the
@@ -1669,7 +1728,10 @@ if (!app.requestSingleInstanceLock()) {
     // Before the window: the first answer is usually in hand by the time the renderer
     // asks, so the Grid's gauge is there on the first paint rather than a beat later.
     usage.start();
-    createWindow();
+    // The window waits for the migration: the Whiteboards screen must never draw a store
+    // that is still being filled. `activate` may have opened it meanwhile.
+    await wbReady();
+    if (!BrowserWindow.getAllWindows().length) createWindow();
   });
 
   // macOS: closing the window does not quit the app; the dock icon reopens it.
@@ -1677,8 +1739,12 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform !== 'darwin') app.quit();
   });
 
+  // macOS sends this on launch and on every Dock click. Behind the migration like the
+  // first window, and never a second window when one is already there.
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    wbReady().then(() => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
   });
 
   // Never leave a dev server behind.  Quit is deferred until every session is
@@ -1702,14 +1768,14 @@ if (!app.requestSingleInstanceLock()) {
       await publisher.wait();
       await stopEverything();
       // A publish build can take a minute; flush after it completes while the
-      // renderer is still live so its last diagram edit is saved.
+      // renderer is still live so its last whiteboard edit is saved.
       await flushDiagrams();
       // Again, now: that wait can be a whole publish build, and the window stayed live
       // through it — an edit made meanwhile was never asked about, and neither the second
       // before-quit (`quitting`) nor the window's close would ask. Before applyOnQuit(),
       // so a Cancel keeps the prepared update for the next quit, along with the buffers;
       // the dev servers and shells are already stopped, which a cancelled quit can live with.
-      // A diagram counts only here, after the flush has written it: before it, its count
+      // A whiteboard counts only here, after the flush has written it: before it, its count
       // is the editor's autosave in flight, not something to ask about.
       if (!discardOk && (editorDirty + diagramDirty) > 0 && !confirmDiscard()) {
         quitting = false;

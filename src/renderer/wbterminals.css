@@ -1,0 +1,173 @@
+/* ============================================================================
+   Whiteboard terminals (views/wbterminals.js; mock-up "Whiteboards", screen 4).
+   Floating terminal panels over a whiteboard, the tray of the board's terminals,
+   and the overlays that carry a pinned terminal's live xterm over its node.
+
+   Linked after styles.css and built only from its tokens: the same light-only app,
+   so nothing here declares a colour of its own except the panel shadows, which are
+   the mock-up's. All three layers are children of .dgslab, beside .dgcanvas, so
+   none of this reaches the React canvas and none of the canvas's Tailwind reaches
+   xterm. Their order inside the slab's stacking context: pinned overlays (55) under
+   floating panels (60) under the tray (61); the bundle's portal stays above all of
+   them on <body>.
+   ========================================================================== */
+
+/* ── layers ──────────────────────────────────────────────────────────────── */
+/* Both layers are pass-through: only what is drawn in them takes the pointer, so
+   the canvas stays usable everywhere a terminal is not. */
+.wbterms{position:absolute;inset:0;z-index:60;pointer-events:none}
+/* Sits on the React Flow pane's rectangle (left/top/width/height from the slot's
+   clip), so a pinned terminal half off the canvas is cut at the canvas's edge
+   instead of drawing over the bar. */
+.wbpins{position:absolute;z-index:55;overflow:hidden;pointer-events:none}
+.wbterm,.wbpin,.wbtray{pointer-events:auto;-webkit-app-region:no-drag}
+
+/* ── a floating panel ────────────────────────────────────────────────────── */
+.wbterm{
+  position:absolute;display:flex;flex-direction:column;min-width:0;min-height:0;
+  background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden;
+  box-shadow:0 18px 64px rgba(17,24,39,.15),0 3px 12px rgba(17,24,39,.07);
+}
+.wbterm.front{box-shadow:0 24px 80px rgba(17,24,39,.22),0 3px 12px rgba(17,24,39,.08)}
+.wbterm.moving,.wbterm.moving *{cursor:grabbing}
+
+/* The header is the drag handle. The workspace id is the one thing that must never
+   be cut; the folder and branch give way first. */
+.wbterm-hd{
+  display:flex;align-items:center;gap:8px;flex:none;height:40px;padding:0 10px 0 16px;
+  border-bottom:1px solid var(--line);font-size:var(--fs-xs);font-weight:500;
+  touch-action:none;-webkit-user-select:none;user-select:none;
+}
+.wbterm-hd > .ic{color:var(--link)}
+.wbterm-ws{flex:none;max-width:45%;font:600 var(--fs-xs) var(--mono);color:var(--ink);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* "<folder> · <branch>": the pair gives way as one, and inside it the folder goes
+   first — from its START, so the end of the path (the workspace's own folder) stays
+   in view; the script wraps it in left-to-right marks, which keep its slashes in
+   order. The branch keeps its whole width until the folder has gone, then ellipsizes
+   at the pair's edge. */
+.wbterm-where{display:flex;align-items:baseline;gap:4px;flex:0 1 auto;min-width:0;overflow:hidden;
+  color:var(--sec);font-weight:400;white-space:nowrap}
+.wbterm-path{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}
+.wbterm-branch{flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.wbterm-path[hidden],.wbterm-branch[hidden]{display:none}
+.wbterm-hd .dot{margin-left:2px}
+/* .dot's own display would beat the hidden attribute: no status, no dot (as the rail). */
+.wbterm-hd .dot[hidden],.wbchip .dot[hidden]{display:none}
+.wbterm-hd .sp{min-width:4px}
+.wbterm-ctl{display:flex;align-items:center;gap:2px;flex:none}
+/* Blue like the header's terminal glyph, as the mock-up draws them. */
+.wbterm-btn{
+  display:inline-flex;align-items:center;justify-content:center;flex:none;
+  width:24px;height:24px;border-radius:6px;color:var(--link);
+}
+.wbterm-btn:hover{background:var(--tint-2)}
+.wbterm-btn:active{background:var(--tint-3)}
+.wbterm-btn:focus-visible{border-radius:6px}
+.wbterm-btn[disabled]{opacity:.4;pointer-events:none}
+/* A glyph this build's icons.js does not have falls back to a word or a sign. */
+.wbterm .ic.txt,.wbtray .ic.txt{font-size:var(--fs-micro);font-weight:600;line-height:1}
+
+/* The ONE element views/terminal.js places the xterm into. It moves between the
+   floating panel and the pinned overlay; everything in it is styled the same in both
+   except the inset, which a pinned terminal scales with the zoom. */
+.wbterm-body{position:relative;display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;
+  overflow:hidden;background:var(--term-bg)}
+.wbterm-body > .term{margin:0;border-radius:0;box-shadow:none!important}
+/* The inset lives on .xterm, never on .term: FitAddon reads it there (styles.css,
+   terminal block). */
+.wbterm .wbterm-body .xterm{padding:12px 16px}
+.wbterm-body > .exit{margin:0;border-radius:0;height:32px}
+
+/* Where the terminal would be while the Grid, the Terminal tab or another board has
+   it: one sentence, and Show here when it can be taken back. */
+.wbterm-standin{
+  flex:1;display:flex;align-items:center;justify-content:center;min-height:0;
+  padding:14px 18px;background:var(--term-bg);color:var(--t-dim);
+  font:var(--fs-base)/var(--lh) var(--ui);text-align:center;white-space:normal;
+}
+.wbterm-standin .stack{display:flex;flex-direction:column;align-items:center;gap:10px;max-width:40ch}
+
+/* Resize from any edge or corner. Thin strips over the panel's border, corners a
+   little larger so they are easy to find; the grip is only a hint, as in the
+   mock-up. The left edge is the one the old panel had, so it keeps its hover tint. */
+.wbterm-rz{position:absolute;z-index:3;touch-action:none}
+.wbterm-rz[data-edge="n"]{top:-1px;left:10px;right:10px;height:6px;cursor:ns-resize}
+.wbterm-rz[data-edge="s"]{bottom:-1px;left:10px;right:10px;height:6px;cursor:ns-resize}
+.wbterm-rz[data-edge="e"]{right:-1px;top:10px;bottom:10px;width:6px;cursor:ew-resize}
+.wbterm-rz[data-edge="w"]{left:-1px;top:10px;bottom:10px;width:6px;cursor:ew-resize}
+.wbterm-rz[data-edge="nw"]{top:-1px;left:-1px;width:12px;height:12px;cursor:nwse-resize}
+.wbterm-rz[data-edge="se"]{bottom:-1px;right:-1px;width:14px;height:14px;cursor:nwse-resize}
+.wbterm-rz[data-edge="ne"]{top:-1px;right:-1px;width:12px;height:12px;cursor:nesw-resize}
+.wbterm-rz[data-edge="sw"]{bottom:-1px;left:-1px;width:12px;height:12px;cursor:nesw-resize}
+.wbterm-rz[data-edge="e"]:hover,.wbterm-rz[data-edge="w"]:hover,
+.wbterm-rz[data-edge="n"]:hover,.wbterm-rz[data-edge="s"]:hover{background:var(--link);opacity:.25}
+.wbterm.sizing .wbterm-rz:hover{background:none}
+.wbterm-grip{position:absolute;z-index:2;right:5px;bottom:5px;width:10px;height:10px;pointer-events:none;
+  border-right:1.5px solid rgba(255,255,255,.35);border-bottom:1.5px solid rgba(255,255,255,.35);
+  border-radius:0 0 3px 0}
+:root[data-term-theme="light"] .wbterm-grip{border-color:rgba(0,0,0,.25)}
+/* Above the exit footer the grip would sit on the red or grey bar. */
+.wbterm-body:has(> .exit) ~ .wbterm-grip{display:none}
+
+/* ── a pinned terminal's overlay ─────────────────────────────────────────── */
+/* Laid over the node's dark body with integer left/top/width/height and no
+   transform, so xterm's text stays crisp and its mouse coordinates true. --wbz is
+   the rendered font over the base 12.5px: the inset scales with the zoom like the
+   text does, and at the zoom a terminal was pinned at it is the floating panel's
+   12px 16px exactly — with the node laid out so its body is the panel's body, pinning
+   moves no text and changes no cols/rows. FitAddon reads that inset, so it stays on
+   .xterm. The canvas's own chrome and any pinned node above this one are cut out of
+   it with clip-path (views/wbterminals.js, clipPin). */
+.wbpin{position:absolute;overflow:hidden;background:var(--term-bg);border-radius:0 0 6px 6px;--wbz:1}
+.wbpin > .wbterm-body{position:absolute;inset:0}
+.wbpin .wbterm-body .xterm{padding:calc(var(--wbz) * 12px) calc(var(--wbz) * 16px)}
+.wbpin .wbterm-body > .exit{height:calc(var(--wbz) * 28px);min-height:20px;font-size:var(--fs-micro)}
+.wbpin .wbterm-standin,.wbpin .term.blank{padding:10px;font-size:var(--fs-sm)}
+
+/* ── the tray ────────────────────────────────────────────────────────────── */
+.wbtray{
+  position:absolute;right:16px;bottom:16px;z-index:61;
+  display:flex;align-items:center;gap:6px;max-width:calc(100% - 32px);height:40px;padding:0 8px 0 12px;
+  border-radius:12px;background:var(--surface);border:1px solid var(--edge-2);
+  box-shadow:0 6px 24px rgba(0,0,0,.12);font-size:var(--fs-xs);overflow:hidden;
+}
+.wbtray[hidden]{display:none}
+/* The chips scroll sideways inside the tray (a trackpad, or Tab to one); the label,
+   Tile and + around them never do. */
+/* The padding keeps a focused chip's ring inside the scroller, which clips it. */
+.wbtray-chips{display:flex;align-items:center;gap:6px;flex:0 1 auto;min-width:0;padding:4px 3px;margin:0 -3px;
+  overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.wbtray-chips::-webkit-scrollbar{display:none}
+/* More chips than room: the last one fades out at the edge, so it reads as "more this
+   way" rather than as a chip cut in half. */
+.wbtray.scrolls .wbtray-chips{-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 20px),transparent)}
+/* Squeezed beside the undo strip (fitTray), the word goes before any chip does. */
+.wbtray.tight .wbtray-word{display:none}
+.wbtray.tight .wbtray-lbl{margin-right:0}
+.wbtray-lbl{display:inline-flex;align-items:center;gap:6px;flex:none;margin-right:4px;
+  color:var(--ink-3);font-weight:500}
+.wbtray-lbl .ic{color:var(--link)}
+.wbchip{
+  display:inline-flex;align-items:center;gap:6px;flex:none;height:26px;padding:0 10px;
+  border-radius:8px;background:var(--fill);border:1px solid transparent;
+  font:500 var(--fs-xs) var(--mono);color:var(--ink);white-space:nowrap;
+}
+.wbchip:hover{background:var(--fill-2)}
+.wbchip:focus-visible{border-radius:8px}
+.wbchip.on{background:var(--sel)}
+.wbchip.on:hover{background:var(--sel-hover)}
+.wbchip.min{background:transparent;border:1px dashed var(--edge);color:var(--ink-3)}
+.wbchip.min:hover{background:var(--tint-2);color:var(--ink)}
+.wbchip .ic{color:var(--chev)}
+.wbchip.pin .ic{color:var(--ink-3)}
+.wbchip-ws{max-width:16ch;overflow:hidden;text-overflow:ellipsis}
+.wbtray .ib{flex:none;margin-left:4px}
+.wbtray .ib + .ib{margin-left:0}
+
+/* ── the canvas's zoom controls ──────────────────────────────────────────── */
+/* React Flow's Controls and the tray both belong in the slab's bottom-right corner.
+   While the tray shows, the controls stand on top of it — its 16px margin, its 40px
+   and an 8px gap — so zoom in, zoom out and fit view stay in reach; tile() keeps the
+   panels above them. */
+.dgslab:has(> .wbtray:not([hidden])) .react-flow__controls{margin-bottom:64px}

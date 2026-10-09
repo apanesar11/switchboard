@@ -1,11 +1,10 @@
 // The admin's lib/diagrams/upload.ts for Switchboard. A picture dropped, pasted or
-// picked onto a diagram is kept on this Mac rather than in Vercel Blob: main stores
-// the bytes once, by content, in ~/.switchboard/diagrams/images/, and the image node
+// picked onto a whiteboard is kept on this Mac rather than in Vercel Blob: main stores
+// the bytes once, by content, in ~/.switchboard/whiteboards/images/, and the image node
 // points at it as sbimg://image/<file> — a scheme index.js serves from that folder
-// and nothing else (src/main/diagrams.js). The checks and the sizing are the admin's.
+// and nothing else (src/main/whiteboards.js). The checks and the sizing are the admin's.
 
 import { call } from "../bridge"
-import type { ProductId } from "@/lib/products"
 
 // lib/social/constants.ts in the admin.
 export const ALLOWED_IMAGE_MIME = ["image/jpeg", "image/png", "image/webp"] as const
@@ -15,7 +14,7 @@ function isImageMime(mime: string): boolean {
   return (ALLOWED_IMAGE_MIME as readonly string[]).includes(mime)
 }
 
-/** Why `file` can't go on a diagram, or null when it can. */
+/** Why `file` can't go on a whiteboard, or null when it can. */
 export function diagramImageProblem(file: File): string | null {
   if (!isImageMime(file.type)) {
     return `${file.name || "That file"} isn't a PNG, JPEG or WebP image`
@@ -26,11 +25,11 @@ export function diagramImageProblem(file: File): string | null {
   return null
 }
 
+// Switchboard: no second argument. The admin uploads into a per-product blob folder;
+// pictures here are shared by every whiteboard — stored by content, so the same one is
+// never kept twice, and a board moved to another folder keeps every picture it shows.
 export async function uploadDiagramImage(
   file: File,
-  // The admin's per-product blob folder. Pictures here are shared by every workspace:
-  // they are stored by content, so the same one is never kept twice.
-  _productId: ProductId,
   abortSignal?: AbortSignal,
 ): Promise<string> {
   const problem = diagramImageProblem(file)
@@ -73,7 +72,7 @@ export async function imageDisplaySize(
 /**
  * What is on the clipboard as a picture file, or null. Edit ▸ Paste is a menu item in
  * Switchboard — the keystroke never reaches the page as a paste event — so a
- * screenshot pasted onto the canvas is fetched from main instead (views/diagrams.js).
+ * screenshot pasted onto the canvas is fetched from main instead (views/whiteboards.js).
  */
 export async function clipboardImageFile(): Promise<File | null> {
   const result = await call("diagramsClipboardImage")

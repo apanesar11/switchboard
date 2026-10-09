@@ -17,6 +17,9 @@
 //
 // The feature is product-scoped: every product gets its own diagrams, exactly
 // like mockups.
+// Switchboard: whiteboards live in one store, apart from any workspace; a box an
+// answer wrote names the workspace it read (`answeredIn`), and a terminal pinned
+// to the board is a node of its own ("terminal"), with its workspace and size.
 
 export type ServerActionResult<T> =
   | { ok: true; data: T }
@@ -40,9 +43,12 @@ export type DiagramSpec = FlowSpec
 // ─── flow ───
 
 // What a node is drawn as. The first four are boxes: "diamond" is the
-// decision, "pill" the start/end terminal, "rounded"/"box" everything else.
+// decision, "pill" the start/end of a flow, "rounded"/"box" everything else.
 // The rest aren't boxes at all — a sticky "note", free-floating "text" with
 // no outline, and an "image" (which needs `src`).
+// Switchboard: and a "terminal" — a workspace's live terminal pinned to the
+// whiteboard (it needs `workspace`). Only the editor makes one; it is never
+// asked of an author, and no answer, condense or copy ever writes one.
 export const FLOW_SHAPES = [
   "box",
   "rounded",
@@ -52,6 +58,7 @@ export const FLOW_SHAPES = [
   "text",
   "image",
   "document",
+  "terminal",
 ] as const
 
 export type FlowShape = (typeof FLOW_SHAPES)[number]
@@ -70,8 +77,9 @@ export function isFlowBoxShape(shape: FlowShape): shape is FlowBoxShape {
 /**
  * The shapes sized by hand in the editor, which keep that size in `size`.
  * A box is always as wide as every other box and as tall as its text.
+ * Switchboard: a pinned terminal is sized by hand too.
  */
-export const FLOW_SIZED_SHAPES = ["note", "text", "image"] as const
+export const FLOW_SIZED_SHAPES = ["note", "text", "image", "terminal"] as const
 
 export function isFlowSizedShape(shape: FlowShape): boolean {
   return (FLOW_SIZED_SHAPES as readonly FlowShape[]).includes(shape)
@@ -158,6 +166,13 @@ export type FlowNodeSpec = {
    */
   ai?: boolean
   /**
+   * Switchboard: the workspace a CLI answer read to write this box — a rail
+   * workspace id, drawn as a small tag under the box. Kept only while `ai` is
+   * true: it says whose words these are, so it goes when they stop being the
+   * AI's. Absent for an answer from an API, which reads no workspace.
+   */
+  answeredIn?: string
+  /**
    * Switchboard: detached from its branch, by the editor's toolbar. A box normally
    * drags what hangs off it along, and settles into the branch it hangs off when
    * let go; a detached one is in no branch — it moves on its own, nothing it is
@@ -181,8 +196,22 @@ export type FlowNodeSpec = {
    * for those shapes. A note grows past it to fit its text, and a text uses
    * only the width — its height always follows its lines. Absent means the
    * default size (a note, an image) or as wide as the words (a text).
+   * Switchboard: a terminal's outer size, header included.
    */
   size?: FlowSize
+  /**
+   * Switchboard: the rail workspace a "terminal" node shows the shell of.
+   * Required on a terminal, and only kept on one. Its `label` is the same id.
+   */
+  workspace?: string
+  /**
+   * Switchboard: a terminal's type size in canvas units — 12.5 over the zoom it
+   * was pinned at, so pinning keeps the text exactly the size it was on screen.
+   * Drawn at `font × zoom` pixels. Only kept on a terminal; absent means 12.5.
+   */
+  font?: number
+  /** Switchboard: a terminal folded to its title bar, in place. */
+  minimized?: boolean
 }
 
 export type FlowEdgeSpec = {
@@ -259,3 +288,82 @@ export const FLOW_IMAGE_SRC_MAX_LENGTH = 2_048
 
 export const DIAGRAM_TEXT_MAX_LENGTH = 200
 export const DIAGRAM_SUMMARY_MAX_LENGTH = 400
+
+// ─────────────────────────────────────────────────────────────────────
+// Switchboard: workspaces and pinned terminals
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * A rail workspace id, at most — what `answeredIn` and a terminal's `workspace`
+ * hold. The same rule main applies to a whiteboard's own workspace.
+ */
+export const FLOW_WORKSPACE_ID_MAX_LENGTH = 200
+
+/** The type size a terminal is drawn at on screen, in pixels — the Terminal tab's. */
+export const TERMINAL_BASE_FONT = 12.5
+/**
+ * Below this rendered size (node.font × zoom, in pixels) the live terminal is
+ * taken off the board and the node shows "Zoom in to use": text that small is
+ * unreadable, and xterm's cells stop lining up with the pointer.
+ */
+export const TERMINAL_MIN_FONT = 7
+/** What a terminal's stored `font` is clamped to, in canvas units. */
+export const TERMINAL_FONT_MIN = 4
+export const TERMINAL_FONT_MAX = 80
+/** The header strip of a pinned terminal, in canvas units — what drags it. */
+export const TERMINAL_HEADER = 30
+/** A terminal pinned with no size of its own, and the least its resize handles go to. */
+export const FLOW_TERMINAL_DEFAULT_SIZE: FlowSize = { width: 560, height: 340 }
+export const FLOW_TERMINAL_MIN_SIZE: FlowSize = { width: 280, height: 140 }
+/**
+ * The least a pinned terminal's frame is ever drawn at, whatever size it holds: its
+ * header's buttons and a sliver of body. Pinning keeps the floating panel's size on
+ * screen, so a terminal pinned at a high zoom is smaller in canvas units than the
+ * resize handles allow (FLOW_TERMINAL_MIN_SIZE binds a hand resize only) — and must
+ * open again at the size it was pinned at.
+ */
+export const FLOW_TERMINAL_FLOOR: FlowSize = { width: 96, height: TERMINAL_HEADER + 16 }
+
+/** A rectangle on screen, in client (window) pixels. */
+export type ClientRect = { left: number; top: number; width: number; height: number }
+
+/**
+ * Switchboard: where a pinned terminal's live xterm goes, as the editor reports it
+ * to its host (FlowEditor's onTerminalSlots). The host lays the xterm over `body`
+ * itself — never inside the canvas, whose CSS transform would blur the text and
+ * throw its mouse coordinates off.
+ */
+export type TerminalSlot = {
+  wsId: string
+  nodeId: string
+  /**
+   * Client pixels under the header, inset a few pixels from the node's left,
+   * right and bottom edges so its resize handles stay clickable.
+   */
+  body: ClientRect
+  /** Client pixels of the React Flow pane: nothing outside it is on the board. */
+  clip: { left: number; top: number; right: number; bottom: number }
+  zoom: number
+  /** The COMMITTED size in canvas units — it changes only once a resize ends. */
+  size: FlowSize
+  /** The rendered type size in pixels: node.font × zoom. */
+  font: number
+  minimized: boolean
+  selected: boolean
+  /** From a resize handle's press until the new size is committed. */
+  resizing: boolean
+  /** Some of the canvas's own floating UI (a toolbar, a menu, a panel) is over `body`. */
+  covered: boolean
+  /**
+   * The canvas's own chrome over `body` — every React Flow panel (the tool rail, the
+   * undo bar, the zoom controls) that overlaps it, cut to `body` — in client pixels.
+   * The host leaves these out of the live terminal, so the chrome stays visible and
+   * clickable above it, as it does above every other node. [] when none overlaps.
+   */
+  holes: { left: number; top: number; right: number; bottom: number }[]
+  /**
+   * False when minimized, folded away, its workspace is gone, or the type would
+   * be drawn under TERMINAL_MIN_FONT — the node then shows a card of its own.
+   */
+  live: boolean
+}

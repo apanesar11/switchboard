@@ -1,20 +1,24 @@
 "use client"
 
-// The diagram selector: one trigger showing the current diagram, opening a
-// popover with a search box and a results list. A sibling of MockupPicker, and
-// deliberately the same control — the two pages sit next to each other in the
-// sidebar and switching between them shouldn't mean learning a second widget.
+// The whiteboard quick switcher: one trigger showing the board on screen and its
+// folder, opening a popover with a search box and the boards of THAT folder. A
+// sibling of the admin's MockupPicker, and deliberately the same control.
 //
-// Results are two groups: active diagrams, then an "Archived" section pinned
-// below them. An archived diagram never outranks an active one however well it
-// matches — see searchDiagrams. Rows are selection only; archive and delete
-// live in the Actions menu of the diagram you have actually selected.
+// Results are two groups: active boards, then an "Archived" section pinned below
+// them. An archived board never outranks an active one however well it matches —
+// see searchDiagrams. Rows are navigation only: picking one asks the host to open
+// it (the page shows exactly one board); archive and delete live in the Actions
+// menu of the board you have open.
+//
+// Switchboard: the folder's list comes after the board itself, so the trigger is
+// drawn from the board on screen (`current`) and the rows from `boards` once they
+// arrive. Every board in Switchboard's Whiteboards screen is a click away; this
+// is for hopping between related ones without leaving the canvas.
 
 import { useEffect, useMemo, useState } from "react"
 import * as PopoverPrimitives from "@radix-ui/react-popover"
 import {
   RiArchiveLine,
-  RiArrowDownSLine,
   RiCheckLine,
   RiSearchLine,
 } from "@remixicon/react"
@@ -23,12 +27,17 @@ import { cx, focusInput, focusRing } from "@/lib/utils"
 import { usePortalContainer } from "@/lib/portal"
 import { searchDiagrams } from "@/lib/diagrams/search"
 import type { DiagramSummary } from "@/lib/diagrams/types"
+import { Glyph } from "@/components/Glyph"
 
 type Props = {
-  diagrams: DiagramSummary[]
-  selectedId: string | null
+  /** The boards of the current board's folder; null while that list loads. */
+  boards: DiagramSummary[] | null
+  /** The board on screen — drawn in the trigger before the folder's list comes. */
+  current: DiagramSummary
+  /** "Architecture", or "No folder"; null while the folder list loads. */
+  folderLabel: string | null
   onSelect: (id: string) => void
-  // Owned by the page so a ?q= deep link can seed it.
+  // Owned by the page so the ← / → arrows step through what a search left.
   search: string
   onSearchChange: (value: string) => void
   formatRelative: (iso: string) => string
@@ -36,8 +45,9 @@ type Props = {
 }
 
 export function DiagramPicker({
-  diagrams,
-  selectedId,
+  boards,
+  current,
+  folderLabel,
   onSelect,
   search,
   onSearchChange,
@@ -45,22 +55,23 @@ export function DiagramPicker({
   active,
 }: Props) {
   const [open, setOpen] = useState(false)
+  const selectedId = current.id
 
   // The portal remains attached to body while its canvas is parked off screen.
   useEffect(() => {
     if (!active) setOpen(false)
   }, [active])
 
+  const list = useMemo(() => boards ?? [], [boards])
   const results = useMemo(
-    () => searchDiagrams(diagrams, search),
-    [diagrams, search],
+    () => searchDiagrams(list, search),
+    [list, search],
   )
-  const selected = diagrams.find((d) => d.id === selectedId) ?? null
   const total = results.active.length + results.archived.length
 
   const archivedCount = useMemo(
-    () => diagrams.filter((d) => d.archivedAt !== null).length,
-    [diagrams],
+    () => list.filter((d) => d.archivedAt !== null).length,
+    [list],
   )
 
   function handleSelect(id: string) {
@@ -114,45 +125,32 @@ export function DiagramPicker({
         <button
           type="button"
           // Composed, not static: a bare aria-label would override the visible
-          // diagram name in the accessible-name computation, so this control —
-          // the only one that displays the current selection — would announce
-          // the same string no matter what is selected.
-          aria-label={
-            selected
-              ? `Select a diagram — currently ${selected.name}${
-                  selected.archivedAt !== null ? ", archived" : ""
-                }`
-              : "Select a diagram"
-          }
+          // board name in the accessible-name computation, so this control —
+          // the only one that displays the current board — would announce
+          // the same string no matter which board is open.
+          aria-label={`Switch whiteboard — currently ${current.name}${
+            current.archivedAt !== null ? ", archived" : ""
+          }${folderLabel ? `, in ${folderLabel}` : ""}`}
           className={cx(
             // A fixed width, not flex-1: the toolbar arrows sit either side of
-            // this trigger, and a width that tracked the selected diagram's
-            // name would shift them under the cursor on every step.
-            "flex h-9 w-[22rem] min-w-0 items-center gap-2 rounded-md border px-2.5 text-sm transition-colors",
-            "border-gray-300 bg-white text-gray-900 hover:bg-gray-50",
-            "dark:border-gray-800 dark:bg-gray-950 dark:text-gray-50 dark:hover:bg-gray-900",
+            // this trigger, and a width that tracked the board's name would
+            // shift them under the cursor on every step.
+            "flex h-[30px] w-[22rem] min-w-0 items-center gap-2 rounded-lg border pl-3 pr-2.5 text-[13px] transition-colors",
+            "border-black/[.13] bg-white text-gray-900 hover:bg-[#f5f5f7]",
+            "dark:border-white/15 dark:bg-gray-950 dark:text-gray-50 dark:hover:bg-gray-900",
             focusRing,
           )}
         >
-          {selected === null ? (
-            <span className="text-gray-500 dark:text-gray-400">
-              Select a diagram
-            </span>
+          {current.archivedAt !== null ? (
+            <RiArchiveLine className="size-[14px] shrink-0 text-gray-400" aria-hidden="true" />
           ) : (
-            <>
-              {selected.archivedAt !== null ? (
-                <RiArchiveLine
-                  className="size-4 shrink-0 text-gray-400"
-                  aria-hidden="true"
-                />
-              ) : null}
-              <span className="truncate font-medium">{selected.name}</span>
-            </>
+            <Glyph name="board" className="shrink-0 text-[#86868b]" />
           )}
-          <RiArrowDownSLine
-            className="ml-auto size-4 shrink-0 text-gray-400"
-            aria-hidden="true"
-          />
+          <span className="truncate font-medium">{current.name}</span>
+          {folderLabel ? (
+            <span className="shrink truncate text-[#86868b]">· {folderLabel}</span>
+          ) : null}
+          <Glyph name="chevD" className="ml-auto shrink-0 text-gray-400" />
         </button>
       </PopoverPrimitives.Trigger>
 
@@ -178,7 +176,7 @@ export function DiagramPicker({
               />
               <input
                 autoFocus
-                aria-label="Search diagrams by name"
+                aria-label="Search whiteboards by name"
                 value={search}
                 onChange={(e) => onSearchChange(e.target.value)}
                 placeholder="Search by name…"
@@ -193,11 +191,15 @@ export function DiagramPicker({
           </div>
 
           <div className="max-h-80 overflow-y-auto p-1">
-            {total === 0 ? (
+            {boards === null ? (
               <p className="px-2 py-6 text-center text-xs text-gray-400">
-                {diagrams.length === 0
-                  ? "No diagrams yet"
-                  : `No diagrams match “${search.trim()}”`}
+                Loading whiteboards…
+              </p>
+            ) : total === 0 ? (
+              <p className="px-2 py-6 text-center text-xs text-gray-400">
+                {list.length === 0
+                  ? "No whiteboards in this folder yet"
+                  : `No whiteboards match “${search.trim()}”`}
               </p>
             ) : (
               <>
@@ -205,7 +207,7 @@ export function DiagramPicker({
 
                 {results.archived.length > 0 ? (
                   <>
-                    {/* The Archive section. Always last, so archived diagrams
+                    {/* The Archive section. Always last, so archived boards
                         stay reachable without ever crowding the live ones. */}
                     <div
                       className={cx(
@@ -231,8 +233,9 @@ export function DiagramPicker({
             )}
           </div>
 
-          <div className="border-t border-gray-200 px-2.5 py-1.5 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
-            {diagrams.length - archivedCount} active
+          <div className="truncate border-t border-gray-200 px-2.5 py-1.5 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
+            {folderLabel ? `${folderLabel} · ` : ""}
+            {boards === null ? "…" : `${list.length - archivedCount} active`}
             {archivedCount > 0 ? ` · ${archivedCount} archived` : ""}
           </div>
         </PopoverPrimitives.Content>

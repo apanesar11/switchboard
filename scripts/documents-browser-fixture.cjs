@@ -5,11 +5,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const diagrams = require(path.join(process.env.SWITCHBOARD_DOCUMENT_TEST_REPO, 'src/main/diagrams'));
+// The real store, rooted beside the temporary SWITCHBOARD_CONFIG the runner set.
+const whiteboards = require(path.join(process.env.SWITCHBOARD_DOCUMENT_TEST_REPO, 'src/main/whiteboards'));
 app.setPath('userData', path.join(__dirname, 'profile'));
-const workspace = 'fictional-documents';
-const methods = { List: 'list', Get: 'get', Create: 'create', Update: 'update', Archive: 'setArchived', Delete: 'remove', CreateDocument: 'createDocument', GetDocument: 'getDocument', SaveDocument: 'saveDocument', GetImagePath: 'getImagePath' };
-for (const [name, method] of Object.entries(methods)) ipcMain.handle('diagram:' + name, (_, ...args) => diagrams[method](...args));
+const methods = { List: 'list', Get: 'get', Create: 'create', SaveSpec: 'saveSpec', Rename: 'rename', SetWorkspace: 'setWorkspace', Move: 'move', Duplicate: 'duplicate', Archive: 'setArchived', Delete: 'remove', CreateFolder: 'createFolder', RenameFolder: 'renameFolder', DeleteFolder: 'removeFolder', DismissNotice: 'dismissNotice', NoteWorkspace: 'noteWorkspace', Workspaces: 'workspaceChoices', CreateDocument: 'createDocument', GetDocument: 'getDocument', SaveDocument: 'saveDocument', Migrate: 'migrate', GetImagePath: 'getImagePath' };
+for (const [name, method] of Object.entries(methods)) ipcMain.handle('wb:' + name, (_, ...args) => whiteboards[method](...args));
+// A board spec on its own, as a whiteboard of that name in No folder.
+const board = (name, spec) => whiteboards.create({ folderId: null, name, spec, workspace: null });
 let clipboard = '';
 let clipboardFails = false;
 ipcMain.handle('clipboard:write', (_, text) => { if (clipboardFails) return { ok: false, error: 'Clipboard unavailable' }; clipboard = text; return { ok: true }; });
@@ -17,10 +19,11 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'sbimg', privileges: { standard:
 
 app.whenReady().then(async () => {
   protocol.handle('sbimg', async request => {
-    const result = await diagrams.getImagePath(request.url);
+    const result = await whiteboards.getImagePath(request.url);
     return result.ok ? net.fetch(pathToFileURL(result.data).toString()) : new Response('not found', { status: 404 });
   });
   const window = new BrowserWindow({ show: false, width: 1440, height: 960, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), offscreen: true, backgroundThrottling: false } });
+  whiteboards.onChange(change => { if (!window.isDestroyed()) window.webContents.send('wb:changed', change); });
   const run = async code => {
     try { return await window.webContents.executeJavaScript(code, true); }
     catch (error) { throw new Error(`${error.message}\nRenderer script: ${code}`, { cause: error }); }
@@ -32,6 +35,19 @@ app.whenReady().then(async () => {
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     throw new Error('Timed out: ' + code);
+  };
+  // Waits for an element to stop moving — React Flow's first fitView lands a frame or
+  // two after the nodes appear — so a pointer aimed at it still hits it.
+  const steady = async selector => {
+    let last = '', same = 0;
+    for (let index = 0; index < 100; index++) {
+      await tick();
+      const now = await run(`JSON.stringify(document.querySelector(${JSON.stringify(selector)})?.getBoundingClientRect() ?? null)`);
+      same = now !== 'null' && now === last ? same + 1 : 0;
+      if (same >= 3) return;
+      last = now;
+    }
+    throw new Error('Never settled: ' + selector);
   };
   const click = async label => { await run(`document.querySelector(${JSON.stringify('button[aria-label="' + label + '"]')}).click()`); await tick(); };
   const mode = async value => { await run(`Array.from(document.querySelectorAll('[role=tab]')).find(button => button.textContent === ${JSON.stringify(value)}).click()`); await tick(); };
@@ -55,22 +71,23 @@ app.whenReady().then(async () => {
   };
   try {
     const originalText = '# Integration brief\n\nA **clear** explanation with *details*.\n\n## Supported connections\n\n- Point of sale\n  - Orders\n  - Refunds\n- Advertising\n\n## Checklist\n\n- [ ] Confirm scope\n- [x] Draft design\n\n> Keep the canvas readable.\n\n| System | Purpose |\n| --- | --- |\n| Orders | Sales events |\n\n```js\nconst ready = true;\n```\n\n' + Array.from({ length: 24 }, (_, i) => `### Detail ${i + 1}\n\nAdditional context for the flowchart, written as a Markdown file.\n`).join('\n');
-    const made = await diagrams.createDocument(workspace, originalText);
-    const picture = await diagrams.saveImage(nativeImage.createFromBitmap(Buffer.from(Array.from({ length: 240 * 160 }, () => [210, 230, 250, 255]).flat()), { width: 240, height: 160 }).toPNG(), 'image/png');
-    const picturePath = (await diagrams.getImagePath(picture.src)).data;
-    const chart = await diagrams.create(workspace, 'Example flow', { kind: 'flow', nodes: [
+    const made = await whiteboards.createDocument(originalText);
+    const picture = await whiteboards.saveImage(nativeImage.createFromBitmap(Buffer.from(Array.from({ length: 240 * 160 }, () => [210, 230, 250, 255]).flat()), { width: 240, height: 160 }).toPNG(), 'image/png');
+    const picturePath = (await whiteboards.getImagePath(picture.src)).data;
+    const chart = await board('Example flow', { kind: 'flow', nodes: [
       { id: 'start', label: 'Connect the systems', position: { x: 30, y: 130 } },
       { id: 'brief', label: 'Integration brief', shape: 'document', documentId: made.data.id, position: { x: 330, y: 130 } },
       { id: 'picture', label: 'Reference image', shape: 'image', src: picture.src, width: 240, height: 160, position: { x: 330, y: 280 } },
     ], edges: [{ from: 'start', to: 'brief' }] });
     assert.equal(chart.ok, true);
-    const stored = async () => (await diagrams.get(workspace, chart.data.id)).data.spec;
-    await window.loadFile(path.join(__dirname, 'fixture.html'));
+    const stored = async () => (await whiteboards.get(chart.data.id)).data.spec;
+    await window.loadFile(path.join(__dirname, 'fixture.html'), { query: { board: chart.data.id } });
     await until('!!document.querySelector("[data-id=brief]")');
     const imageButton = '[data-id=picture] .flow-file-copy';
     const documentButton = '[data-id=brief] .flow-file-copy';
     await until('document.querySelector("[data-id=picture] img")?.naturalWidth === 240');
     assert.equal(await run(`getComputedStyle(document.querySelector(${JSON.stringify(imageButton)})).opacity`), '0');
+    await steady('[data-id=picture]');
     const imagePoint = await run(`(() => { const rect = document.querySelector('[data-id=picture]').getBoundingClientRect(); return { x: Math.round(rect.right - 20), y: Math.round(rect.bottom - 20) }; })()`);
     window.webContents.sendInputEvent({ type: 'mouseMove', ...imagePoint });
     await until(`getComputedStyle(document.querySelector(${JSON.stringify(imageButton)})).opacity === '1'`);
@@ -99,7 +116,7 @@ app.whenReady().then(async () => {
     assert.equal(clipboard, 'Keep the previous clipboard');
     assert.equal(await run(`document.querySelector(${JSON.stringify(imageButton)}).dataset.copied`), 'false', 'clipboard failures do not report success');
     clipboardFails = false;
-    await diagrams.update(workspace, chart.data.id, 'Example flow', { ...beforeCopy, nodes: beforeCopy.nodes.filter(node => node.id !== 'picture') });
+    assert.equal((await whiteboards.saveSpec(chart.data.id, { ...beforeCopy, nodes: beforeCopy.nodes.filter(node => node.id !== 'picture') })).ok, true);
     await window.reload();
     await until('!!document.querySelector("[data-id=brief]") && !document.querySelector("[data-id=picture]")');
     await edit('brief');
@@ -195,10 +212,10 @@ app.whenReady().then(async () => {
     await until(`document.querySelector(${JSON.stringify(documentButton)}).getAttribute('aria-busy') === 'false'`);
     assert.equal(clipboard, 'Keep the previous clipboard', 'conflicts leave the clipboard untouched');
     assert.equal(fs.readFileSync(made.data.path, 'utf8'), '# Other editor\n', 'copy never overwrites an external edit');
-    await diagrams.create('fictional-recovery', 'Another flow', { kind: 'flow', nodes: [{ id: 'example', label: 'Another step' }], edges: [] });
-    await run('window.diagram.update({ wsId: "fictional-recovery", wsName: "Example recovery" })');
+    const recovery = await board('Another flow', { kind: 'flow', nodes: [{ id: 'example', label: 'Another step' }], edges: [] });
+    await run(`window.diagram.update({ boardId: ${JSON.stringify(recovery.data.id)} })`);
     await until('!!document.querySelector("[data-id=example]") && !document.querySelector(".flow-document-panel")');
-    await run('window.diagram.update({ wsId: "fictional-documents", wsName: "Example workspace" })');
+    await run(`window.diagram.update({ boardId: ${JSON.stringify(chart.data.id)} })`);
     await until('!!document.querySelector("[data-id=brief]")');
     await edit('brief');
     assert.equal(await sourceText(), '# Local version\n', 'failed edits survive a diagram unmount');
@@ -228,7 +245,7 @@ app.whenReady().then(async () => {
     spec = await stored();
     const fresh = spec.nodes.find(node => node.shape === 'document' && node.id !== 'brief');
     assert.ok(fresh);
-    assert.equal((await diagrams.getDocument(workspace, fresh.documentId)).data.text, '# New document\n');
+    assert.equal((await whiteboards.getDocument(fresh.documentId)).data.text, '# New document\n');
     await run('window.diagram.editAction("undo", false)'); await tick(); await run('window.diagram.flush()');
     assert.equal((await stored()).nodes.some(node => node.id === fresh.id), false);
     await run('window.diagram.editAction("redo", false)'); await tick(); await run('window.diagram.flush()');
@@ -245,33 +262,35 @@ app.whenReady().then(async () => {
     const duplicate = (await stored()).nodes.find(node => node.shape === 'document' && node.id !== fresh.id && node.id !== 'brief');
     assert.ok(duplicate);
     assert.notEqual(duplicate.documentId, made.data.id);
-    assert.equal((await diagrams.getDocument(workspace, duplicate.documentId)).data.text, finalText);
+    assert.equal((await whiteboards.getDocument(duplicate.documentId)).data.text, finalText);
     await edit(duplicate.id); await mode('Write'); await text('# Independent copy\n');
     await click('Close document'); await run('window.diagram.flush()');
     assert.equal(fs.readFileSync(made.data.path, 'utf8'), finalText);
 
-    // Copy/Paste transfers Markdown to another workspace without sharing files.
+    // Copy/Paste carries the Markdown to another whiteboard as a NEW document file:
+    // one global store, but never a file shared between two boards' nodes.
     await selectNode('brief');
     assert.equal(await run('window.diagram.editAction("copy", false)'), true);
     await tick();
     const copiedWords = clipboard;
-    const other = 'fictional-copy-target';
-    const target = await diagrams.create(other, 'Copied flow', { kind: 'flow', nodes: [], edges: [] });
-    await run('window.diagram.update({ wsId: "fictional-copy-target", wsName: "Example copy" })');
+    const target = await board('Copied flow', { kind: 'flow', nodes: [], edges: [] });
+    await run(`window.diagram.update({ boardId: ${JSON.stringify(target.data.id)} })`);
     await until('!document.querySelector("[data-id=brief]") && !!document.querySelector(".react-flow")');
     // Wait for the new diagram's editor, rather than the previous loading frame.
     await until('document.querySelector(".sbdg-app").textContent.includes("Copied flow")');
     assert.equal(await run(`window.diagram.editAction("paste", false, ${JSON.stringify(copiedWords)})`), true);
     await until('document.querySelectorAll(".react-flow__node").length === 1');
     await run('window.diagram.flush()');
-    const pasted = (await diagrams.get(other, target.data.id)).data.spec.nodes[0];
+    const pasted = (await whiteboards.get(target.data.id)).data.spec.nodes[0];
     assert.notEqual(pasted.documentId, made.data.id);
-    assert.equal((await diagrams.getDocument(other, pasted.documentId)).data.text, finalText);
-    assert.equal((await diagrams.getDocument(workspace, pasted.documentId)).ok, false);
-    await edit(pasted.id); await mode('Write'); await text('# In another workspace\n');
+    const pastedDocument = (await whiteboards.getDocument(pasted.documentId)).data;
+    assert.equal(pastedDocument.text, finalText);
+    assert.notEqual(pastedDocument.path, made.data.path, 'a pasted document is its own file');
+    await edit(pasted.id); await mode('Write'); await text('# On another whiteboard\n');
     await click('Close document'); await run('window.diagram.flush()');
-    assert.equal(fs.readFileSync(made.data.path, 'utf8'), finalText);
-    await run('window.diagram.update({ wsId: "fictional-documents", wsName: "Example workspace" })');
+    assert.equal(fs.readFileSync(pastedDocument.path, 'utf8'), '# On another whiteboard\n');
+    assert.equal(fs.readFileSync(made.data.path, 'utf8'), finalText, 'editing the pasted copy leaves the original alone');
+    await run(`window.diagram.update({ boardId: ${JSON.stringify(chart.data.id)} })`);
     await until('!!document.querySelector("[data-id=brief]")');
 
     // Reloading the whole renderer loads the Markdown from disk.
@@ -284,9 +303,10 @@ app.whenReady().then(async () => {
     assert.equal(await run('getComputedStyle(document.querySelector(".flow-document-panel")).backgroundColor'), 'rgb(17, 24, 39)');
     await capture('dark-floating');
     await click('Close document');
-    await diagrams.setArchived(workspace, chart.data.id, true);
+    assert.equal((await whiteboards.setArchived(chart.data.id, true)).ok, true);
     await window.reload();
     await until('!!document.querySelector("[data-id=brief]")');
+    await steady(documentButton);
     const archivedCopyPoint = await run(`(() => { const rect = document.querySelector(${JSON.stringify(documentButton)}).getBoundingClientRect(); return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) }; })()`);
     window.webContents.sendInputEvent({ type: 'mouseMove', ...archivedCopyPoint });
     await until(`getComputedStyle(document.querySelector(${JSON.stringify(documentButton)})).opacity === '1'`);
@@ -299,11 +319,13 @@ app.whenReady().then(async () => {
     assert.equal(await run('document.querySelectorAll(".flow-document-tabs [role=tab]").length'), 1);
     assert.equal(await run('document.querySelector("input[aria-label=\\"Document name\\"]").readOnly'), true);
 
-    console.log('Documents browser checks passed: image/document hover copy, focus accessibility, clipboard failures, save-before-copy and conflicts, default floating, docked/focus, scrollable Markdown, native source undo, Tab precedence, file autosave/reopen, conflict recovery, creation/undo/redo, independent duplicates, cross-workspace copy, reload, archived read-only documents and dark theme.');
+    console.log('Documents browser checks passed: image/document hover copy, focus accessibility, clipboard failures, save-before-copy and conflicts, default floating, docked/focus, scrollable Markdown, native source undo, Tab precedence, file autosave/reopen, conflict recovery, creation/undo/redo, independent duplicates, pasted copies as new files, reload, archived read-only documents and dark theme.');
+    await whiteboards.settle();
     window.destroy(); app.exit(0);
   } catch (error) {
     console.error(error.stack || error);
     await capture('failure');
+    await whiteboards.settle();
     window.destroy(); app.exit(1);
   }
 });

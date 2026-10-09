@@ -37,7 +37,10 @@ try {
     const root = createRoot(document.getElementById('root'));
     window.mount = (spec) => root.render(<FlowEditor key={window.serial = (window.serial || 0) + 1}
       ref={window.editor} spec={spec} onSave={async spec => { window.saved.push(spec); return null; }}
-      keyboardEnabled={true} fitKey="fixture" productId="fictional-workspace" />);
+      keyboardEnabled={true} fitKey="fixture" boardId="fictional-board"
+      answerWorkspace={null} workspaceChoices={{ workspaces: [], recent: [], last: null }}
+      onAnswerWorkspaceChange={() => {}} onOpenTerminal={() => {}} workspaceStatus={{}}
+      onTerminalSlots={() => {}} onTerminalFloat={() => {}} onTerminalRemoved={() => {}} />);
     window.mount(window.initial);
   `);
   await esbuild.build({ entryPoints: [entry], outfile: path.join(temp, 'fixture.js'), bundle: true,

@@ -8,10 +8,15 @@
 // The read-only canvas disables dragging and selection, while file nodes still
 // offer their copy-path button. The handles route a diagram's edges between
 // nodes. FlowEditor.tsx reuses FlowBox for the editable canvas.
+//
+// Switchboard: a box an answer wrote carries a small tag under its corner naming
+// the workspace that answer read, and a pinned terminal draws here as a still card
+// (an archived whiteboard's read-only canvas has no live terminal to show; the
+// editor draws its own, FlowEditor.tsx TerminalNode).
 
 import { useLayoutEffect, useRef, useState } from "react"
 import { Handle, Position, type NodeProps } from "@xyflow/react"
-import { RiImageLine, RiSparkling2Fill, RiFileTextLine } from "@remixicon/react"
+import { RiImageLine, RiSparkling2Fill, RiFileTextLine, RiTerminalBoxLine } from "@remixicon/react"
 import { cx } from "@/lib/utils"
 import {
   FLOW_TEXT_METRICS,
@@ -21,6 +26,7 @@ import {
 import { installFlowTextMeasure } from "@/lib/diagrams/measure"
 import {
   FLOW_SIDES,
+  TERMINAL_HEADER,
   isFlowBoxShape,
   type FlowBoxShape,
   type FlowSide,
@@ -215,6 +221,43 @@ export function FlowLabelText({ text, richText, className, style, onToggleCheck 
 }
 
 /**
+ * Switchboard: the workspace an answer read, as a small tag hanging under the
+ * box's bottom-right edge — absolutely placed, so it never changes the size the
+ * box was measured at. `ghost` is the dashed one on an answer still on its way.
+ */
+export function WorkspaceTag({ id, ghost = false }: { id: string; ghost?: boolean }) {
+  return (
+    <span
+      className={cx("flow-wtag", ghost && "flow-wtag-ghost")}
+      title={ghost ? `Reading ${id}` : `Answered by reading ${id}`}
+    >
+      {id}
+    </span>
+  )
+}
+
+/** Switchboard: what the rail's dot means, for the dot on a pinned terminal. */
+export const TERMINAL_DOT_TITLES: Record<string, string> = {
+  run: "Running",
+  bell: "Claude finished a turn",
+  fail: "Failed",
+  chg: "Has changes",
+}
+
+/** Switchboard: the rail's status dot for a workspace (SB.dotFor), or nothing. */
+export function TerminalDot({ dot }: { dot?: string }) {
+  if (!dot || !TERMINAL_DOT_TITLES[dot]) return null
+  return (
+    <span
+      role="img"
+      aria-label={TERMINAL_DOT_TITLES[dot]}
+      title={TERMINAL_DOT_TITLES[dot]}
+      className={cx("flow-terminal-dot", dot)}
+    />
+  )
+}
+
+/**
  * The box itself, shared by the read-only node below and the editor's
  * editable one, so a diagram looks identical whether you are reading it or
  * arranging it. `children` is where each caller puts its handles.
@@ -253,6 +296,27 @@ export function FlowBox({
       <div className="flow-file-node relative size-full">
         <FlowImage src={box.src} alt={label} />
         <DiagramFileCopy box={box} />
+        {children}
+      </div>
+    )
+  }
+  // Switchboard: a pinned terminal on a whiteboard that can't be edited — its
+  // header, and where the shell would be, a word on how to get it back.
+  if (shape === "terminal") {
+    const workspace = box.workspace ?? label
+    return (
+      <div className={cx("flow-terminal-node relative size-full", className)} title={`${workspace} terminal`}>
+        <div className="flow-terminal-card-frame">
+          <div className="flow-terminal-head" style={{ height: TERMINAL_HEADER }}>
+            <RiTerminalBoxLine className="size-3.5 shrink-0 text-[#0969da]" aria-hidden="true" />
+            <b>{workspace}</b>
+          </div>
+          {box.minimized ? null : (
+            <div className="flow-terminal-body flow-terminal-card">
+              <p>Unarchive to use this terminal</p>
+            </div>
+          )}
+        </div>
         {children}
       </div>
     )
@@ -306,6 +370,8 @@ export function FlowBox({
           <RiSparkling2Fill className="size-3" aria-hidden="true" />
         </span>
       ) : null}
+      {/* Switchboard: and the workspace it read, while the words are still the AI's. */}
+      {box.ai && box.answeredIn ? <WorkspaceTag id={box.answeredIn} /> : null}
       {children}
     </div>
   )

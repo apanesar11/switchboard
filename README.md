@@ -6,7 +6,7 @@
 A local control panel for your development workspaces.
 
 One window for terminals, dev servers, repository changes, pull requests, a plain
-editor for your files, and workspace diagrams. Group your own projects in the
+editor for your files, and whiteboards. Group your own projects in the
 sidebar and arrange up to four workspace panes per grid view. Switchboard ships with no
 workspaces or personal configuration.
 
@@ -24,8 +24,19 @@ to whichever coding CLI you use on that machine, then run `codex` or `claude` in
 Switchboard terminal. Claude is optional, and there is no Codex usage meter yet.
 Install tmux if you want terminal sessions to survive quitting Switchboard.
 
-`npm start` first builds the Diagrams tab's editor (`npm run build:diagrams`, a second or
+`npm start` first builds the whiteboard editor (`npm run build:diagrams`, a second or
 so); it is the one part of the app that is built rather than run as written.
+
+To check a change: `npm run check` (every source file parses, and it names any file
+`ARCHITECTURE.md` lists that is not there yet), `npm run test:config` (configuration
+and workspace discovery), `npm run test:editor`, `npm run test:databases`,
+`npm run test:publish`, and `npm run test:diagrams` for the whiteboards — their store
+and its one-time migration, the layout, ✦ Answer and Google Images — all under plain
+Node in scratch folders. `npm run check:diagrams` type-checks the whiteboard editor.
+Three checks run the built editor in a hidden Electron window, with scratch data rather
+than your `~/.switchboard`: `npm run test:whiteboards:browser` (the Whiteboards screen
+and the terminals on a board), `npm run test:documents:browser` and
+`npm run test:rich-text:browser`.
 
 ## Set up your workspaces
 
@@ -121,23 +132,34 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   away from being undone — and if the Trash is not available it says so rather than
   pretending. Nothing here runs git: a file you make is untracked, exactly as it would
   be if you had made it in a shell.
-- **Diagrams** — flow diagrams for a workspace — boxes, arrows, sticky
-  notes, free text, pictures and Markdown documents, arranged by hand.
-  **AI terminal** (⌘A) toggles a resizable floating panel with the
-  workspace's existing live terminal, so you can use your AI session beside the canvas.
-  It shares the same shell and scrollback as Terminal and Grid, including in a full-screen
-  diagram. ⌘A keeps Select All while editing a label or Markdown document. Click a shape on the toolbar down the
-  left and click the canvas to place it; with a box selected, Tab adds the next one joined
-  to its right and starts you typing, ⇧Tab steps back, the arrow keys move between boxes
-  and ⌘D duplicates. Drag from a box's dot to draw an arrow. Drop, paste or pick a picture
-  to put it on the canvas, or find one with **Search Google Images** on the picture tool
-  (or G): Google's own image results open in a panel beside the canvas, searching the
-  selected box's words, and a picture dragged out of it — or right-clicked ▸ Add Image to
-  Diagram — goes onto the diagram like a dropped file, at its full size rather than the
-  thumbnail's. Hover over a picture or document and click the copy button in its
-  bottom-right corner to copy its local file path for pasting into the AI terminal.
-  Document edits are saved before the path is copied; the document panel's `.md file`
-  button does the same. Tab keeps a branch symmetrical
+- **Whiteboards** — the row under Pull requests in the sidebar: flowcharts, notes,
+  Markdown documents and pictures, in folders you make. A whiteboard belongs to no
+  workspace. The screen lists your folders on the left — **All whiteboards**, **Recent**,
+  each folder of yours, **No folder** and **Archived** — and the boards on the right, one
+  row each: its name, when you last edited it, how many boxes it has, and which
+  workspaces its answers read; **Open** is the one action. **New folder** and **New
+  whiteboard** are at the top (a new whiteboard lands in the folder you are looking at),
+  a row dragged onto a folder moves there, and a folder's **…** renames it, or deletes it
+  once it is empty — a folder is never deleted with a whiteboard still in it.
+
+  An open whiteboard's header is a breadcrumb, **Whiteboards › folder › whiteboard**, and
+  the bar over the canvas holds the quick switcher (the whiteboards of that folder; ← and
+  → step through them), **New whiteboard**, full screen and **Actions**: **Open
+  terminal…**, **Show or hide terminals** (⌘A), **Rename…**, **Move to folder…**,
+  **Duplicate** (with its own copies of the documents on it), **Archive** and **Delete**.
+  Esc never takes you out of a whiteboard; the breadcrumb does. A whiteboard whose file
+  can't be read says so, with **Try again** for once it is fixed. Click a shape on the
+  toolbar down the left and click the canvas to place it; with a box selected, Tab adds
+  the next one joined to its right and starts you typing, ⇧Tab steps back, the arrow keys
+  move between boxes and ⌘D duplicates. Drag from a box's dot to draw an arrow. Drop,
+  paste or pick a picture to put it on the canvas, or find one with **Search Google
+  Images** on the picture tool (or G): Google's own image results open in a panel beside
+  the canvas, searching the selected box's words, and a picture dragged out of it — or
+  right-clicked ▸ Add Image to Whiteboard — goes onto the whiteboard like a dropped file,
+  at its full size rather than the thumbnail's. Hover over a picture or document and
+  click the copy button in its bottom-right corner to copy its local file path for
+  pasting into a terminal. Document edits are saved before the path is copied; the
+  document panel's `.md file` button does the same. Tab keeps a branch symmetrical
   around the box it hangs off, and so do ✦ Answer's boxes and a delete; anything in the
   branch's way moves aside. A box drags everything hanging off it along; drag one up or
   down among its siblings and let go, and it takes that place, back in line, the branch
@@ -145,31 +167,57 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   (click again to attach it). A drag-select takes every box it touches, and ⌘C / ⌘V copy
   boxes and paste them at the pointer. An arrow's toolbar can **collapse** it: what it
   points at, and everything beyond, folds away behind a "+N" on the box, and the branch
-  closes up; click the "+N" to bring it back. A diagram has no limit on boxes. A toolbar
-  floats over whatever is selected: shape, colour and outline for a box, size and style
-  for its text, label and line for an arrow. It saves as you go; ⌘Z and ⇧⌘Z undo and redo.
-  The picker over the canvas switches between diagrams (← and → step through them),
-  **New diagram** makes one, and **Actions** renames, archives or deletes the one on
-  screen. Each diagram is a file in `~/.switchboard/diagrams/`, one folder per workspace —
-  never in your repo.
+  closes up; click the "+N" to bring it back. A whiteboard has no limit on boxes. A
+  toolbar floats over whatever is selected: shape, colour and outline for a box, size and
+  style for its text, label and line for an arrow. It saves as you go; ⌘Z and ⇧⌘Z undo
+  and redo. Each whiteboard is a file in `~/.switchboard/whiteboards/` — never in your
+  repo.
+
+  **Terminals** float over a whiteboard: **Open terminal…** asks which workspace — the
+  whiteboard's own first, then the ones you used recently, then the rest, with a search
+  box — and any number can be open at once, one per workspace. Each is that workspace's
+  own shell, with the same scrollback: what you type there shows on its Terminal tab, so
+  Claude or Codex can work beside the canvas. Each new one opens a step down and to the
+  left of the last. Drag one by its header, resize it from any edge or corner, and click
+  it to bring it to the front; its dot turns blue when Claude finishes a turn, until you
+  click into it. **Minimize** folds it into the tray at the bottom right, and **Close**
+  takes it off the whiteboard and leaves the shell running. The tray has a chip for every
+  terminal on the whiteboard, **Tile** lines the open ones up along the right edge in the
+  order they stand, and **+** opens another (press it again to put its list away); the
+  zoom buttons move up above the tray while it shows. ⌘A hides and shows them all; it is
+  still Select All while you edit a label, a document or a field. **Pin** drops a
+  terminal onto the whiteboard where it is: it becomes a box that moves and zooms with
+  the canvas, resizes from the same handles, and is saved with the whiteboard; **Float**
+  lifts it back out at the same spot. Neither clears or reconnects anything, nor moves
+  the text, and the terminal keeps the keyboard if it had it. The toolbar, undo bar and
+  zoom buttons stay clickable over a pinned terminal. Zoomed far out, a pinned terminal
+  shows **Zoom in to use**.
 
   Choose **Document** on the toolbar and click or drag it onto the canvas. A document
   appears as an icon and name; double-click it or press Enter to open a scrollable
   floating panel. Its controls also offer a docked panel and a wider focus view.
   **Read**, **Write**, and **Split** show rendered Markdown, source, or both. Tab and
   ⇧Tab indent and outdent Markdown before any canvas shortcuts run. Text autosaves to
-  `~/.switchboard/diagrams/<workspace-folder>/documents/<document-id>.md`; renaming the
-  card keeps its filename. The footer copies the file path for opening it elsewhere.
-  Copies get independent files, and removing a card keeps its file for undo and
-  recovery. External edits reload when you return to Switchboard; conflicting edits
-  offer **Reload file** or **Save my version**. Archived documents open for reading.
+  `~/.switchboard/whiteboards/documents/<document-id>.md`; renaming the card keeps its
+  filename, and moving the whiteboard to another folder moves no file. The footer copies
+  the file path for opening it elsewhere. Copies get independent files, and removing a
+  card keeps its file for undo and recovery. External edits reload when you return to
+  Switchboard; conflicting edits offer **Reload file** or **Save my version**. Archived
+  documents open for reading.
 
   **✦ Answer** leads a box's toolbar (and ⌘I or ⌘↵): write a question in a box and the
   answer comes back as a box for each part it has, hanging off it, as one undo step. Several boxes
   can wait on their answers at once. The chevron beside it picks who answers — **Claude
-  Code** or **Codex**, which run in the workspace's folder and read its code before they
-  answer (slower; a card over the canvas shows each file they open), or the **Claude API**
-  or **OpenAI API**, which see only the diagram and answer in seconds. The CLIs can only
+  Code** or **Codex**, which run in the whiteboard's workspace and read its code before
+  they answer (slower; a card over the canvas shows each file they open), or the **Claude
+  API** or **OpenAI API**, which see only the whiteboard and answer in seconds. Which
+  workspace the CLIs read is the whiteboard's: the **Workspace** row in the same menu
+  names it, and **Change…** picks another from a short list (the ones you used recently
+  first, with search); the APIs ignore it. A new whiteboard starts with the workspace you
+  used last while it is still in the sidebar (else the most recent one that is), and a
+  box an answer made carries a small tag naming the workspace that was
+  read. With no workspace chosen, a CLI says so and offers **Choose workspace…** instead
+  of answering. The CLIs can only
   read: Claude Code gets nothing but its read and search tools (and, with Web access, its
   web fetch and search), and Codex runs in its read-only sandbox. Install and sign in to the CLI you use on each Mac; Switchboard finds
   it, and picks the first one that can answer. Two switches under the chevron, and in
@@ -180,10 +228,20 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   **✦ Condense** appears when you drag-select several connected text nodes, including
   sibling branches with the same parent (⌘I also works). It replaces the discussion
   with a few readable concept nodes, keeps the original parent connected, and preserves
-  unselected branches. It uses the selected discussion as its evidence. The originals
+  unselected branches. It uses the selected discussion as its evidence, so it needs no
+  workspace. The originals
   stay until the summary is ready; **Stop** cancels it and **Undo** restores the entire
   discussion in one step. If the selected discussion changes while it thinks, retry
   with the updated selection.
+
+  Your diagrams from before moved here the first time this version opened: each
+  workspace's diagrams went into a folder named after its project, marked **moved** until
+  you change something in it, kept their workspace for ✦ Answer, and brought their
+  documents and pictures along — a document the move missed is brought over the first
+  time you open it, and nothing is ever half-copied. The old folder was renamed
+  `~/.switchboard/diagrams-before-whiteboards`, and nothing was deleted. A Grid square
+  that showed a workspace's diagrams now shows that workspace's most recently edited
+  whiteboard, when it has one.
 - **Databases** — save multiple named Neon/PostgreSQL or MongoDB connections for each
   workspace. Choose a connection, then a table, view or collection to fetch its records;
   Refresh (or ⌘R) reads them again. Click a row to see every field, including nested
@@ -194,7 +252,8 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   quietly showing incomplete data. Removing a saved connection leaves its database intact.
 - **Settings** — the row under Usage, or ⌘,: who answers ✦ Answer on this Mac, one row
   each — whether a CLI is installed and signed in, and the keys for the two APIs with the
-  model each one uses — and the Web access and Subtext switches. A key is checked with its provider before it is kept, encrypted with
+  model each one uses — and the Web access and Subtext switches. The workspace a CLI
+  reads is not here: each whiteboard keeps its own. A key is checked with its provider before it is kept, encrypted with
   your Mac's Keychain in `~/.switchboard/keys.json`, and never shown again — only its last
   four characters.
 - **Terminal appearance** — light by default, so a Claude Code set to its light theme is
@@ -215,12 +274,15 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   one (Add workspace) — click another tab to edit that one too, and Done to finish. It
   is the only place a square's × shows, so a slip of the hand cannot empty one. The bar
   beside the ⋯ is this session's Claude usage. Each workspace square switches between
-  **Terminal**, **Changes**, and **Diagrams** using the buttons in its header. Changes
-  shows the workspace's repository summary, with compact green `+` and red `−` counts
-  in its button. The diagram pane has its picker and full-screen control. The Terminal
-  is the same shell and scrollback as the workspace tab, and keeps running while
-  Changes or Diagrams is shown. A square can also hold **any folder** rather than a
-  workspace: the picker's
+  **Terminal**, **Changes**, and **Show a whiteboard** using the buttons in its header.
+  Changes shows the workspace's repository summary, with compact green `+` and red `−`
+  counts in its button. A whiteboard square shows any whiteboard you pick there — the
+  ones whose ✦ Answer reads that workspace first, then your recent ones, then each
+  folder, with a search box — as the same live board its own screen shows, with its
+  switcher, full screen and terminals; the chevron beside the buttons picks another. One
+  whiteboard is in one square at a time. The Terminal is the same shell and scrollback
+  as the workspace tab, and keeps running while Changes or a whiteboard is shown. A
+  square can also hold **any folder** rather than a workspace: the picker's
   first row, **Choose a folder…**, opens the Mac's folder chooser, and the square becomes
   a shell in that folder — the apps folder itself, a repo outside it, anything — on no
   rail and with no screen of its own. Views are remembered in the config; the window
@@ -295,11 +357,14 @@ run through `git`. Terminals use xterm.js and node-pty to run your login shell,
 optionally inside tmux. The Editor is Monaco, the editor inside VS Code, bundled with
 the app; it reads the files in your repos through `git` and the file system, and
 writes, moves or bins one only when you ask it to — a save, a new file or folder, a
-rename, a delete. Diagrams are JSON files of its
-own too, in `~/.switchboard/diagrams/`, with the pictures on them kept once each in
-`~/.switchboard/diagrams/images/`. ✦ Answer runs `claude` or `codex` in the workspace's
-folder with read-only tools, or calls the Anthropic or OpenAI API directly with a key you
-entered. The Diagrams tab's Google Images panel is Google's own page, in a session of
+rename, a delete. Whiteboards are files of its own too, in
+`~/.switchboard/whiteboards/`: `store.json` (your folders, the workspaces you used last
+and the one-time notice), `boards/` (one JSON file per whiteboard), `documents/` (the
+Markdown documents on them) and `images/` (their pictures, kept once each). A folder is
+an entry in `store.json`, not a directory, so moving a whiteboard or renaming a folder
+moves no file. ✦ Answer runs `claude` or `codex` in the folder of the whiteboard's
+workspace with read-only tools, or calls the Anthropic or OpenAI API directly with a key
+you entered. A whiteboard's Google Images panel is Google's own page, in a session of
 its own, and fetches a picture you add from it from wherever that picture lives; it
 loads nothing until you open it. Database browsing connects directly to the database
 URI you supply, from the main process; credentials never return to the renderer.
@@ -309,9 +374,13 @@ utilities, and ngrok discovery calls its local HTTP API.
 
 The source does not need account credentials. Each computer uses its own Git/GitHub
 and coding CLI sign-ins. Switchboard's configuration stays in
-`~/.switchboard/config.json`, your diagrams beside it in
-`~/.switchboard/diagrams/`, and any API keys for ✦ Answer, encrypted with the
-Keychain, in `~/.switchboard/keys.json`. Database connection URIs are also encrypted
+`~/.switchboard/config.json`, your whiteboards beside it in
+`~/.switchboard/whiteboards/`, and any API keys for ✦ Answer, encrypted with the
+Keychain, in `~/.switchboard/keys.json`. Diagrams from before Whiteboards were copied
+into `~/.switchboard/whiteboards/` once, and their old folder renamed
+`~/.switchboard/diagrams-before-whiteboards/`, where they still are; nothing reads it
+again but a picture or document the copy missed (a document is copied in when first
+opened). Database connection URIs are also encrypted
 through Electron's OS credential storage, in `~/.switchboard/databases/`; saving a
 connection requires secure encryption support. An alternate `SWITCHBOARD_CONFIG`
 keeps this data beside that config file. Older markdown files in

@@ -1,8 +1,12 @@
 "use client"
 
-// "New diagram": a name, then straight onto an empty canvas. No JSON on the
+// "New whiteboard": a name, then straight onto an empty canvas. No JSON on the
 // way in — the drawing is what gets made here, by putting shapes on it, so all
 // the dialog needs is what to call it.
+//
+// Switchboard: the board lands in the folder of the one it was made from (or in
+// none), and main gives it the workspace ✦ Answer used last — the page then opens
+// it, by asking the host to change the route.
 
 import { useState } from "react"
 import {
@@ -16,33 +20,45 @@ import {
 import { Button } from "@/components/Button"
 import { Input } from "@/components/Input"
 import { Label } from "@/components/Label"
-import { createDiagram } from "@/lib/diagrams/actions"
+import { createWhiteboard, type SavedWhiteboard } from "@/lib/diagrams/actions"
 import { BLANK_FLOW } from "@/lib/diagrams/templates"
-import {
-  DIAGRAM_NAME_MAX_LENGTH,
-  type DiagramDetail,
-} from "@/lib/diagrams/types"
+import { DIAGRAM_NAME_MAX_LENGTH } from "@/lib/diagrams/types"
 
 type Props = {
   open: boolean
   onOpenChange: (open: boolean) => void
-  productId: string
-  onCreated: (created: DiagramDetail) => void
+  /** The folder it is made in — the current board's — or null for No folder. */
+  folderId: string | null
+  /** That folder's name, once the folder list has come; null for No folder. */
+  folderName?: string | null
+  onCreated: (created: SavedWhiteboard) => void
+  /** Where focus goes back to once the dialog closes without making one. */
+  returnFocusRef?: React.RefObject<HTMLElement | null>
 }
 
 export function NewFlowDiagramDialog({
   open,
   onOpenChange,
-  productId,
+  folderId,
+  folderName,
   onCreated,
+  returnFocusRef,
 }: Props) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent
+        className="sm:max-w-md"
+        onCloseAutoFocus={(event) => {
+          if (!returnFocusRef?.current?.isConnected) return
+          event.preventDefault()
+          returnFocusRef.current.focus()
+        }}
+      >
         {/* Remounted on every open (Radix unmounts the portal on close), so
             the name and any error start fresh each time. */}
         <NewFlowForm
-          productId={productId}
+          folderId={folderId}
+          folderName={folderName}
           onCancel={() => onOpenChange(false)}
           onCreated={(created) => {
             onOpenChange(false)
@@ -55,13 +71,15 @@ export function NewFlowDiagramDialog({
 }
 
 function NewFlowForm({
-  productId,
+  folderId,
+  folderName,
   onCancel,
   onCreated,
 }: {
-  productId: string
+  folderId: string | null
+  folderName?: string | null
   onCancel: () => void
-  onCreated: (created: DiagramDetail) => void
+  onCreated: (created: SavedWhiteboard) => void
 }) {
   const [name, setName] = useState("")
   const [submitting, setSubmitting] = useState(false)
@@ -73,14 +91,15 @@ function NewFlowForm({
     setError(null)
     setSubmitting(true)
     try {
-      const result = await createDiagram({ productId, name, spec: BLANK_FLOW })
+      // The workspace is left out on purpose: main fills in the one used last.
+      const result = await createWhiteboard({ folderId, name, spec: BLANK_FLOW })
       if (!result.ok) {
         setError(result.error)
         return
       }
       onCreated(result.data)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't create the diagram")
+      setError(err instanceof Error ? err.message : "Couldn't create the whiteboard")
     } finally {
       setSubmitting(false)
     }
@@ -89,10 +108,21 @@ function NewFlowForm({
   return (
     <form onSubmit={handleSubmit}>
       <DialogHeader>
-        <DialogTitle>New diagram</DialogTitle>
+        <DialogTitle>New whiteboard</DialogTitle>
         <DialogDescription>
           It opens on an empty canvas — put boxes, notes, text and images on
-          it and connect them. Changes save as you go.
+          it and connect them. Changes save as you go.{" "}
+          {folderId === null ? (
+            "Like this one, it isn't in a folder."
+          ) : folderName ? (
+            <>
+              It goes in{" "}
+              <span className="font-medium text-gray-900 dark:text-gray-50">{folderName}</span>,
+              with this one.
+            </>
+          ) : (
+            "It goes in this one's folder."
+          )}
         </DialogDescription>
       </DialogHeader>
 

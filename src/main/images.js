@@ -1,9 +1,9 @@
 'use strict';
 
-// images.js — Google Images beside a diagram, main's half. ARCHITECTURE §4.17.
+// images.js — Google Images beside a whiteboard, main's half. ARCHITECTURE §4.17.
 //
-// The Diagrams bundle docks a panel on the right of the canvas holding Google's own image
-// results in a <webview>, so a picture can be found and dragged onto a diagram without
+// The whiteboard bundle docks a panel on the right of the canvas holding Google's own image
+// results in a <webview>, so a picture can be found and dragged onto a whiteboard without
 // leaving the app. That page is the open web inside the app's window, so main keeps it
 // on a short lead:
 //   * The only <webview> the main window may attach is one in the 'persist:sb-images'
@@ -14,11 +14,11 @@
 //     downloads nothing (setupImagesSession).
 //   * A guest page's popups and its links "in a new window" open in the user's browser —
 //     only on the heels of the user's own click or key in it — and its right-click menu
-//     is a browser's, plus "Add Image to Diagram" (attachGuest).
+//     is a browser's, plus "Add Image to Whiteboard" (attachGuest).
 //   * A picture dragged out of the panel or added from that menu reaches the bundle as an
 //     ADDRESS, never as a File (Chromium does not hand a drag out of a <webview> over as
 //     one), so main fetches it through the same session and answers bytes that
-//     diagrams.saveImage() takes as they are: PNG, JPEG or WebP (fetchImage). Any other
+//     whiteboards.saveImage() takes as they are: PNG, JPEG or WebP (fetchImage). Any other
 //     format it can read is decoded by sips in a sandbox of its own (convertToPng).
 //
 // The pure helpers come first and load no Electron, so scripts/test-images.js can run
@@ -31,7 +31,7 @@ const path = require('path');
 const { execFile } = require('child_process');
 
 const PARTITION = 'persist:sb-images';
-// diagrams.saveImage's own cap, so nothing is fetched that it would then refuse.
+// whiteboards.saveImage's own cap, so nothing is fetched that it would then refuse.
 const IMAGE_MAX_BYTES = 25 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 20 * 1000;
 const CONVERT_TIMEOUT_MS = 15 * 1000;
@@ -351,7 +351,7 @@ function contextMenuItems(params, nav) {
   const groups = [];
   if (p.mediaType === 'image' && p.srcURL) {
     groups.push([
-      { id: 'addImage', label: 'Add Image to Diagram', enabled: isFetchableImageUrl(p.srcURL) || !!googleOriginal(p.linkURL) },
+      { id: 'addImage', label: 'Add Image to Whiteboard', enabled: isFetchableImageUrl(p.srcURL) || !!googleOriginal(p.linkURL) },
       { id: 'copyImage', label: 'Copy Image', enabled: p.hasImageContents !== false },
       { id: 'copyImageAddress', label: 'Copy Image Address', enabled: true },
       // A thumbnail is often a data: URL, which no browser can be handed.
@@ -413,7 +413,7 @@ function setupImagesSession() {
 }
 
 /**
- * What Add Image to Diagram sends the page (sb:evt:diagramsImageOffer) for a right-click
+ * What Add Image to Whiteboard sends the page (sb:evt:diagramsImageOffer) for a right-click
  * at `params`: the full picture behind a Google result when there is one, else the
  * picture clicked — and that one as the fallback, should the full picture not come.
  */
@@ -574,7 +574,7 @@ async function finish(buf, name) {
  * A picture from the panel, by address: { ok, bytes, type, name } or { ok:false, error }.
  * Through the panel's own session, so it goes out with that session's cookies and cache —
  * often the very bytes the panel just showed. `referrer` is the page the picture was on,
- * when the caller knows it — Add Image to Diagram does; a drop does not, and goes with
+ * when the caller knows it — Add Image to Whiteboard does; a drop does not, and goes with
  * none — and then it carries the Referer a browser would send from there (refererFor).
  * A Google /imgres link is fetched as the original picture inside it, with that
  * picture's own page as the Referer (sourcePageOf) whoever asks.

@@ -3,9 +3,10 @@
 //   SB.views.workspace.render(state) -> the whole <main> column for
 //     {view:'workspace', wsId, tab:'changes'}
 //   SB.views.workspace.header(ws, state) -> the fixed .hd block; views/logs.js,
-//     views/terminal.js, views/editor.js and views/diagrams.js call this so every tab
+//     views/terminal.js, views/editor.js and views/databases.js call this so every tab
 //     carries exactly the same title, sub line, buttons and
-//     Changes | Logs | Terminal | Editor | Diagrams | Databases.
+//     Changes | Logs | Terminal | Editor | Databases. Whiteboards are not a tab: they
+//     belong to no workspace and have their own screen in the rail (views/whiteboards.js).
 //   SB.views.workspace.changesBody(ws, state) -> the Changes content for a Grid cell.
 //
 // One repo is ONE row: name, branch pill, a refresh when it sits on main, and
@@ -189,10 +190,10 @@ SB.views = SB.views || {};
   }
 
   // The tabs that compose themselves from this header — views/logs.js,
-  // views/terminal.js, views/editor.js and views/diagrams.js each borrow it and own
+  // views/terminal.js, views/editor.js and views/databases.js each borrow it and own
   // what is below it. A whitelist rather than a logs/else test: with more than two
   // tabs an else would print `Changes` selected while the Terminal is on screen.
-  var HEADER_TABS = { changes: 1, logs: 1, terminal: 1, editor: 1, diagrams: 1, databases: 1 };
+  var HEADER_TABS = { changes: 1, logs: 1, terminal: 1, editor: 1, databases: 1 };
 
   function header(ws, state) {
     var run = runOf(state, ws.id);
@@ -214,7 +215,6 @@ SB.views = SB.views || {};
       segmented(
         [{ key: 'changes', label: 'Changes' }, { key: 'logs', label: 'Logs' },
           { key: 'terminal', label: 'Terminal' }, { key: 'editor', label: 'Editor' },
-          { key: 'diagrams', label: 'Diagrams' },
           { key: 'databases', label: 'Databases' }],
         tab,
         function (key) { go({ view: 'workspace', wsId: ws.id, tab: key }); }

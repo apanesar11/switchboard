@@ -1,75 +1,87 @@
 "use client"
 
-// Switchboard's copy of the admin's app/dashboard/diagrams/DiagramsPage.tsx: the
-// Diagrams tab or Grid pane of ONE workspace. Mirrored by hand like FlowEditor.tsx;
-// what differs:
+// Switchboard's copy of the admin's app/dashboard/diagrams/DiagramsPage.tsx: ONE
+// whiteboard, open — on the Whiteboards screen or in a Grid square. Mirrored by hand
+// like FlowEditor.tsx; what differs:
 //
-//   * A workspace, not a product. `wsId` is what the admin calls productId, and the
-//     diagrams are files on this Mac (lib/diagrams/actions.ts), not rows.
-//   * No page header. Switchboard's workspace header (name, branch, tabs) sits above,
-//     so "New diagram" moves into the bar over the canvas, beside Actions.
+//   * A board, not a product's list. The page shows exactly `boardId` and never picks
+//     another on its own: the quick switcher, ← / →, New whiteboard and Duplicate ask
+//     the host to open a board (`onOpenBoard`), which changes the route, and the host
+//     keeps one canvas per board (views/whiteboards.js). Boards are files on this Mac
+//     (lib/diagrams/actions.ts), in folders the user makes, not rows.
+//   * No page header. Switchboard's header (Whiteboards › folder › board, and a status
+//     line) sits above and is fed by `onBoardChange` after the load and every write, so
+//     the bar over the canvas holds only the switcher, New whiteboard, full screen and
+//     Actions.
 //   * Full screen covers the window, below the macOS traffic lights — its bar is a
 //     window drag region with room left for them, as the Editor's full screen is.
-//   * Actions ▸ Rename (RenameDiagramDialog), which the admin doesn't have.
-//   * `active`: false while off screen or another Grid pane has the keyboard. Each
-//     workspace tree stays mounted (views/diagrams.js keeps it), but may not answer
-//     keys meant for a terminal or another canvas. The editor hears it too (`shown`)
-//     so its Google Images panel stops accepting input when inactive.
+//   * Actions ▸ Open terminal…, Show or hide terminals, Rename, Move to folder…,
+//     Duplicate, which the admin doesn't have. Terminals float over the board in the
+//     host's layer (views/wbterminals.js); this page only asks for them.
+//   * ✦ Answer reads the board's own workspace (`board.workspace`), changed from the
+//     editor's AI menu and remembered with the board.
+//   * `active`: false while off screen or another Grid square has the keyboard. Each
+//     board's tree stays mounted (the host keeps it), but may not answer keys meant
+//     for a terminal or another canvas. The editor hears it too (`shown`) so its
+//     Google Images panel stops accepting input when inactive.
 //
-// The canvas IS the editor (FlowEditor.tsx), and changes save as you go.
+// The canvas IS the editor (FlowEditor.tsx), and changes save as you go — the spec
+// only. Rename writes the name only, so neither can carry an old copy of the other
+// over a newer one written somewhere else.
 //
-// Diagrams are switched through a searchable dropdown (DiagramPicker), which
-// lists active diagrams first and archived ones under an "Archived" heading at
-// the bottom. Archiving puts a diagram away and can be undone; Delete, behind
-// a confirmation, removes it for good. Both live in the Actions menu, so the
-// bar over the canvas stays quiet.
-//
-// The dropdown is flanked by ← / → arrows that step to the diagram either side
-// of it in exactly that order. They are on the bare arrow keys here, unlike
-// Mockups: a diagram is one canvas, so there is no second list for ← / → to
-// belong to.
+// The switcher (DiagramPicker) lists the boards of THIS board's folder, active ones
+// first and archived ones under an "Archived" heading at the bottom. It is flanked by
+// ← / → arrows that step to the board either side in exactly that order, on the bare
+// arrow keys: a board is one canvas, so there is no second list for them to belong to.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import * as PopoverPrimitives from "@radix-ui/react-popover"
 import {
-  RiAddLine,
-  RiArchiveLine,
-  RiArrowDownSLine,
   RiArrowLeftSLine,
   RiArrowRightSLine,
-  RiDeleteBinLine,
-  RiEditLine,
-  RiFlowChart,
+  RiErrorWarningLine,
   RiFullscreenExitLine,
-  RiFullscreenLine,
-  RiInboxUnarchiveLine,
-  RiTerminalBoxLine,
 } from "@remixicon/react"
 import {
-  archiveDiagram,
-  getDiagram,
-  listDiagrams,
-  unarchiveDiagram,
-  updateDiagram,
+  archiveWhiteboard,
+  duplicateWhiteboard,
+  getWhiteboard,
+  isMissingWhiteboard,
+  listWhiteboards,
+  listWorkspaceChoices,
+  moveWhiteboard,
+  renameWhiteboard,
+  saveWhiteboardSpec,
+  setWhiteboardWorkspace,
+  unarchiveWhiteboard,
+  type OpenedWhiteboard,
 } from "@/lib/diagrams/actions"
-import type {
-  DiagramDetail,
-  DiagramSpec,
-  DiagramSummary,
-  FlowSpec,
-} from "@/lib/diagrams/types"
+import type { DiagramSummary, FlowSpec, TerminalSlot } from "@/lib/diagrams/types"
+import { diagramNavigation, searchDiagrams } from "@/lib/diagrams/search"
 import {
-  diagramNavigation,
-  preferredSelection,
-  searchDiagrams,
-} from "@/lib/diagrams/search"
+  listen,
+  type WhiteboardFolder,
+  type WhiteboardSummary,
+  type WhiteboardsIndex,
+  type WorkspaceChoices,
+  type WorkspaceStatus,
+} from "@/lib/bridge"
+import { usePortalContainer } from "@/lib/portal"
 import { cx, focusRing } from "@/lib/utils"
 import { Button } from "@/components/Button"
+import { Glyph } from "@/components/Glyph"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuIconWrapper,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSubMenu,
+  DropdownMenuSubMenuContent,
+  DropdownMenuSubMenuTrigger,
   DropdownMenuTrigger,
 } from "@/components/Dropdown"
 import { toast } from "@/components/Toast"
@@ -79,6 +91,7 @@ import { DeleteDiagramDialog } from "./DeleteDiagramDialog"
 import { FlowEditor, type FlowEditorHandle } from "./FlowEditor"
 import { NewFlowDiagramDialog } from "./NewFlowDiagramDialog"
 import { RenameDiagramDialog } from "./RenameDiagramDialog"
+import { WorkspacePicker } from "./WorkspacePicker"
 import { useArrowKeys } from "../mockups/useArrowKeys"
 
 // Short relative label. Only ever rendered after the fetch resolves.
@@ -99,13 +112,13 @@ function formatRelative(iso: string): string {
   })
 }
 
-// One of the two arrows flanking the picker. Styled as a sibling of the picker
-// trigger rather than as a bare icon, so the three read as one control.
+// One of the two arrows flanking the switcher. Styled as a sibling of its trigger
+// rather than as a bare icon, so the three read as one control.
 //
-// `target` is the diagram this arrow lands on — null at the ends of the list,
-// which is what disables the button. Naming it (and flagging an archived one)
-// means stepping off the end of the active diagrams and into the Archived
-// section is something you can see coming.
+// `target` is the board this arrow lands on — null at the ends of the list, which
+// is what disables the button. Naming it (and flagging an archived one) means
+// stepping off the end of the active boards and into the Archived section is
+// something you can see coming.
 function DiagramStepButton({
   direction,
   target,
@@ -116,7 +129,7 @@ function DiagramStepButton({
   onSelect: (id: string) => void
 }) {
   const Icon = direction === "prev" ? RiArrowLeftSLine : RiArrowRightSLine
-  const what = `${direction === "prev" ? "Previous" : "Next"} diagram`
+  const what = `${direction === "prev" ? "Previous" : "Next"} whiteboard`
   const label = target
     ? `${what} — ${target.name}${target.archivedAt !== null ? " (archived)" : ""}`
     : what
@@ -145,192 +158,424 @@ function DiagramStepButton({
 // The bar's quiet buttons, drawn the way Switchboard draws its own (styles.css .btn
 // and .ib): 30px, 8px corners, a hairline edge.
 const BAR_BUTTON = cx(
-  "h-[30px] rounded-lg border-black/[.13] px-3 text-[13px] font-medium shadow-none",
+  "h-[30px] gap-[7px] rounded-lg border-black/[.13] px-3 text-[13px] font-medium shadow-none",
   "hover:bg-[#f5f5f7] dark:border-white/15 dark:hover:bg-gray-900",
 )
 
+// The Actions menu's rows, at the height and size of Switchboard's own menus.
+const MENU_ITEM = "h-[30px] gap-[9px] rounded-[7px] px-[9px] py-0 text-[13px]"
+const MENU_ICON = "flex size-[14px] items-center justify-center text-[#3a3a3c] dark:text-gray-400"
+
+// The Move to folder… value for No folder. Folder ids are uuids, so it can't collide.
+const NO_FOLDER = "none"
+
+const OPEN_TERMINAL_FOOTER =
+  "The same shell as the workspace's Terminal tab. One already open comes to the front."
+
+/** A rectangle in client (window) pixels. */
+export type ClientRect = { left: number; top: number; width: number; height: number }
+
 export type DiagramsPageProps = {
-  /** The workspace whose diagrams these are — the admin's productId. */
-  wsId: string
-  /** Its name, for the empty state and for "Reads sample-api first". */
-  wsName: string
-  /** False while off screen or another Grid pane owns the keyboard. */
+  /** The whiteboard on screen. The page shows exactly this one. */
+  boardId: string
+  /** False while off screen or another Grid square owns the keyboard. */
   active: boolean
   onOpenSettings?: () => void
-  onOpenTerminal?: () => void
-  terminalOpen?: boolean
-  onToggleTerminal?: () => void
+  /** Open another board — the switcher, ← / →, New whiteboard and Duplicate. */
+  onOpenBoard: (id: string) => void
+  /**
+   * Leave the board for `folderId`'s list: Delete, or Back. `missing` says the board is
+   * gone (deleted, or not found) rather than merely unreadable for now — only a gone
+   * board may be refused from then on; one that couldn't be read may open again.
+   */
+  onClosed: (folderId: string | null, info?: ClosedInfo) => void
+  /** The board and its folder after the load and after every write, for the header. */
+  onBoardChange: (board: WhiteboardSummary | null, folder: WhiteboardFolder | null) => void
+  /** The rail's dot and branch for each workspace — pinned terminals and pickers. */
+  workspaceStatus: WorkspaceStatus
+  /** Float a terminal for the workspace over the board, or bring its panel to front. */
+  onOpenTerminal: (wsId: string) => void
+  /** Show or hide every floating terminal (⌘A). */
+  onToggleTerminals: () => void
+  /** Where pinned terminals are on screen — [] whenever no editor is drawn. */
+  onTerminalSlots: (slots: TerminalSlot[]) => void
+  /** A pinned terminal's Float button. */
+  onTerminalFloat: (wsId: string) => void
+  /** A pinned terminal left the canvas by undo or by delete, from where it was. */
+  onTerminalRemoved: (wsId: string, reason: "undo" | "delete", rect: ClientRect) => void
+  /** A workspace picker the host opened through the handle is showing — it has the keys. */
+  pickerOpen?: boolean
   /** The editor on screen, so the Edit menu and the quit flush can reach it. */
   onEditor?: (editor: FlowEditorHandle | null) => void
   /** Whether that editor holds anything not yet saved. */
   onDirtyChange?: (dirty: boolean) => void
-  /** The owning workspace's full-screen controls, also used from Grid. */
+  /** The board's full-screen controls, also used from Grid. */
   onFullscreen?: (handle: FullscreenHandle | null) => void
   onFullscreenChange?: (open: boolean) => void
 }
 
 export type FullscreenHandle = { isFullscreen: () => boolean; leave: () => void }
 
+export type ClosedInfo = { missing?: boolean }
+
+// The board as this page last saw it, tagged with the id it belongs to — so one
+// board's name never paints over another's drawing if the host swaps `boardId`.
+type Loaded =
+  | { boardId: string; status: "ready"; board: OpenedWhiteboard }
+  | { boardId: string; status: "missing" }
+  | { boardId: string; status: "error"; error: string }
+
+function summaryOf(board: OpenedWhiteboard): WhiteboardSummary {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { spec, specError, ...summary } = board
+  return summary
+}
+
 export function DiagramsPage({
-  wsId,
-  wsName,
+  boardId,
   active,
   onOpenSettings,
+  onOpenBoard,
+  onClosed,
+  onBoardChange,
+  workspaceStatus,
   onOpenTerminal,
-  terminalOpen,
-  onToggleTerminal,
+  onToggleTerminals,
+  onTerminalSlots,
+  onTerminalFloat,
+  onTerminalRemoved,
+  pickerOpen = false,
   onEditor,
   onDirtyChange,
   onFullscreen,
   onFullscreenChange,
 }: DiagramsPageProps) {
-  const productId = wsId
+  const portal = usePortalContainer()
+  const [loaded, setLoaded] = useState<Loaded | null>(null)
+  const current = loaded !== null && loaded.boardId === boardId ? loaded : null
+  const board = current?.status === "ready" ? current.board : null
 
-  const [diagrams, setDiagrams] = useState<DiagramSummary[] | null>(null)
+  // Every folder and board, for the switcher, the folder's name and Move to folder…
+  // It comes after the board and is refetched when main says something changed.
+  const [index, setIndex] = useState<WhiteboardsIndex | null>(null)
+  const [listFailed, setListFailed] = useState(false)
+  const [workspaceChoices, setWorkspaceChoices] = useState<WorkspaceChoices | null>(null)
   const [search, setSearch] = useState("")
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [version, setVersion] = useState(0)
-  // The selected diagram's spec, tagged with the diagram it belongs to.
-  // Deriving `spec` from that tag (rather than resetting it to null in an
-  // effect) means the canvas never paints one diagram's title against another
-  // diagram's drawing during a switch.
-  const [specCache, setSpecCache] = useState<{
-    diagramId: string
-    spec: DiagramSpec | null
-    error: string | null
-  } | null>(null)
-  // Bumped on every save so the canvas remounts and re-fits rather than holding
-  // the pan/zoom of the pre-save drawing.
-  const [canvasNonce, setCanvasNonce] = useState(0)
+
   // Paint the canvas over the whole window. Plain state, not the browser
   // Fullscreen API: the pane merely swaps to fixed positioning, so React Flow
   // is never unmounted and every keyboard shortcut keeps working.
   const [fullscreen, setFullscreen] = useState(false)
   const fullscreenNow = useRef(false)
   const paneRef = useRef<HTMLDivElement | null>(null)
-  // Guards archive/unarchive so a double-click can't fire two writes.
-  const [archiving, setArchiving] = useState(false)
+  // One structural write at a time (archive, move, duplicate), so a double-click
+  // can't fire two.
+  const [busy, setBusy] = useState(false)
 
   // The Actions menu, while open, has the keyboard (see keyboardEnabled). Its
   // trigger is where focus goes back to after a dialog opened from it.
   const [actionsOpen, setActionsOpen] = useState(false)
   const actionsRef = useRef<HTMLButtonElement | null>(null)
+  // What an Actions item opens — a dialog, or the Open terminal… picker — waits here
+  // until the menu has finished closing. Opened in the same tick, a modal dialog
+  // and the closing menu each take a turn at <body>'s pointer-events, and the menu's
+  // restore can lose: the window is left with pointer-events: none, dead to clicks.
+  // `toTrigger`: focus goes back to the Actions button first, as after any menu, for
+  // an action whose result takes focus later on its own (a terminal the host shows).
+  // `stale`: picked as the board left the screen. The menu's exit animation stalls in
+  // the hidden portal and ends only once the board is back, long after the user moved
+  // on — the item is dropped then, and focus stays wherever it is.
+  const afterMenu = useRef<{ run: () => void; toTrigger?: boolean; stale?: boolean } | null>(null)
+  // Actions ▸ Open terminal…: a popover anchored to the Actions button.
+  const [terminalPickerOpen, setTerminalPickerOpen] = useState(false)
+  const pickedTerminal = useRef(false)
   const [deleteTarget, setDeleteTarget] = useState<{
     id: string
     name: string
     archived: boolean
   } | null>(null)
   const [newFlowOpen, setNewFlowOpen] = useState(false)
-  // Switchboard: the diagram Actions ▸ Rename is open for.
+  // Switchboard: the board Actions ▸ Rename is open for.
   const [renameTarget, setRenameTarget] = useState<{ id: string; name: string } | null>(null)
-  // The editor, so a pending autosave can be written before the diagram is
-  // deleted out from under it.
+  // The editor, so a pending autosave can be written before a structural write.
   const flowEditorRef = useRef<FlowEditorHandle | null>(null)
-  const attachEditor = (editor: FlowEditorHandle | null) => {
+  const attachEditor = useCallback((editor: FlowEditorHandle | null) => {
     flowEditorRef.current = editor
     onEditor?.(editor)
-  }
+  }, [onEditor])
 
-  const selected = (diagrams ?? []).find((d) => d.id === selectedId) ?? null
-  const isArchived = selected?.archivedAt != null
-  const loaded =
-    specCache !== null && specCache.diagramId === selectedId ? specCache : null
+  // Bumped as each of this page's own writes lands. A folder list fetched before one
+  // landed may predate it, so it must not overwrite the board's name or folder.
+  const writes = useRef(0)
+  // Set once this page deleted the board, so main's "deleted" echo isn't mistaken
+  // for the board vanishing under it.
+  const deleted = useRef(false)
+  const boardIdNow = useRef(boardId)
+  useEffect(() => {
+    boardIdNow.current = boardId
+  }, [boardId])
+  const activeNow = useRef(active)
+  useEffect(() => {
+    activeNow.current = active
+  }, [active])
 
+  const isArchived = board !== null && board.archivedAt !== null
+  const editorShown = board !== null && board.spec !== null && !isArchived
+
+  // ── Loading ──────────────────────────────────────────────────────────
+
+  // Bumped to read the board again after it couldn't be read: Try again, or the board
+  // coming back on screen. A file fixed by hand, or a read that failed for a moment,
+  // then opens without a restart — the host keeps this canvas while it is parked.
+  const [reload, setReload] = useState(0)
+  const [retrying, setRetrying] = useState(false)
+  const unreadable = current?.status === "error"
+  const unreadableNow = useRef(unreadable)
+  useEffect(() => {
+    unreadableNow.current = unreadable
+  }, [unreadable])
+  const readAgain = useCallback(() => {
+    setRetrying(true)
+    setReload((value) => value + 1)
+  }, [])
+
+  // The board first: its canvas is drawn without waiting for the folder list. Read
+  // again keeps what is on screen until the answer comes.
   useEffect(() => {
     let cancelled = false
-    listDiagrams({ productId })
+    deleted.current = false
+    getWhiteboard({ id: boardId })
       .then((result) => {
         if (cancelled) return
-        if (result.ok) {
-          setDiagrams(result.data)
-          // Keep the current selection when it survived the refresh, otherwise
-          // fall back to the first ACTIVE diagram — "diagrams exist but none
-          // selected" is never a state the user sees, and a fresh visit should
-          // never open onto something archived.
-          setSelectedId((prev) => {
-            if (prev && result.data.some((d) => d.id === prev)) return prev
-            const active = result.data.find((d) => d.archivedAt === null)
-            return active?.id ?? result.data[0]?.id ?? null
-          })
-        } else {
-          setDiagrams([])
-          toast({
-            title: "Couldn't load diagrams",
-            description: result.error,
-            variant: "error",
-          })
+        if (result.ok) setLoaded({ boardId, status: "ready", board: result.data })
+        else if (isMissingWhiteboard(result)) setLoaded({ boardId, status: "missing" })
+        else setLoaded({ boardId, status: "error", error: result.error })
+      })
+      .catch((err) => {
+        console.error("getWhiteboard failed:", err)
+        if (!cancelled) {
+          setLoaded({ boardId, status: "error", error: err instanceof Error ? err.message : "Request failed" })
         }
       })
-      .catch((err) => {
-        console.error("listDiagrams failed:", err)
-        if (!cancelled) setDiagrams([])
+      .finally(() => {
+        if (!cancelled) setRetrying(false)
       })
-
     return () => {
       cancelled = true
     }
-  }, [productId, version])
+  }, [boardId, reload])
 
-  // The selected diagram's spec. A spec that no longer validates is kept as an
-  // ERROR rather than a failure to load: the canvas says what is wrong with it,
-  // and the diagram can still be archived or deleted.
-  useEffect(() => {
-    if (selectedId === null) return
-    let cancelled = false
+  // A summary main wrote for this page — its own write — folded straight in. The
+  // spec stays as the editor has it, unless the write was a save that carried one.
+  const applyWrite = useCallback((summary: WhiteboardSummary, spec?: FlowSpec) => {
+    writes.current++
+    setLoaded((prev) =>
+      prev && prev.status === "ready" && prev.board.id === summary.id
+        ? {
+            ...prev,
+            board: {
+              ...prev.board,
+              ...summary,
+              ...(spec ? { spec, specError: null } : {}),
+            },
+          }
+        : prev,
+    )
+  }, [])
 
-    getDiagram({ productId, id: selectedId })
+  // The same board as somewhere else last left it — the Whiteboards screen can move
+  // it to another folder. Only what other screens change is taken; the counts are
+  // taken only when they are newer than the ones this page's own saves brought.
+  const applyRemote = useCallback((fresh: WhiteboardSummary) => {
+    setLoaded((prev) => {
+      if (!prev || prev.status !== "ready" || prev.board.id !== fresh.id) return prev
+      const mine = prev.board
+      const newer = fresh.updatedAt > mine.updatedAt
+      const next = {
+        ...mine,
+        name: fresh.name,
+        folderId: fresh.folderId,
+        archivedAt: fresh.archivedAt,
+        workspace: fresh.workspace,
+        ...(newer
+          ? { updatedAt: fresh.updatedAt, boxes: fresh.boxes, reads: fresh.reads, thumb: fresh.thumb }
+          : {}),
+      }
+      const same =
+        next.name === mine.name &&
+        next.folderId === mine.folderId &&
+        next.archivedAt === mine.archivedAt &&
+        next.workspace === mine.workspace &&
+        !newer
+      return same ? prev : { ...prev, board: next }
+    })
+  }, [])
+
+  // Asked again when the folder list no longer has this board: gone, or unreadable.
+  const recheckBoard = useCallback(() => {
+    const id = boardIdNow.current
+    void getWhiteboard({ id }).then((result) => {
+      if (deleted.current || boardIdNow.current !== id) return
+      if (result.ok) applyRemote(summaryOf(result.data))
+      else if (isMissingWhiteboard(result)) setLoaded({ boardId: id, status: "missing" })
+    })
+  }, [applyRemote])
+
+  const refreshList = useCallback(() => {
+    const started = writes.current
+    listWhiteboards()
       .then((result) => {
-        if (cancelled) return
-        setSpecCache({
-          diagramId: selectedId,
-          spec: result.ok ? result.data.spec : null,
-          error: result.ok ? null : result.error,
-        })
+        if (!result.ok) {
+          setListFailed(true)
+          console.error("listWhiteboards failed:", result.error)
+          return
+        }
+        setListFailed(false)
+        setIndex(result.data)
+        const id = boardIdNow.current
+        const mine = result.data.boards.find((b) => b.id === id)
+        if (mine && writes.current === started) applyRemote(mine)
+        else if (!mine && !deleted.current) recheckBoard()
       })
       .catch((err) => {
-        console.error("getDiagram failed:", err)
-        if (cancelled) return
-        setSpecCache({
-          diagramId: selectedId,
-          spec: null,
-          error: err instanceof Error ? err.message : "Request failed",
-        })
+        console.error("listWhiteboards failed:", err)
+        setListFailed(true)
       })
+  }, [applyRemote, recheckBoard])
 
-    return () => {
-      cancelled = true
+  const refreshChoices = useCallback(() => {
+    listWorkspaceChoices()
+      .then((result) => {
+        if (result.ok) setWorkspaceChoices(result.data)
+        else console.error("listWorkspaceChoices failed:", result.error)
+      })
+      .catch((err) => console.error("listWorkspaceChoices failed:", err))
+  }, [])
+
+  // Once on mount, and again each time the board comes back on screen: a parked
+  // canvas's list goes stale while another screen moves and renames things.
+  const wasActive = useRef<boolean | null>(null)
+  useEffect(() => {
+    const first = wasActive.current === null
+    const cameBack = active && wasActive.current === false
+    wasActive.current = active
+    if (first || cameBack) {
+      refreshList()
+      refreshChoices()
     }
-    // A save writes the new spec straight into specCache, so there is no
-    // separate refetch trigger here.
-  }, [productId, selectedId])
+    if (cameBack && unreadableNow.current) readAgain()
+  }, [active, refreshList, refreshChoices, readAgain])
 
-  const results = useMemo(
-    () => searchDiagrams(diagrams ?? [], search),
-    [diagrams, search],
+  // Main says what changed. A save of this very board is this page's own autosave and
+  // changes nothing the list shows here; anything else may have renamed a folder,
+  // moved a board in or out of this folder, or moved this board — refetched once
+  // things settle, so a burst of writes costs one list. Another board's save only
+  // reorders the switcher, so a canvas off screen leaves it to the refetch it makes
+  // on coming back rather than following every keystroke typed elsewhere.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const off = listen("onWhiteboardsChanged", (change) => {
+      if (change && change.reason === "save") {
+        if (change.boardId === boardIdNow.current || !activeNow.current) return
+      }
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        refreshList()
+      }, 120)
+    })
+    return () => {
+      off()
+      if (timer) clearTimeout(timer)
+    }
+  }, [refreshList])
+
+  // ── What the rest of the page reads ─────────────────────────────────
+
+  const folder = useMemo(
+    () => (board && board.folderId !== null ? index?.folders.find((f) => f.id === board.folderId) ?? null : null),
+    [board, index],
   )
+  // "Architecture", "No folder", or null while the folder's name isn't known yet.
+  const folderLabel =
+    board === null
+      ? null
+      : board.folderId === null
+        ? "No folder"
+        : folder
+          ? folder.name
+          : index !== null || listFailed
+            ? "No folder"
+            : null
 
-  // The diagram either side of the selection, in the picker's own order —
-  // including whatever a live search has filtered it down to.
-  const nav = useMemo(
-    () => diagramNavigation(results, selectedId),
-    [results, selectedId],
-  )
+  // The boards of this board's folder, with this one as the page holds it — its own
+  // saves don't refetch the list, so the list's copy of it may be behind.
+  const siblings = useMemo<DiagramSummary[] | null>(() => {
+    if (!index || !board) return null
+    const others = index.boards.filter((b) => b.folderId === board.folderId && b.id !== board.id)
+    return [summaryOf(board), ...others]
+  }, [index, board])
 
-  // The keys belong to whatever owns focus while a dialog or menu is open — and to
-  // nothing here at all while the tab is off screen.
+  const results = useMemo(() => searchDiagrams(siblings ?? [], search), [siblings, search])
+  // The board either side of this one, in the switcher's own order — including
+  // whatever a live search has filtered it down to.
+  const nav = useMemo(() => diagramNavigation(results, boardId), [results, boardId])
+
+  // The keys belong to whatever owns focus while a dialog, menu or picker is open —
+  // and to nothing here at all while the board is off screen.
   const keyboardEnabled =
-    active && !actionsOpen && deleteTarget === null && !newFlowOpen && renameTarget === null
+    active &&
+    !actionsOpen &&
+    !terminalPickerOpen &&
+    !pickerOpen &&
+    deleteTarget === null &&
+    !newFlowOpen &&
+    renameTarget === null
 
-  function stepDiagram(delta: -1 | 1) {
-    const target = delta === -1 ? nav.previous : nav.next
-    if (target) setSelectedId(target.id)
+  function openBoard(id: string) {
+    if (id !== boardId) onOpenBoard(id)
   }
 
-  useArrowKeys(keyboardEnabled && nav.ordered.length > 1, stepDiagram)
+  function stepBoard(delta: -1 | 1) {
+    const target = delta === -1 ? nav.previous : nav.next
+    if (target) openBoard(target.id)
+  }
+
+  useArrowKeys(keyboardEnabled && nav.ordered.length > 1, stepBoard)
+
+  // ── Telling the host ────────────────────────────────────────────────
+
+  // The header's breadcrumb and status line. Reported once the folder's name is
+  // known (or there is none), so it never flashes "No folder" for a board that has one.
+  const boardChange = useRef(onBoardChange)
+  useEffect(() => {
+    boardChange.current = onBoardChange
+  })
+  useEffect(() => {
+    if (current === null) return
+    if (current.status !== "ready") {
+      boardChange.current(null, null)
+      return
+    }
+    if (current.board.folderId !== null && folderLabel === null) return
+    boardChange.current(summaryOf(current.board), folder)
+  }, [current, folder, folderLabel])
+
+  // No editor drawn (loading, archived, missing, or a spec that can't be drawn): no
+  // pinned terminal has anywhere to be, so the host's overlays must all go.
+  const terminalSlots = useRef(onTerminalSlots)
+  useEffect(() => {
+    terminalSlots.current = onTerminalSlots
+  })
+  useEffect(() => {
+    if (!editorShown) terminalSlots.current([])
+  }, [editorShown])
+
+  // ── Keyboard and full screen ────────────────────────────────────────
 
   // Esc leaves full screen, like any lightbox. Gated on keyboardEnabled so a
-  // dialog opened over the overlay keeps Esc for itself. views/diagrams.js asks
-  // isFullscreen() first, so Switchboard's own Esc (back) waits its turn.
+  // dialog opened over the overlay keeps Esc for itself. The host asks
+  // isFullscreen() first, so Switchboard's own Esc waits its turn.
   useEffect(() => {
     if (!fullscreen || !keyboardEnabled) return
     function onKeyDown(event: KeyboardEvent) {
@@ -350,17 +595,28 @@ export function DiagramsPage({
     onFullscreenChange?.(fullscreen)
   }, [fullscreen, onFullscreenChange])
 
-  // Body-level dialogs and menus cannot remain visible after this workspace loses
-  // the screen or another Grid pane takes the keyboard.
+  // Body-level dialogs and menus cannot remain visible after this board loses
+  // the screen or another Grid square takes the keyboard.
   useEffect(() => {
     if (!active) {
+      // A menu closing now finishes only once the board is back (see afterMenu).
+      if (afterMenu.current || actionsOpen) afterMenu.current = { run: () => {}, stale: true }
       setFullscreen(false)
       setActionsOpen(false)
+      setTerminalPickerOpen(false)
       setDeleteTarget(null)
       setNewFlowOpen(false)
       setRenameTarget(null)
     }
   }, [active])
+
+  // A different board in the same instance starts with nothing of the last one's open.
+  useEffect(() => {
+    setSearch("")
+    setDeleteTarget(null)
+    setRenameTarget(null)
+    setTerminalPickerOpen(false)
+  }, [boardId])
 
   // Entering full screen moves focus off the now-invisible toolbar and into the
   // overlay — otherwise Tab/Enter keep operating the hidden buttons behind it,
@@ -369,48 +625,64 @@ export function DiagramsPage({
     if (fullscreen) paneRef.current?.focus()
   }, [fullscreen])
 
-  // Move the selection into the search results when — and ONLY when — the
-  // search itself changes. Gating on the search string (rather than re-running
-  // whenever `results` changes) is load-bearing: `results` also changes when a
-  // diagram is archived or created, and re-running then would yank the canvas
-  // to a different diagram, or silently drop the one just created.
-  const autoSelectedFor = useRef<string | null>(null)
+  // Each board owns its own canvas, including while several are on the Grid.
   useEffect(() => {
-    if (diagrams === null) return
-    if (autoSelectedFor.current === search) return
-    autoSelectedFor.current = search
-    const next = preferredSelection(results, selectedId)
-    if (next === null || next === selectedId) return
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setSelectedId(next)
-  }, [diagrams, search, results, selectedId])
-
-  // Fold a just-written diagram back into the list straight away.
-  function applyWrite(saved: DiagramSummary) {
-    setDiagrams((prev) => {
-      if (prev === null) return prev
-      const index = prev.findIndex((d) => d.id === saved.id)
-      if (index === -1) return [saved, ...prev]
-      const next = [...prev]
-      next[index] = saved
-      return next
+    onFullscreen?.({
+      isFullscreen: () => fullscreenNow.current,
+      leave: () => setFullscreen(false),
     })
+    return () => onFullscreen?.(null)
+  }, [onFullscreen])
+
+  // ── Writes ──────────────────────────────────────────────────────────
+
+  // The editor's autosave: the spec only. It never remounts the canvas — the editor
+  // already shows what was saved, and a remount would drop the selection, the
+  // viewport and the undo history mid-edit. `id` is bound when the editor renders,
+  // so a save flushed as it unmounts still goes to the board it came from.
+  async function saveFlow(id: string, spec: FlowSpec): Promise<string | null> {
+    const result = await saveWhiteboardSpec({ id, spec })
+    if (!result.ok) return result.error
+    const { spec: savedSpec, ...summary } = result.data
+    applyWrite(summary, savedSpec)
+    return null
   }
 
-  // Archive and unarchive are the same shape: one write, then refresh the list
-  // so the picker regroups. The diagram stays selected either way, which is
-  // what makes archiving feel undoable — Unarchive is right there.
-  async function handleArchiveToggle() {
-    if (!selected || archiving) return
-    const archived = selected.archivedAt !== null
-    // The diagram's last few edits are written before it goes read-only.
-    if (!archived) await flowEditorRef.current?.flush()
-    setArchiving(true)
-    try {
-      const result = archived
-        ? await unarchiveDiagram({ productId, id: selected.id })
-        : await archiveDiagram({ productId, id: selected.id })
+  // Switchboard: Rename — the name only.
+  async function renameBoard(id: string, name: string): Promise<string | null> {
+    const result = await renameWhiteboard({ id, name })
+    if (!result.ok) return result.error
+    applyWrite(result.data)
+    toast({ title: `Renamed to ${result.data.name}`, variant: "success" })
+    return null
+  }
 
+  // The workspace ✦ Answer reads, picked in the editor's AI menu.
+  async function changeWorkspace(wsId: string) {
+    if (!board) return
+    const result = await setWhiteboardWorkspace({ id: board.id, workspace: wsId })
+    if (!result.ok) {
+      toast({ title: "Couldn't change the workspace", description: result.error, variant: "error" })
+      return
+    }
+    applyWrite(result.data)
+    // Main moved it to the front of the recent ones.
+    refreshChoices()
+  }
+
+  // Archive and unarchive are the same shape: one write, after which the switcher
+  // regroups (main's change event refetches it). The board stays open either way,
+  // which is what makes archiving feel undoable — Unarchive is right there.
+  async function handleArchiveToggle() {
+    if (!board || busy) return
+    const archived = board.archivedAt !== null
+    setBusy(true)
+    try {
+      // The board's last few edits are written before it goes read-only.
+      if (!archived) await flowEditorRef.current?.flush()
+      const result = archived
+        ? await unarchiveWhiteboard({ id: board.id })
+        : await archiveWhiteboard({ id: board.id })
       if (!result.ok) {
         toast({
           title: archived ? "Couldn't unarchive" : "Couldn't archive",
@@ -420,347 +692,87 @@ export function DiagramsPage({
         return
       }
       toast({
-        title: archived
-          ? `Restored ${result.data.name}`
-          : `Archived ${result.data.name}`,
+        title: archived ? `Restored ${result.data.name}` : `Archived ${result.data.name}`,
         description: archived
-          ? "It's active again and back at the top of the list."
-          : "It's in the Archive section — unarchive it any time.",
+          ? "It's active again and back at the top of its folder."
+          : "It's in its folder's Archived section — unarchive it any time.",
         variant: "success",
       })
       applyWrite(result.data)
-      setVersion((v) => v + 1)
     } finally {
-      setArchiving(false)
+      setBusy(false)
     }
   }
 
-  function handleSaved(saved: DiagramDetail) {
-    const { spec, ...summary } = saved
-    applyWrite(summary)
-    setSpecCache({ diagramId: saved.id, spec, error: null })
-    setSelectedId(saved.id)
-    setCanvasNonce((n) => n + 1)
-    setVersion((v) => v + 1)
+  // Actions ▸ Move to folder…. The board's last edits are written first, so the
+  // move never races an autosave of the same file.
+  async function moveTo(folderId: string | null) {
+    if (!board || busy || folderId === board.folderId) return
+    setBusy(true)
+    try {
+      await flowEditorRef.current?.flush()
+      const result = await moveWhiteboard({ id: board.id, folderId })
+      if (!result.ok) {
+        toast({ title: "Couldn't move the whiteboard", description: result.error, variant: "error" })
+        return
+      }
+      applyWrite(result.data)
+      const target = folderId === null ? null : index?.folders.find((f) => f.id === folderId)
+      toast({
+        title: folderId === null ? "Moved out of its folder" : `Moved to ${target?.name ?? "the folder"}`,
+        variant: "success",
+      })
+      refreshList()
+    } finally {
+      setBusy(false)
+    }
   }
 
-  // The editor's autosave. Unlike handleSaved this must NOT remount the
-  // canvas — the editor already shows what was saved, and a remount would drop
-  // the selection, the viewport and the undo history mid-edit. `id` and `name`
-  // are bound when the editor renders, so a save flushed as it unmounts still
-  // goes to the diagram it came from.
-  async function saveFlow(
-    id: string,
-    name: string,
-    spec: FlowSpec,
-  ): Promise<string | null> {
-    const result = await updateDiagram({ productId, id, name, spec })
-    if (!result.ok) return result.error
-    const { spec: savedSpec, ...summary } = result.data
-    applyWrite(summary)
-    // Only while that diagram is still the one loaded — a flush landing after
-    // a switch must not overwrite the next diagram's spec.
-    setSpecCache((prev) =>
-      prev && prev.diagramId === id ? { ...prev, spec: savedSpec, error: null } : prev,
-    )
-    return null
+  // Actions ▸ Duplicate: a copy in the same folder with the same workspace, opened
+  // straight away. Written after the board's last edits, so the copy has them.
+  async function duplicate() {
+    if (!board || busy) return
+    setBusy(true)
+    try {
+      await flowEditorRef.current?.flush()
+      const result = await duplicateWhiteboard({ id: board.id })
+      if (!result.ok) {
+        toast({ title: "Couldn't duplicate the whiteboard", description: result.error, variant: "error" })
+        return
+      }
+      toast({ title: `Duplicated as “${result.data.name}”`, variant: "success" })
+      onOpenBoard(result.data.id)
+    } finally {
+      setBusy(false)
+    }
   }
 
-  // Switchboard: Rename. The diagram's last edits are written first, then the
-  // name with the drawing exactly as it now stands — so the rename never carries
-  // an older drawing over a newer one.
-  async function renameDiagram(id: string, name: string): Promise<string | null> {
-    const editor = id === selectedId ? flowEditorRef.current : null
-    if (editor) await editor.flush()
-    const spec = editor?.currentSpec() ?? (loaded?.diagramId === id ? loaded.spec : null)
-    if (!spec) return "This diagram can't be read, so it can't be renamed"
-    const result = await updateDiagram({ productId, id, name, spec })
-    if (!result.ok) return result.error
-    const { spec: savedSpec, ...summary } = result.data
-    applyWrite(summary)
-    setSpecCache((prev) =>
-      prev && prev.diagramId === id ? { ...prev, spec: savedSpec, error: null } : prev,
-    )
-    toast({ title: `Renamed to ${summary.name}`, variant: "success" })
-    return null
+  async function confirmDelete() {
+    if (!board) return
+    const target = { id: board.id, name: board.name, archived: isArchived }
+    // The board's last few edits are written first, so none of them can land
+    // after the file is gone.
+    if (editorShown) await flowEditorRef.current?.flush()
+    // Left during the write: the confirmation would wait in the hidden portal and
+    // greet the user, unasked, when the board comes back.
+    if (!activeNow.current || boardIdNow.current !== target.id) return
+    setDeleteTarget(target)
   }
 
-  const hasDiagrams = (diagrams ?? []).length > 0
-  const editable = !isArchived
+  // ── Rendering ───────────────────────────────────────────────────────
 
-  function confirmDelete() {
-    if (!selected) return
-    // The diagram's last few edits are written first, so none of them can
-    // land after the file is gone.
-    if (editable) void flowEditorRef.current?.flush()
-    setDeleteTarget({ id: selected.id, name: selected.name, archived: isArchived })
-  }
-
-  // Each workspace owns its own canvas, including while several are on the Grid.
-  useEffect(() => {
-    onFullscreen?.({
-      isFullscreen: () => fullscreenNow.current,
-      leave: () => setFullscreen(false),
-    })
-    return () => onFullscreen?.(null)
-  }, [onFullscreen])
-
-  return (
+  // Rendered in every state, so a dialog still open (or closing) when the board goes
+  // — Delete's own, above all — closes as Radix expects. Unmounted mid-close, the
+  // dialog would leave <body> with pointer-events: none, and the window dead to clicks.
+  const dialogs = (
     <>
-      {diagrams === null ? (
-        <div className="size-full animate-pulse bg-[var(--term-bg,#f7f7f9)]" />
-      ) : !hasDiagrams ? (
-        <div className="flex size-full flex-col items-center justify-center gap-1.5 bg-[var(--term-bg,#f7f7f9)] p-6 text-center">
-          <span className="mb-2 flex size-10 items-center justify-center rounded-[10px] bg-white text-gray-500 shadow-[inset_0_0_0_1px_rgba(0,0,0,.08)] dark:bg-gray-900 dark:text-gray-400">
-            <RiFlowChart className="size-5" aria-hidden="true" />
-          </span>
-          <h2 className="text-[15px] font-semibold text-gray-900 dark:text-gray-50">
-            No diagrams in {wsName} yet
-          </h2>
-          <p className="max-w-sm text-[13px] text-gray-500 dark:text-gray-400">
-            Draw one to think something through. ✦ Answer can read this
-            workspace&apos;s code to answer a box&apos;s question.
-          </p>
-          <Button
-            className="mt-3 h-[30px] rounded-lg border-transparent bg-[#1d1d1f] px-3 text-[13px] text-white shadow-none hover:bg-[#333336] dark:bg-gray-50 dark:text-gray-900 dark:hover:bg-white"
-            onClick={() => setNewFlowOpen(true)}
-          >
-            <RiAddLine className="-ml-1 mr-1 size-4" aria-hidden="true" />
-            New diagram
-          </Button>
-        </div>
-      ) : (
-        <div className="flex size-full flex-col overflow-hidden">
-          {/* Toolbar — picker on the left, actions for the selected diagram on
-              the right. Every destructive path starts here, on a diagram you
-              can see, rather than from a row in a list. */}
-          <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-black/[.08] bg-white px-2.5 py-[9px] dark:border-white/10 dark:bg-gray-950">
-            <div className="flex min-w-0 flex-1 items-center gap-3">
-              {/* Step / pick / step. The arrows only appear once there is
-                  somewhere to step to. */}
-              <div className="flex min-w-0 items-center gap-1">
-                {nav.ordered.length > 1 ? (
-                  <DiagramStepButton
-                    direction="prev"
-                    target={nav.previous}
-                    onSelect={setSelectedId}
-                  />
-                ) : null}
-                <DiagramPicker
-                  diagrams={diagrams ?? []}
-                  selectedId={selectedId}
-                  onSelect={setSelectedId}
-                  search={search}
-                  onSearchChange={setSearch}
-                  formatRelative={formatRelative}
-                  active={active}
-                />
-                {nav.ordered.length > 1 ? (
-                  <>
-                    <DiagramStepButton
-                      direction="next"
-                      target={nav.next}
-                      onSelect={setSelectedId}
-                    />
-                    {nav.position !== null ? (
-                      <span className="shrink-0 px-0.5 text-xs tabular-nums text-gray-400">
-                        {nav.position}/{nav.ordered.length}
-                      </span>
-                    ) : null}
-                  </>
-                ) : null}
-              </div>
-              {selected ? (
-                <p className="hidden truncate text-xs text-gray-500 sm:block dark:text-gray-400">
-                  Updated {formatRelative(selected.updatedAt)}
-                  {isArchived && selected.archivedAt
-                    ? ` · archived ${formatRelative(selected.archivedAt)}`
-                    : ""}
-                </p>
-              ) : null}
-            </div>
-
-            <div className="flex shrink-0 items-center gap-1.5">
-              {onToggleTerminal ? <Button variant="secondary" className={BAR_BUTTON}
-                data-diagram-terminal-toggle aria-label="Toggle AI terminal" aria-pressed={!!terminalOpen}
-                title="Toggle AI terminal · ⌘A" onClick={onToggleTerminal}>
-                <RiTerminalBoxLine className="-ml-1 mr-1 size-4" aria-hidden="true" /> AI terminal
-              </Button> : null}
-              <Button variant="secondary" className={BAR_BUTTON} onClick={() => setNewFlowOpen(true)}>
-                <RiAddLine className="-ml-1 mr-1 size-4" aria-hidden="true" />
-                New diagram
-              </Button>
-              {selected ? (
-                <>
-                  <Button
-                    variant="secondary"
-                    className={cx(BAR_BUTTON, "size-[30px] px-0")}
-                    aria-label="Full screen"
-                    title="Full screen"
-                    onClick={() => setFullscreen(true)}
-                  >
-                    <RiFullscreenLine className="size-4" aria-hidden="true" />
-                  </Button>
-
-                  {/* Archive and Delete are rare, and the one that can't be
-                      undone sits last, behind a confirmation. */}
-                  <DropdownMenu open={actionsOpen} onOpenChange={setActionsOpen}>
-                    <DropdownMenuTrigger asChild>
-                      <Button ref={actionsRef} variant="secondary" className={cx(BAR_BUTTON, "gap-1")}>
-                        Actions
-                        <RiArrowDownSLine className="-mr-1 size-4" aria-hidden="true" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="min-w-44">
-                      <DropdownMenuItem
-                        disabled={loaded?.spec == null}
-                        onSelect={() => setRenameTarget({ id: selected.id, name: selected.name })}
-                      >
-                        <DropdownMenuIconWrapper className="mr-2">
-                          <RiEditLine className="size-4" aria-hidden="true" />
-                        </DropdownMenuIconWrapper>
-                        Rename…
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        disabled={archiving}
-                        onSelect={() => void handleArchiveToggle()}
-                      >
-                        <DropdownMenuIconWrapper className="mr-2">
-                          {isArchived ? (
-                            <RiInboxUnarchiveLine className="size-4" aria-hidden="true" />
-                          ) : (
-                            <RiArchiveLine className="size-4" aria-hidden="true" />
-                          )}
-                        </DropdownMenuIconWrapper>
-                        {isArchived ? "Unarchive" : "Archive"}
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem
-                        onSelect={confirmDelete}
-                        className="text-red-600 dark:text-red-400"
-                      >
-                        <DropdownMenuIconWrapper className="mr-2 text-red-600 dark:text-red-400">
-                          <RiDeleteBinLine className="size-4" aria-hidden="true" />
-                        </DropdownMenuIconWrapper>
-                        Delete
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </>
-              ) : null}
-            </div>
-          </div>
-
-          {selected === null ? (
-            <div className="flex flex-1 items-center justify-center p-6">
-              <p className="text-sm text-gray-500 dark:text-gray-400">
-                Pick a diagram from the selector above to see it.
-              </p>
-            </div>
-          ) : (
-            // Full screen swaps the classes on this SAME element to a fixed
-            // overlay instead of rendering a second canvas, so React Flow is
-            // never remounted on the way in or out.
-            <div
-              ref={paneRef}
-              tabIndex={fullscreen ? -1 : undefined}
-              className={cx(
-                "flex flex-col overflow-hidden bg-gray-100 outline-none dark:bg-gray-900",
-                fullscreen ? "fixed inset-0 z-50" : "min-h-0 flex-1",
-              )}
-            >
-              {fullscreen ? (
-                // A window drag region, as the title bar it covers was, under the
-                // traffic lights. Measured on macOS 26 they are 14px, from y=18 to
-                // y=32 (trafficLightPosition y:18), so the band is 18 + 14 + 18 and
-                // its 1px border: as much room under them as over them, and the row
-                // centred on theirs at y=25. At 38px they hung 5px off the border.
-                // The Editor's .edband is the same 51px; change one, change both.
-                // The text starts at x=92, clear of the larger lights. The way out
-                // is the enter button's icon turned around; Esc still works.
-                <div
-                  className="flex h-[51px] shrink-0 items-center justify-between gap-3 border-b border-gray-200 bg-white pl-[92px] pr-3 dark:border-gray-800 dark:bg-gray-950"
-                  style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
-                >
-                  <p className="truncate text-[13px] font-medium text-gray-900 dark:text-gray-50">
-                    {selected.name}
-                    <span className="font-normal text-gray-500"> · {wsName}</span>
-                  </p>
-                  <Button
-                    variant="ghost"
-                    className="size-[26px] shrink-0 rounded-md p-0 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-50"
-                    style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-                    aria-label="Exit full screen"
-                    title="Exit full screen"
-                    onClick={() => setFullscreen(false)}
-                  >
-                    <RiFullscreenExitLine className="size-4" aria-hidden="true" />
-                  </Button>
-                </div>
-              ) : null}
-
-              {isArchived ? (
-                <div className="flex shrink-0 items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
-                  <RiArchiveLine className="size-4 shrink-0" aria-hidden="true" />
-                  <span>
-                    This diagram is archived. It stays out of the main list
-                    until you unarchive it, and can be edited again then.
-                  </span>
-                </div>
-              ) : null}
-
-              <div className="min-h-0 flex-1">
-                {loaded === null ? (
-                  <div className="size-full animate-pulse bg-gray-100 dark:bg-gray-900" />
-                ) : loaded.spec === null ? (
-                  <div className="flex size-full items-center justify-center p-6">
-                    <div className="max-w-md rounded-md border border-red-200 bg-red-50 p-4 text-center dark:border-red-900/50 dark:bg-red-950/40">
-                      <p className="text-sm font-medium text-red-700 dark:text-red-400">
-                        This diagram can&apos;t be drawn
-                      </p>
-                      <p className="mt-1 text-xs text-red-600 dark:text-red-400">
-                        {loaded.error}
-                      </p>
-                    </div>
-                  </div>
-                ) : editable ? (
-                  // Keyed WITHOUT `fullscreen`, unlike the read-only canvas:
-                  // remounting would throw away the undo history, so the editor
-                  // re-fits itself instead (fitKey).
-                  <FlowEditor
-                    key={`${selected.id}:${canvasNonce}`}
-                    ref={attachEditor}
-                    spec={loaded.spec}
-                    onSave={(spec) => saveFlow(selected.id, selected.name, spec)}
-                    keyboardEnabled={keyboardEnabled}
-                    shown={active}
-                    fitKey={String(fullscreen)}
-                    productId={productId}
-                    diagramName={selected.name}
-                    workspaceName={wsName}
-                    onOpenSettings={onOpenSettings}
-                    onOpenTerminal={onOpenTerminal}
-                    onDirtyChange={onDirtyChange}
-                  />
-                ) : (
-                  <DiagramCanvas
-                    spec={loaded.spec}
-                    workspace={productId}
-                    diagramName={selected.name}
-                    resetKey={`${selected.id}:${canvasNonce}:${fullscreen}`}
-                  />
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
       <NewFlowDiagramDialog
         open={newFlowOpen}
         onOpenChange={setNewFlowOpen}
-        productId={productId}
-        onCreated={handleSaved}
+        folderId={board?.folderId ?? null}
+        folderName={folder?.name ?? null}
+        returnFocusRef={actionsRef}
+        onCreated={(created) => onOpenBoard(created.id)}
       />
 
       <RenameDiagramDialog
@@ -769,26 +781,436 @@ export function DiagramsPage({
         onOpenChange={(open) => {
           if (!open) setRenameTarget(null)
         }}
-        onRename={renameDiagram}
+        onRename={renameBoard}
       />
 
       <DeleteDiagramDialog
         target={deleteTarget}
-        productId={productId}
         returnFocusRef={actionsRef}
         onOpenChange={(open) => {
           if (!open) setDeleteTarget(null)
         }}
         onDeleted={(deletedId) => {
-          // Drop the selection so the refresh picks a surviving diagram instead
-          // of trying to draw a file that no longer exists. Full screen goes
-          // with it — the refresh's auto-select must not reopen the overlay on
-          // a diagram the user never chose.
-          setSelectedId((prev) => (prev === deletedId ? null : prev))
+          if (deletedId !== boardIdNow.current) return
+          // The board's file is gone: back to its folder's list, and nothing of it
+          // left drawn here should the host not leave at once.
+          deleted.current = true
+          const folderId = board?.folderId ?? null
           setFullscreen(false)
-          setVersion((v) => v + 1)
+          onClosed(folderId, { missing: true })
+          setLoaded({ boardId: deletedId, status: "missing" })
         }}
       />
+    </>
+  )
+
+  if (current === null) {
+    return (
+      <>
+        <div className="size-full animate-pulse bg-[var(--term-bg,#f7f7f9)]" />
+        {dialogs}
+      </>
+    )
+  }
+
+  if (current.status !== "ready" || board === null) {
+    const missing = current.status === "missing"
+    return (
+      <>
+        <div className="flex size-full flex-col items-center justify-center gap-1.5 bg-[var(--term-bg,#f7f7f9)] p-6 text-center">
+          <span className="mb-2 flex size-10 items-center justify-center rounded-[10px] bg-white text-gray-500 shadow-[inset_0_0_0_1px_rgba(0,0,0,.08)] dark:bg-gray-900 dark:text-gray-400">
+            {missing ? (
+              <Glyph name="board" size={20} />
+            ) : (
+              <RiErrorWarningLine className="size-5" aria-hidden="true" />
+            )}
+          </span>
+          <h2 className="text-[15px] font-semibold text-gray-900 dark:text-gray-50">
+            {missing ? "This whiteboard no longer exists" : "This whiteboard can't be opened"}
+          </h2>
+          <p className="max-w-sm text-[13px] text-gray-500 dark:text-gray-400">
+            {missing
+              ? "It was deleted, or its file is no longer in Switchboard's whiteboards folder."
+              : current.status === "error"
+                ? current.error
+                : null}
+          </p>
+          <div className="mt-3 flex items-center gap-2">
+            {/* Back from a board that couldn't be read is not a goodbye: the host
+                forgets this canvas but may open the board again (missing: false). */}
+            <Button
+              className="h-[30px] rounded-lg border-transparent bg-[#1d1d1f] px-3 text-[13px] text-white shadow-none hover:bg-[#333336] dark:bg-gray-50 dark:text-gray-900 dark:hover:bg-white"
+              onClick={() => onClosed(null, { missing })}
+            >
+              <Glyph name="chevL" className="-ml-1 mr-1.5" />
+              Back
+            </Button>
+            {missing ? null : (
+              <Button
+                variant="secondary"
+                className={BAR_BUTTON}
+                disabled={retrying}
+                onClick={readAgain}
+              >
+                {retrying ? "Trying again…" : "Try again"}
+              </Button>
+            )}
+          </div>
+        </div>
+        {dialogs}
+      </>
+    )
+  }
+
+  const folderChoices = index?.folders ?? null
+
+  return (
+    <>
+      <div className="flex size-full flex-col overflow-hidden">
+        {/* The bar — the switcher on the left, New whiteboard, full screen and
+            Actions on the right. Every destructive path starts here, on the board
+            you can see, rather than from a row in a list. */}
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-black/[.08] bg-white px-3 py-[9px] dark:border-white/10 dark:bg-gray-950">
+          <div className="flex min-w-0 flex-1 items-center gap-1">
+            {/* Step / pick / step. The arrows only appear once there is
+                somewhere to step to. */}
+            {nav.ordered.length > 1 ? (
+              <DiagramStepButton direction="prev" target={nav.previous} onSelect={openBoard} />
+            ) : null}
+            <DiagramPicker
+              boards={siblings}
+              current={summaryOf(board)}
+              folderLabel={folderLabel}
+              onSelect={openBoard}
+              search={search}
+              onSearchChange={setSearch}
+              formatRelative={formatRelative}
+              active={active}
+            />
+            {nav.ordered.length > 1 ? (
+              <>
+                <DiagramStepButton direction="next" target={nav.next} onSelect={openBoard} />
+                {nav.position !== null ? (
+                  <span className="shrink-0 px-1 text-xs tabular-nums text-gray-400">
+                    {nav.position}/{nav.ordered.length}
+                  </span>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+
+          <div className="flex shrink-0 items-center gap-1.5">
+            <Button variant="secondary" className={BAR_BUTTON} onClick={() => setNewFlowOpen(true)}>
+              <Glyph name="plus" className="-ml-0.5" />
+              New whiteboard
+            </Button>
+            <Button
+              variant="secondary"
+              className={cx(BAR_BUTTON, "size-[30px] px-0")}
+              aria-label="Full screen"
+              title="Full screen"
+              onClick={() => setFullscreen(true)}
+            >
+              <Glyph name="full" />
+            </Button>
+
+            {/* Actions ▸ Open terminal… opens a picker anchored to this same
+                button, once the menu has closed. */}
+            <PopoverPrimitives.Root
+              open={terminalPickerOpen}
+              onOpenChange={(open) => {
+                setTerminalPickerOpen(open)
+                if (open) refreshChoices()
+              }}
+            >
+              <DropdownMenu open={actionsOpen} onOpenChange={setActionsOpen}>
+                <PopoverPrimitives.Anchor asChild>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      ref={actionsRef}
+                      variant="secondary"
+                      className={cx(BAR_BUTTON, "gap-1.5", (actionsOpen || terminalPickerOpen) && "bg-[#f5f5f7]")}
+                      data-whiteboard-actions
+                    >
+                      Actions
+                      <Glyph name="chevD" className="-mr-0.5" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                </PopoverPrimitives.Anchor>
+                <DropdownMenuContent
+                  align="end"
+                  sideOffset={6}
+                  className="min-w-56 rounded-[10px] p-[5px]"
+                  onCloseAutoFocus={(event) => {
+                    // The menu is gone now. A dialog or picker it opens takes
+                    // focus itself, so focus doesn't go back to the trigger first.
+                    // Nothing opens on a board that isn't on screen, or for an item
+                    // picked as it left (see afterMenu).
+                    const next = afterMenu.current
+                    afterMenu.current = null
+                    if (!next) return
+                    if (next.stale || !activeNow.current) {
+                      event.preventDefault()
+                      return
+                    }
+                    if (!next.toTrigger) event.preventDefault()
+                    next.run()
+                  }}
+                >
+                  <DropdownMenuItem
+                    className={MENU_ITEM}
+                    onSelect={() => {
+                      refreshChoices()
+                      afterMenu.current = {
+                        run: () => {
+                          pickedTerminal.current = false
+                          setTerminalPickerOpen(true)
+                        },
+                      }
+                    }}
+                  >
+                    <DropdownMenuIconWrapper className={MENU_ICON}>
+                      <Glyph name="term" />
+                    </DropdownMenuIconWrapper>
+                    Open terminal…
+                    <Glyph name="chev" className="ml-auto text-[#b0b0b5]" />
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    className={MENU_ITEM}
+                    shortcut="⌘A"
+                    onSelect={() => {
+                      // After the menu has handed focus back, so a terminal the
+                      // host shows and focuses keeps it.
+                      afterMenu.current = { run: () => onToggleTerminals(), toTrigger: true }
+                    }}
+                  >
+                    <DropdownMenuIconWrapper className={MENU_ICON}>
+                      <Glyph name="termStack" />
+                    </DropdownMenuIconWrapper>
+                    Show or hide terminals
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    className={MENU_ITEM}
+                    onSelect={() => {
+                      const target = { id: board.id, name: board.name }
+                      afterMenu.current = { run: () => setRenameTarget(target) }
+                    }}
+                  >
+                    <DropdownMenuIconWrapper className={MENU_ICON}>
+                      <Glyph name="edit" />
+                    </DropdownMenuIconWrapper>
+                    Rename…
+                  </DropdownMenuItem>
+                  <DropdownMenuSubMenu>
+                    <DropdownMenuSubMenuTrigger className={cx(MENU_ITEM, "pr-[7px]")} disabled={busy}>
+                      <DropdownMenuIconWrapper className={MENU_ICON}>
+                        <Glyph name="folder" />
+                      </DropdownMenuIconWrapper>
+                      Move to folder…
+                    </DropdownMenuSubMenuTrigger>
+                    <DropdownMenuSubMenuContent className="max-h-80 min-w-48 overflow-y-auto rounded-[10px] p-[5px]">
+                      {folderChoices === null ? (
+                        <DropdownMenuItem className={MENU_ITEM} disabled>
+                          {listFailed ? "Couldn't load the folders" : "Loading folders…"}
+                        </DropdownMenuItem>
+                      ) : (
+                        <DropdownMenuRadioGroup
+                          value={board.folderId ?? NO_FOLDER}
+                          onValueChange={(value) => void moveTo(value === NO_FOLDER ? null : value)}
+                        >
+                          {folderChoices.map((choice) => (
+                            <DropdownMenuRadioItem
+                              key={choice.id}
+                              value={choice.id}
+                              iconType="check"
+                              className="h-[30px] py-0 text-[13px] data-[state=checked]:font-medium"
+                            >
+                              <span className="truncate">{choice.name}</span>
+                            </DropdownMenuRadioItem>
+                          ))}
+                          {folderChoices.length > 0 ? <DropdownMenuSeparator /> : null}
+                          <DropdownMenuRadioItem
+                            value={NO_FOLDER}
+                            iconType="check"
+                            className="h-[30px] py-0 text-[13px] data-[state=checked]:font-medium"
+                          >
+                            No folder
+                          </DropdownMenuRadioItem>
+                          {folderChoices.length === 0 ? (
+                            <DropdownMenuLabel className="max-w-56 py-1.5 font-normal tracking-normal">
+                              Make folders on the Whiteboards screen.
+                            </DropdownMenuLabel>
+                          ) : null}
+                        </DropdownMenuRadioGroup>
+                      )}
+                    </DropdownMenuSubMenuContent>
+                  </DropdownMenuSubMenu>
+                  <DropdownMenuItem className={MENU_ITEM} disabled={busy} onSelect={() => void duplicate()}>
+                    <DropdownMenuIconWrapper className={MENU_ICON}>
+                      <Glyph name="copy" />
+                    </DropdownMenuIconWrapper>
+                    Duplicate
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    className={MENU_ITEM}
+                    disabled={busy}
+                    onSelect={() => void handleArchiveToggle()}
+                  >
+                    <DropdownMenuIconWrapper className={MENU_ICON}>
+                      <Glyph name={isArchived ? "unarchive" : "archive"} />
+                    </DropdownMenuIconWrapper>
+                    {isArchived ? "Unarchive" : "Archive"}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onSelect={() => {
+                      afterMenu.current = { run: () => void confirmDelete() }
+                    }}
+                    className={cx(MENU_ITEM, "text-[#a02c2c] dark:text-red-400")}
+                  >
+                    <DropdownMenuIconWrapper className={cx(MENU_ICON, "text-[#a02c2c] dark:text-red-400")}>
+                      <Glyph name="trash" />
+                    </DropdownMenuIconWrapper>
+                    Delete
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              <PopoverPrimitives.Portal container={portal}>
+                <PopoverPrimitives.Content
+                  align="end"
+                  side="bottom"
+                  sideOffset={6}
+                  collisionPadding={8}
+                  className="z-50 outline-none"
+                  onCloseAutoFocus={(event) => {
+                    // A picked terminal takes focus itself (the host focuses it);
+                    // otherwise back to the button the picker came from.
+                    event.preventDefault()
+                    if (!pickedTerminal.current && actionsRef.current?.isConnected) actionsRef.current.focus()
+                    pickedTerminal.current = false
+                  }}
+                >
+                  <WorkspacePicker
+                    tone="light"
+                    title="Open a terminal in"
+                    choices={workspaceChoices}
+                    status={workspaceStatus}
+                    current={board.workspace}
+                    currentLabel="This board's workspace"
+                    footer={OPEN_TERMINAL_FOOTER}
+                    onPick={(wsId) => {
+                      pickedTerminal.current = true
+                      setTerminalPickerOpen(false)
+                      onOpenTerminal(wsId)
+                    }}
+                    onClose={() => setTerminalPickerOpen(false)}
+                  />
+                </PopoverPrimitives.Content>
+              </PopoverPrimitives.Portal>
+            </PopoverPrimitives.Root>
+          </div>
+        </div>
+
+        {/* Full screen swaps the classes on this SAME element to a fixed overlay
+            instead of rendering a second canvas, so React Flow is never remounted
+            on the way in or out. */}
+        <div
+          ref={paneRef}
+          tabIndex={fullscreen ? -1 : undefined}
+          className={cx(
+            "flex flex-col overflow-hidden bg-gray-100 outline-none dark:bg-gray-900",
+            fullscreen ? "fixed inset-0 z-50" : "min-h-0 flex-1",
+          )}
+        >
+          {fullscreen ? (
+            // A window drag region, as the title bar it covers was, under the
+            // traffic lights. Measured on macOS 26 they are 14px, from y=18 to
+            // y=32 (trafficLightPosition y:18), so the band is 18 + 14 + 18 and
+            // its 1px border: as much room under them as over them, and the row
+            // centred on theirs at y=25. At 38px they hung 5px off the border.
+            // The Editor's .edband is the same 51px; change one, change both.
+            // The text starts at x=92, clear of the larger lights. The way out
+            // is the enter button's icon turned around; Esc still works.
+            <div
+              className="flex h-[51px] shrink-0 items-center justify-between gap-3 border-b border-gray-200 bg-white pl-[92px] pr-3 dark:border-gray-800 dark:bg-gray-950"
+              style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+            >
+              <p className="truncate text-[13px] font-medium text-gray-900 dark:text-gray-50">
+                {board.name}
+                {folderLabel ? <span className="font-normal text-gray-500"> · {folderLabel}</span> : null}
+              </p>
+              <Button
+                variant="ghost"
+                className="size-[26px] shrink-0 rounded-md p-0 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-50"
+                style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+                aria-label="Exit full screen"
+                title="Exit full screen"
+                onClick={() => setFullscreen(false)}
+              >
+                <RiFullscreenExitLine className="size-4" aria-hidden="true" />
+              </Button>
+            </div>
+          ) : null}
+
+          {isArchived ? (
+            <div className="flex shrink-0 items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
+              <Glyph name="archive" className="shrink-0" />
+              <span>
+                This whiteboard is archived. It stays out of its folder&apos;s list
+                until you unarchive it, and can be edited again then.
+              </span>
+            </div>
+          ) : null}
+
+          <div className="min-h-0 flex-1">
+            {board.spec === null ? (
+              <div className="flex size-full items-center justify-center p-6">
+                <div className="max-w-md rounded-md border border-red-200 bg-red-50 p-4 text-center dark:border-red-900/50 dark:bg-red-950/40">
+                  <p className="text-sm font-medium text-red-700 dark:text-red-400">
+                    This whiteboard can&apos;t be drawn
+                  </p>
+                  <p className="mt-1 text-xs text-red-600 dark:text-red-400">{board.specError}</p>
+                </div>
+              </div>
+            ) : editorShown ? (
+              // Keyed by the board alone — never its folder, workspace or full
+              // screen: a remount would throw away the undo history, so the editor
+              // re-fits itself instead (fitKey) and hears the rest as props.
+              <FlowEditor
+                key={board.id}
+                ref={attachEditor}
+                spec={board.spec}
+                onSave={(spec) => saveFlow(board.id, spec)}
+                keyboardEnabled={keyboardEnabled}
+                shown={active}
+                fitKey={String(fullscreen)}
+                boardId={board.id}
+                diagramName={board.name}
+                answerWorkspace={board.workspace}
+                workspaceChoices={workspaceChoices}
+                onAnswerWorkspaceChange={(wsId) => void changeWorkspace(wsId)}
+                onOpenSettings={onOpenSettings}
+                onOpenTerminal={onOpenTerminal}
+                workspaceStatus={workspaceStatus}
+                onTerminalSlots={onTerminalSlots}
+                onTerminalFloat={onTerminalFloat}
+                onTerminalRemoved={onTerminalRemoved}
+                onDirtyChange={onDirtyChange}
+              />
+            ) : (
+              <DiagramCanvas
+                spec={board.spec}
+                diagramName={board.name}
+                resetKey={`${board.id}:${fullscreen}`}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+
+      {dialogs}
     </>
   )
 }

@@ -8,23 +8,27 @@
 
 import type { DiagramSummary } from "./types"
 
+// Switchboard: what searching and stepping read of a row — so a whiteboard's own
+// summary (bridge.ts WhiteboardSummary, which has more) comes back as itself.
+type Searchable = Pick<DiagramSummary, "id" | "name" | "updatedAt" | "archivedAt">
+
 // Newest-touched first, which is the order the list has always used.
-function byUpdatedDesc(a: DiagramSummary, b: DiagramSummary): number {
+function byUpdatedDesc(a: Searchable, b: Searchable): number {
   return b.updatedAt.localeCompare(a.updatedAt)
 }
 
 // Most-recently-archived first, so the thing you just archived is the easiest
 // one to find again (and to unarchive). Falls back to updatedAt for rows whose
 // archivedAt is somehow absent, which keeps the sort total either way.
-function byArchivedDesc(a: DiagramSummary, b: DiagramSummary): number {
+function byArchivedDesc(a: Searchable, b: Searchable): number {
   const left = a.archivedAt ?? a.updatedAt
   const right = b.archivedAt ?? b.updatedAt
   return right.localeCompare(left)
 }
 
-export type DiagramSearchResult = {
-  active: DiagramSummary[]
-  archived: DiagramSummary[]
+export type DiagramSearchResult<T extends Searchable = DiagramSummary> = {
+  active: T[]
+  archived: T[]
 }
 
 // Split the diagrams matching `query` into the two groups the picker renders.
@@ -33,14 +37,14 @@ export type DiagramSearchResult = {
 // Archived results are always returned separately so the UI can pin them below
 // the active ones — an archived diagram never outranks an active one, however
 // well it matches.
-export function searchDiagrams(
-  diagrams: DiagramSummary[],
+export function searchDiagrams<T extends Searchable = DiagramSummary>(
+  diagrams: T[],
   query: string,
-): DiagramSearchResult {
+): DiagramSearchResult<T> {
   const q = query.trim().toUpperCase()
 
-  const active: DiagramSummary[] = []
-  const archived: DiagramSummary[] = []
+  const active: T[] = []
+  const archived: T[] = []
   for (const diagram of diagrams) {
     if (q && !diagram.name.toUpperCase().includes(q)) continue
     if (diagram.archivedAt === null) active.push(diagram)
@@ -57,8 +61,8 @@ export function searchDiagrams(
 // in the results; otherwise prefer an ACTIVE diagram, so a ?diagram= deep link
 // never drops the viewer onto an archived one while a live one matches.
 // Returns null only when nothing matched at all.
-export function preferredSelection(
-  results: DiagramSearchResult,
+export function preferredSelection<T extends Searchable>(
+  results: DiagramSearchResult<T>,
   selectedId: string | null,
 ): string | null {
   if (selectedId !== null) {
@@ -70,13 +74,13 @@ export function preferredSelection(
   return results.active[0]?.id ?? results.archived[0]?.id ?? null
 }
 
-export type DiagramNavigation = {
+export type DiagramNavigation<T extends Searchable = DiagramSummary> = {
   /** Every result in the order the picker renders them, as one flat list. */
-  ordered: DiagramSummary[]
+  ordered: T[]
   /** 1-based position of the selection, or null when it isn't in the results. */
   position: number | null
-  previous: DiagramSummary | null
-  next: DiagramSummary | null
+  previous: T | null
+  next: T | null
 }
 
 // What the toolbar's ← / → arrows need: the diagram one step either side of the
@@ -88,10 +92,10 @@ export type DiagramNavigation = {
 // Deliberately clamps rather than wrapping: null at either end lets the caller
 // disable the button, so the ends of the list are visible instead of silently
 // looping back around.
-export function diagramNavigation(
-  results: DiagramSearchResult,
+export function diagramNavigation<T extends Searchable>(
+  results: DiagramSearchResult<T>,
   selectedId: string | null,
-): DiagramNavigation {
+): DiagramNavigation<T> {
   const ordered = [...results.active, ...results.archived]
   const index = ordered.findIndex((d) => d.id === selectedId)
 

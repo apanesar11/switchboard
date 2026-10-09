@@ -363,6 +363,70 @@ test('the backend validates the diagram operation before starting a provider', a
   assert.equal(sent.length, before);
 });
 
+// ---------------------------------------------------------------------------
+// which folder a CLI reads — index.js resolves it with resolveAnswerDir() before start()
+// ---------------------------------------------------------------------------
+
+// The rail, as workspaces.lookup() answers it: rail ids only, never a path.
+const RAIL = { 'sample-2': { id: 'sample-2', dir: '/fictional/apps/sample-2' } };
+function railLookup() {
+  const asked = [];
+  const lookup = async id => { asked.push(id); return RAIL[id] || null; };
+  return { lookup, asked };
+}
+
+test("a CLI reads the folder of the whiteboard's workspace, found on the rail and nowhere else", async () => {
+  for (const provider of ['claude-code', 'codex']) {
+    const { lookup } = railLookup();
+    assert.deepEqual(await answer.resolveAnswerDir({ provider, wsId: 'sample-2' }, lookup),
+      { ok: true, dir: '/fictional/apps/sample-2', wsId: 'sample-2' });
+    assert.deepEqual(await answer.resolveAnswerDir({ provider, wsId: '  sample-2 ' }, lookup),
+      { ok: true, dir: '/fictional/apps/sample-2', wsId: 'sample-2' });
+    for (const wsId of [null, undefined, '', '   ', 7]) {
+      assert.deepEqual(await answer.resolveAnswerDir({ provider, wsId }, lookup),
+        { ok: false, code: 'no-workspace', error: 'Pick a workspace for ✦ Answer to read' }, String(wsId));
+    }
+    assert.deepEqual(await answer.resolveAnswerDir({ provider, wsId: 'example-1' }, lookup),
+      { ok: false, code: 'no-workspace', error: 'could not find the folder for example-1' });
+    // A path is not a workspace: the rail has no such id, so there is no folder to read.
+    assert.deepEqual(await answer.resolveAnswerDir({ provider, wsId: '/fictional/apps/sample-2' }, lookup),
+      { ok: false, code: 'no-workspace', error: 'could not find the folder for /fictional/apps/sample-2' });
+    // A lookup that fails is a workspace that is not there, not a throw.
+    const broken = async () => { throw new Error('fictional discovery failure'); };
+    assert.equal((await answer.resolveAnswerDir({ provider, wsId: 'sample-2' }, broken)).code, 'no-workspace');
+  }
+  assert.equal((await answer.resolveAnswerDir(null, railLookup().lookup)).ok, true, 'no provider: nothing to read');
+});
+
+test('the APIs read no folder: never refused for a workspace, and nothing is looked up', async () => {
+  for (const provider of ['claude-api', 'openai-api']) {
+    for (const req of [{ provider, wsId: null }, { provider, wsId: 'example-1' }, { provider, wsId: 'sample-2', operation: 'condense' }]) {
+      const { lookup, asked } = railLookup();
+      assert.deepEqual(await answer.resolveAnswerDir(req, lookup), { ok: true, dir: null, wsId: null });
+      assert.deepEqual(asked, []);
+    }
+  }
+});
+
+test('a condensation never needs a workspace: the temp folder stands in for a missing one', async () => {
+  for (const provider of ['claude-code', 'codex']) {
+    const { lookup } = railLookup();
+    const condense = wsId => answer.resolveAnswerDir({ provider, wsId, operation: 'condense' }, lookup);
+    assert.deepEqual(await condense('sample-2'), { ok: true, dir: '/fictional/apps/sample-2', wsId: 'sample-2' });
+    assert.deepEqual(await condense(null), { ok: true, dir: os.tmpdir(), wsId: null });
+    assert.deepEqual(await condense('example-1'), { ok: true, dir: os.tmpdir(), wsId: null });
+  }
+  // answer.js itself: a CLI condensation handed no folder runs in the temp folder; an
+  // ordinary answer handed none is refused before anything is spawned.
+  assert.equal(answer.cliDir({ dir: '/fictional/apps/sample-2', operation: 'condense' }), '/fictional/apps/sample-2');
+  assert.equal(answer.cliDir({ dir: null, operation: 'condense' }), os.tmpdir());
+  assert.equal(answer.cliDir({ dir: null }), null);
+  assert.deepEqual(await answer.start('t-no-folder', { ...REQ, provider: 'claude-code' }),
+    { ok: false, error: 'This workspace has no folder to read' });
+  assert.deepEqual(await answer.start('t-no-folder-codex', { ...REQ, provider: 'codex' }),
+    { ok: false, error: 'This workspace has no folder to read' });
+});
+
 test('Claude Code sees its web tools only with Web access on', () => {
   const s = { claudeCodeEffort: 'own' };
   const value = (args, flag) => args[args.indexOf(flag) + 1];

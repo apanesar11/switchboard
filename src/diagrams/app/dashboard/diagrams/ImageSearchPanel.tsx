@@ -6,8 +6,8 @@
 //
 // It shows Google's own results page in an Electron <webview> on a session of its
 // own (lib/diagrams/image-search.ts says which, and how main fences it in). A
-// picture goes onto the diagram two ways: dragged out of the page onto the canvas
-// (FlowEditor's drop reads its address), or right-clicked ▸ Add Image to Diagram —
+// picture goes onto the whiteboard two ways: dragged out of the page onto the canvas
+// (FlowEditor's drop reads its address), or right-clicked ▸ Add Image to Whiteboard —
 // main's menu, which sends the address back here (onDiagramsImageOffer). Either
 // way FlowEditor has main fetch the bytes and adds them as a dropped file is added.
 //
@@ -90,11 +90,11 @@ export function ImageSearchPanel({
   onAddImage,
 }: {
   ask: ImageSearchAsk
-  /** Whether the Diagrams tab is on screen. */
+  /** Whether the whiteboard is on screen. */
   shown: boolean
   onClose: () => void
   /**
-   * A picture picked with the page's Add Image to Diagram: its addresses, best first
+   * A picture picked with the page's Add Image to Whiteboard: its addresses, best first
    * (a Google result's full picture, then its thumbnail), and the page it was on.
    */
   onAddImage: (urls: string[], referrer: string) => void
@@ -192,7 +192,7 @@ export function ImageSearchPanel({
     }
   }, [page.made])
 
-  // Leaving the Diagrams tab takes its root out of the window (app.js shows one
+  // Leaving the whiteboard takes its root out of the window (app.js shows one
   // screen at a time), and Electron destroys a <webview>'s page as it leaves the
   // document and never makes another when it is put back. Measured in this
   // Electron: blank from then on, every method answering "Invalid
@@ -211,7 +211,7 @@ export function ImageSearchPanel({
     setPage((current) => ({ made: current.made + 1, start: lastPage ?? current.start }))
   }, [shown])
 
-  // Add Image to Diagram, from main's right-click menu — for THIS page's pictures
+  // Add Image to Whiteboard, from main's right-click menu — for THIS page's pictures
   // only, which the guest's webContents id tells apart.
   useEffect(
     () =>
@@ -288,9 +288,11 @@ export function ImageSearchPanel({
   // 400px, and less only in a window too narrow to spare that beside the canvas
   // (FlowEditor keeps the canvas 360px). Not an <aside>: the window's own
   // stylesheet styles every aside as the sidebar — its padding, and hidden with it
-  // (View ▸ Hide Sidebar).
+  // (View ▸ Hide Sidebar). Switchboard: `data-canvas-overlay` tells the editor this
+  // is in-canvas UI, so a pinned terminal's live overlay hides while the two overlap.
   return (
     <div
+      data-canvas-overlay
       role="complementary"
       aria-label="Google Images"
       className="flex h-full w-[400px] flex-col border-l border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950"
@@ -390,7 +392,7 @@ export function ImageSearchPanel({
       </div>
 
       <p className="flex h-10 shrink-0 items-center border-t border-gray-200 px-4 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
-        Drag onto the canvas, or right-click ▸ Add Image to Diagram
+        Drag onto the canvas, or right-click ▸ Add Image to Whiteboard
       </p>
     </div>
   )

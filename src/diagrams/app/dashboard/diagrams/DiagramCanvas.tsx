@@ -10,7 +10,9 @@
 // Read-only is enforced on every axis React Flow offers rather than by leaving
 // handlers off: no dragging nodes, no connecting, no selecting, no deleting.
 // Panning, zooming, opening documents and copying file paths remain available
-// while reading a diagram.
+// while reading a whiteboard — Switchboard draws an ARCHIVED board with it, and
+// documents are one store for every board, so an archived one opens its
+// documents like any other.
 
 import { useMemo, useState } from "react"
 import {
@@ -56,15 +58,14 @@ type Props = {
    * in both of those cases anyway.
    */
   resetKey: string
-  workspace?: string
   diagramName?: string
 }
 
-export function DiagramCanvas({ spec, resetKey, workspace = "", diagramName }: Props) {
+export function DiagramCanvas({ spec, resetKey, diagramName }: Props) {
   const layout = useMemo(() => layoutDiagram(spec), [spec])
   const [document, setDocument] = useState<FlowBoxNodeData | null>(null)
   const [view, setView] = useState<DocumentView>("floating")
-  const documents = useFlowDocuments(workspace, document?.documentId)
+  const documents = useFlowDocuments(document?.documentId)
 
   return (
     <DiagramFileCopyContext.Provider value={documents.getPath}>
@@ -87,7 +88,7 @@ export function DiagramCanvas({ spec, resetKey, workspace = "", diagramName }: P
         nodesFocusable={false}
         onNodeDoubleClick={(_, node) => {
           const box = node.data as FlowBoxNodeData
-          if (workspace && box.shape === "document") { setDocument(box); setView("floating") }
+          if (box.shape === "document") { setDocument(box); setView("floating") }
         }}
         edgesFocusable={false}
         elementsSelectable={false}
@@ -97,7 +98,7 @@ export function DiagramCanvas({ spec, resetKey, workspace = "", diagramName }: P
         // be actively wrong while a dialog's fields are focused above it.
         deleteKeyCode={null}
         attributionPosition="bottom-right"
-        aria-label={layout.title ?? "Diagram"}
+        aria-label={layout.title ?? diagramName ?? "Whiteboard"}
       >
         <Background
           variant={BackgroundVariant.Dots}

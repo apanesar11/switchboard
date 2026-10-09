@@ -240,3 +240,14 @@ test('condense leaves document references intact instead of summarizing their na
   assert.throws(() => inspectFlowCondenseSelection(spec, ['start', 'document']), /Leave documents out/);
   assert.equal(spec.nodes[1].documentId, '00000000-0000-0000-0000-000000000001');
 });
+
+test('condense refuses a pinned terminal in the selection, and keeps one beside it where it is', () => {
+  const terminal = node('terminal-demo', 900, 0, { label: 'demo', shape: 'terminal', workspace: 'demo', size: { width: 560, height: 340 } });
+  const spec = flow([node('start', 0, 0), node('a', 280, 0), node('b', 560, 0), terminal], [edge('start', 'a'), edge('a', 'b'), edge('b', 'terminal-demo')]);
+  assert.throws(() => inspectFlowCondenseSelection(spec, ['b', 'terminal-demo']), /Leave terminals out/);
+  // Condensing the boxes next to it leaves the terminal exactly where it was put.
+  const { spec: condensed } = replaceFlowSelection(spec, ['a', 'b'], [{ label: 'One concept' }]);
+  const kept = condensed.nodes.find(n => n.id === 'terminal-demo');
+  assert.deepEqual(kept.position, { x: 900, y: 0 });
+  assert.equal(kept.workspace, 'demo');
+});

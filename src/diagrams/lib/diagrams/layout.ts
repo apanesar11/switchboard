@@ -18,6 +18,9 @@ import {
   DEFAULT_FLOW_TEXT_ALIGN,
   DEFAULT_FLOW_TEXT_SIZE,
   DEFAULT_FLOW_TONE,
+  FLOW_TERMINAL_DEFAULT_SIZE,
+  FLOW_TERMINAL_FLOOR,
+  TERMINAL_HEADER,
   type DiagramSpec,
   type FlowNodeSpec,
   type FlowPosition,
@@ -221,8 +224,14 @@ export type FlowBoxNodeData = {
   size?: FlowSize
   /** Written by ✦ Answer and not edited since — see FlowNodeSpec.ai. */
   ai?: boolean
+  /** Switchboard: the workspace that answer read — see FlowNodeSpec.answeredIn. */
+  answeredIn?: string
   /** Switchboard: in no branch, moving on its own — see FlowNodeSpec.detached. */
   detached?: boolean
+  /** Switchboard: a pinned terminal's workspace, type size and folded state. */
+  workspace?: string
+  font?: number
+  minimized?: boolean
 }
 
 /** What a flow edge carries, so the editor can read an edge back into a spec. */
@@ -342,7 +351,7 @@ const FLOW_DIAMOND_LABEL_WIDTH = FLOW_NODE_WIDTH - 64
 
 type FlowSizing = Pick<
   FlowNodeSpec,
-  "label" | "detail" | "labelRichText" | "detailRichText" | "shape" | "textSize" | "bold" | "size"
+  "label" | "detail" | "labelRichText" | "detailRichText" | "shape" | "textSize" | "bold" | "size" | "minimized"
 >
 
 /**
@@ -411,6 +420,17 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
   const shape = node.shape ?? DEFAULT_FLOW_SHAPE
   if (shape === "image") return node.size ?? FLOW_IMAGE_DEFAULT_SIZE
   if (shape === "document") return { width: 240, height: 76 }
+  // Switchboard: a pinned terminal is the size it was given — pinned at a high zoom,
+  // that can be less than its resize handles allow, so only the floor of a header
+  // and a sliver of body binds here — and folded, only its header, in place.
+  if (shape === "terminal") {
+    const size = node.size ?? FLOW_TERMINAL_DEFAULT_SIZE
+    const width = Math.max(FLOW_TERMINAL_FLOOR.width, size.width)
+    return {
+      width,
+      height: node.minimized ? TERMINAL_HEADER : Math.max(FLOW_TERMINAL_FLOOR.height, size.height),
+    }
+  }
 
   const { fontSize, lineHeight } =
     FLOW_TEXT_METRICS[node.textSize ?? DEFAULT_FLOW_TEXT_SIZE]
@@ -670,7 +690,11 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
       documentId: node.documentId,
       size: node.size,
       ai: node.ai === true ? true : undefined,
+      answeredIn: node.ai === true ? node.answeredIn : undefined,
       detached: node.detached === true ? true : undefined,
+      workspace: node.workspace,
+      font: node.font,
+      minimized: node.minimized === true ? true : undefined,
     } satisfies FlowBoxNodeData,
     draggable: false,
     selectable: false,

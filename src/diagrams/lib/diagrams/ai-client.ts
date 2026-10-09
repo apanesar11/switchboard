@@ -95,13 +95,15 @@ function newId(): string {
 }
 
 /**
- * Ask `provider` the question, from workspace `wsId`. Resolves to the boxes, and how
+ * Ask `provider` the question, from workspace `wsId` — the whiteboard's, which a CLI
+ * reads; null when the whiteboard has none (main then refuses a CLI with
+ * "no-workspace", and an API never reads one anyway). Resolves to the boxes, and how
  * many files a CLI read on the way; rejects with an AnswerError — or with an AbortError
  * when `signal` (the editor's Stop) cancels it, which stops the CLI or the request in
  * main too.
  */
 export async function requestFlowAnswer(
-  ask: { provider: ProviderStatus; wsId: string; question: FlowQuestion },
+  ask: { provider: ProviderStatus; wsId: string | null; question: FlowQuestion },
   signal: AbortSignal,
   onStep: (step: AnswerStep) => void,
 ): Promise<{ parts: FlowAiPart[]; files: number | null }> {
@@ -112,9 +114,13 @@ export async function requestFlowAnswer(
   }
 }
 
-/** Reject malformed output before the editor receives replacement boxes. */
+/**
+ * Reject malformed output before the editor receives replacement boxes. Condense
+ * reads nothing, so `wsId` may be null even for a CLI: main runs it in a scratch
+ * folder then.
+ */
 export async function requestFlowCondense(
-  ask: { provider: ProviderStatus; wsId: string; selection: FlowCondenseRequest },
+  ask: { provider: ProviderStatus; wsId: string | null; selection: FlowCondenseRequest },
   signal: AbortSignal,
   onStep: (step: AnswerStep) => void,
 ): Promise<{ parts: FlowAiPart[]; files: number | null }> {
@@ -124,7 +130,7 @@ export async function requestFlowCondense(
 
 /** Both operations share request ids, provider errors, progress, and Stop cleanup. */
 async function requestAnswer(
-  ask: { provider: ProviderStatus; wsId: string; operation?: "condense" },
+  ask: { provider: ProviderStatus; wsId: string | null; operation?: "condense" },
   prompt: { system: string; user: string },
   signal: AbortSignal,
   onStep: (step: AnswerStep) => void,

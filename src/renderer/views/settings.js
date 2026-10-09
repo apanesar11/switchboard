@@ -1,8 +1,8 @@
 // SB.views.settings — the Settings screen (§4.18, R16): this Mac's settings, reached
 // from the rail's last row, App ▸ Settings… (⌘,) and the ✦ Answer menu's "Settings…".
 //
-// One section today, ✦ Answer on diagrams: which of the four ways answers a box's
-// question on the Diagrams tab, and the API keys two of them need. One row per way to
+// One section today, ✦ Answer on whiteboards: which of the four ways answers a box's
+// question on a whiteboard, and the API keys two of them need. One row per way to
 // answer — what it does, whether it is ready on this Mac, one action — in the
 // rail's rule: details a tap away, here the key's own panel under its row.
 //
@@ -181,7 +181,7 @@ SB.views = SB.views || {};
   }
 
   function what(p) {
-    return p.kind === 'cli' ? 'Reads the workspace first · slower' : 'Only the diagram · fast';
+    return p.kind === 'cli' ? 'Reads the whiteboard’s workspace first · slower' : 'Only the whiteboard · fast';
   }
 
   function row(p, settings) {
@@ -298,11 +298,11 @@ SB.views = SB.views || {};
         'A line of detail under each answer box, such as the file it came from. Off: just the answer.',
         settings.subtext, function () { change({ subtext: !settings.subtext }); }));
     return h('div.stsec', null,
-      h('div.sth', null, '✦ Answer on diagrams'),
+      h('div.sth', null, '✦ Answer on whiteboards'),
       h('p.stdesc.sec', null,
-        'Who answers a box’s question on the Diagrams tab. Claude Code and Codex use their own ' +
-        'sign-in and read the workspace’s code; the two APIs need a key and see only the diagram. ' +
-        'The ✦ Answer menu switches between the same four.'),
+        'Who answers a box’s question on a whiteboard. Claude Code and Codex use their own ' +
+        'sign-in and read the workspace you pick for each whiteboard; the two APIs need a key and ' +
+        'see only the whiteboard. The ✦ Answer menu switches between the same four.'),
       list,
       h('p.stfoot.sec', null, D.icon('lock'), h('span', null, status.keysSafe
         ? 'Keys are encrypted with this Mac’s Keychain and kept in ~/.switchboard/keys.json. Once saved, a key is never shown again — only its last four characters.'

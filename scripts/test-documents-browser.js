@@ -1,7 +1,8 @@
 'use strict';
 
-// The production Diagrams bundle and Markdown renderer, with the real file APIs,
-// in an isolated hidden Chromium window. No personal config or diagrams are read.
+// The production whiteboard bundle and Markdown renderer, with the real store
+// (src/main/whiteboards.js) behind a temporary SWITCHBOARD_CONFIG, in an isolated
+// hidden Chromium window. No personal config or whiteboards are read.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -12,11 +13,22 @@ async function main() {
   try {
     await require('./build-diagrams').build();
     fs.writeFileSync(path.join(temp, 'fixture.html'), `<!doctype html><html><head><link rel="stylesheet" href="${path.join(repo, 'src/renderer/styles.css')}"><link rel="stylesheet" href="${path.join(repo, 'src/renderer/diagrams/diagrams.css')}"><style>html,body,#root{height:100%;margin:0}body{font-family:Arial,sans-serif}#root{display:flex;min-width:0}</style></head><body><div id="root"></div><script src="${path.join(repo, 'src/renderer/dom.js')}"></script><script src="${path.join(repo, 'src/renderer/markdown.js')}"></script><script src="${path.join(repo, 'src/renderer/diagrams/diagrams.js')}"></script><script>
-      window.diagram = SBDiagrams.create(document.getElementById('root'), { wsId: 'fictional-documents', wsName: 'Example workspace', active: true, onOpenSettings() {}, onOpenTerminal() {}, onDirty(count) { window.dirty = count; } });
+      // Board-centric props (ARCHITECTURE §4.17): the fixture's main writes the board
+      // first and hands its id over in the query string.
+      const boardId = new URLSearchParams(location.search).get('board');
+      window.closed = [];
+      window.diagram = SBDiagrams.create(document.getElementById('root'), {
+        boardId, active: true, terminals: [], workspaceStatus: {},
+        onOpenSettings() {}, onOpenBoard(id) { window.opened = id; }, onClosed(folderId) { window.closed.push(folderId); },
+        onBoardChange(board) { window.board = board; }, onDirty(count) { window.dirty = count; },
+        onOpenTerminal() {}, onToggleTerminals() {}, onTerminalSlots() {}, onTerminalFloat() {}, onTerminalRemoved() {},
+      });
     </script></body></html>`);
     fs.writeFileSync(path.join(temp, 'preload.cjs'), `const { contextBridge, ipcRenderer } = require('electron');
       const api = {};
-      for (const name of ['List','Get','Create','Update','Archive','Delete','CreateDocument','GetDocument','SaveDocument','GetImagePath']) api['diagrams'+name] = (...args) => ipcRenderer.invoke('diagram:'+name, ...args);
+      for (const name of ['List','Get','Create','SaveSpec','Rename','SetWorkspace','Move','Duplicate','Archive','Delete','CreateFolder','RenameFolder','DeleteFolder','DismissNotice','NoteWorkspace','Workspaces','CreateDocument','GetDocument','SaveDocument','Migrate']) api['whiteboards'+name] = (...args) => ipcRenderer.invoke('wb:'+name, ...args);
+      api.onWhiteboardsChanged = callback => { const listener = (_event, change) => callback(change); ipcRenderer.on('wb:changed', listener); return () => ipcRenderer.removeListener('wb:changed', listener); };
+      api.diagramsGetImagePath = src => ipcRenderer.invoke('wb:GetImagePath', src);
       api.writeClipboard = text => ipcRenderer.invoke('clipboard:write', text);
       contextBridge.exposeInMainWorld('sb', api);
     `);

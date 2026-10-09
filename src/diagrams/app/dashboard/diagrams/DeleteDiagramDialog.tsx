@@ -12,7 +12,7 @@ import {
 } from "@/components/Dialog"
 import { Button } from "@/components/Button"
 import { toast } from "@/components/Toast"
-import { deleteDiagram } from "@/lib/diagrams/actions"
+import { deleteWhiteboard } from "@/lib/diagrams/actions"
 
 type Target = {
   id: string
@@ -22,23 +22,21 @@ type Target = {
 
 type Props = {
   target: Target | null
-  productId: string
   onOpenChange: (open: boolean) => void
   onDeleted: (id: string) => void
   /**
    * Where focus goes when the dialog closes: the Actions menu trigger that
    * opened it. Left to Radix it would land on <body> — the dialog has no
-   * DialogTrigger of its own to hand it back to. After a delete the trigger
-   * is gone with the diagram, and focus falls to <body>.
+   * DialogTrigger of its own to hand it back to. After a delete the host
+   * leaves the board, and focus goes wherever its screen puts it.
    */
   returnFocusRef: RefObject<HTMLElement | null>
 }
 
-// One confirmation before the permanent step. For a diagram still in use it
-// points at Archive, the way to put a diagram away without losing it.
+// One confirmation before the permanent step. For a whiteboard still in use it
+// points at Archive, the way to put one away without losing it.
 export function DeleteDiagramDialog({
   target,
-  productId,
   onOpenChange,
   onDeleted,
   returnFocusRef,
@@ -56,7 +54,7 @@ export function DeleteDiagramDialog({
     setError(null)
     setSubmitting(true)
     try {
-      const result = await deleteDiagram({ productId, id: target.id })
+      const result = await deleteWhiteboard({ id: target.id })
       if (!result.ok) {
         setError(result.error)
         return
@@ -85,7 +83,7 @@ export function DeleteDiagramDialog({
         className="sm:max-w-md"
         onCloseAutoFocus={(event) => {
           event.preventDefault()
-          returnFocusRef.current?.focus()
+          if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus()
         }}
       >
         <DialogHeader>
@@ -95,14 +93,14 @@ export function DeleteDiagramDialog({
             </span>
             <div className="flex flex-col gap-1">
               <DialogTitle>
-                {target?.archived ? "Delete this archived diagram?" : "Delete this diagram?"}
+                {target?.archived ? "Delete this archived whiteboard?" : "Delete this whiteboard?"}
               </DialogTitle>
               <DialogDescription>
                 This permanently deletes{" "}
                 <span className="font-medium text-gray-900 dark:text-gray-50">
                   {target?.name}
                 </span>{" "}
-                and its spec. It can&apos;t be undone
+                and everything drawn on it. It can&apos;t be undone
                 {target?.archived
                   ? "."
                   : " — to put it away without losing it, archive it instead."}
@@ -136,7 +134,7 @@ export function DeleteDiagramDialog({
             onClick={handleDelete}
             disabled={submitting}
           >
-            {submitting ? "Deleting…" : "Delete diagram"}
+            {submitting ? "Deleting…" : "Delete whiteboard"}
           </Button>
         </DialogFooter>
       </DialogContent>

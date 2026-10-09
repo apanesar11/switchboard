@@ -32,6 +32,9 @@ import {
   FLOW_TEXT_ALIGNS,
   FLOW_TEXT_SIZES,
   FLOW_TONES,
+  FLOW_WORKSPACE_ID_MAX_LENGTH,
+  TERMINAL_FONT_MAX,
+  TERMINAL_FONT_MIN,
   isFlowSizedShape,
   type DiagramKind,
   type DiagramSpec,
@@ -248,6 +251,48 @@ function documentId(raw: unknown, where: string): string {
   return raw.toLowerCase()
 }
 
+/**
+ * Switchboard: a rail workspace id as a whiteboard may name one — for the box an
+ * answer wrote (`answeredIn`) and for a pinned terminal (`workspace`). One line, at
+ * most FLOW_WORKSPACE_ID_MAX_LENGTH, no slash of either kind and no leading dot: an
+ * id, never a path, so a hand-edited board can't point a CLI or a shell at a folder
+ * of its choosing (main resolves ids only through the rail). The same rule main
+ * applies to a whiteboard's own workspace. Null when `raw` isn't one.
+ */
+export function normalizeWorkspaceId(raw: unknown): string | null {
+  if (typeof raw !== "string") return null
+  const value = raw.trim()
+  if (value.length === 0 || value.length > FLOW_WORKSPACE_ID_MAX_LENGTH) return null
+  // eslint-disable-next-line no-control-regex -- control characters are exactly what is refused
+  if (/[\/\\\u0000-\u001f\u007f]/.test(value) || value.startsWith(".")) return null
+  return value
+}
+
+// Switchboard: the workspace a "terminal" node shows. Unlike `answeredIn`, which is
+// only a tag and is dropped when it isn't one, a terminal is nothing without it.
+function terminalWorkspace(raw: unknown, where: string): string {
+  if (raw === undefined || raw === null || raw === "") {
+    fail(where, 'a "terminal" node needs "workspace", the id of a workspace in the rail')
+  }
+  const value = normalizeWorkspaceId(raw)
+  if (value === null) {
+    fail(
+      where,
+      `"workspace" must be a workspace id: one line of at most ${FLOW_WORKSPACE_ID_MAX_LENGTH} characters, with no slashes, not starting with "."`,
+    )
+  }
+  return value
+}
+
+// Switchboard: a terminal's type size in canvas units. Clamped rather than refused —
+// it is only ever the editor's own arithmetic (12.5 over a zoom) — and anything but
+// a number means "not stated" (12.5). Three decimals: the rest is noise in the JSON.
+function terminalFont(raw: unknown): number | undefined {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined
+  const clamped = Math.min(TERMINAL_FONT_MAX, Math.max(TERMINAL_FONT_MIN, raw))
+  return Math.round(clamped * 1000) / 1000
+}
+
 function imageSrc(raw: unknown, where: string): string {
   if (raw === undefined || raw === null || raw === "") {
     fail(where, 'an "image" node needs "src", the https URL of the picture')
@@ -286,7 +331,11 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
     byKey.set(key, id)
 
     const shape = optionalEnum<FlowShape>(entry.shape, FLOW_SHAPES, where, "shape")
-    const label = shape === "note"
+    // Switchboard: a terminal is labelled with its workspace's id, whatever it says.
+    const workspace = shape === "terminal" ? terminalWorkspace(entry.workspace, where) : undefined
+    const label = workspace !== undefined
+      ? workspace
+      : shape === "note"
       ? (optionalText(entry.label, where, "label", undefined, normalizeFlowText) ?? "")
       : text(entry.label, where, "label", undefined, normalizeFlowText)
     const detail = optionalText(entry.detail, where, "detail", undefined, normalizeFlowText)
@@ -322,6 +371,9 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       // Kept when false, like `dashed`: that is how a republish clears a mark
       // carryOverFlowLayout would otherwise carry over.
       ai: optionalFlag(entry.ai),
+      // Switchboard: only on a box the AI's words are still in — and a tag that
+      // isn't a workspace id is dropped rather than failing the whole board.
+      answeredIn: entry.ai === true ? (normalizeWorkspaceId(entry.answeredIn) ?? undefined) : undefined,
       detached: optionalFlag(entry.detached),
       position: optionalPosition(entry.position, where),
       // Each kept only on the shapes it means something for, so a box turned
@@ -332,6 +384,10 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
         shape !== undefined && isFlowSizedShape(shape)
           ? optionalSize(entry.size, where)
           : undefined,
+      // Switchboard: a pinned terminal's workspace, type size and folded state.
+      workspace,
+      font: shape === "terminal" ? terminalFont(entry.font) : undefined,
+      minimized: shape === "terminal" && entry.minimized === true ? true : undefined,
     }
   })
 

@@ -188,6 +188,43 @@
   .flow-document-actions button:hover:where([data-term-theme="dark"] *), .flow-document-actions button[aria-pressed=true]:where([data-term-theme="dark"] *), .flow-document-format button:hover:where([data-term-theme="dark"] *) { background: #1e3a5f; color: #60a5fa; }
   .flow-document-error:where([data-term-theme="dark"] *) { background: #450a0a; color: #fca5a5; }
   .flow-document-empty h3:where([data-term-theme="dark"] *) { color: #e5e7eb; }
+  /* Switchboard: the workspace an answer read, as a tag under the box's bottom-right
+     edge (the mock-up's .wtag) — absolutely placed, so the box keeps the size it was
+     measured at. Dashed on the placeholder of an answer still on its way. */
+  .flow-wtag { position: absolute; right: 8px; bottom: -9px; z-index: 1; display: inline-flex; align-items: center; height: 16px; max-width: calc(100% - 16px); padding: 0 5px; border: 1px solid #0000001f; border-radius: 4px; background: #f3f4f6; color: #4b5563; font: 10px/1 "SF Mono", Menlo, Consolas, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: auto; cursor: default; }
+  .flow-wtag-ghost { border-style: dashed; background: #fafafa; color: #9ca3af; }
+  .flow-wtag:where([data-term-theme="dark"] *) { border-color: #ffffff24; background: #1f2937; color: #d1d5db; }
+  .flow-wtag-ghost:where([data-term-theme="dark"] *) { background: #111827; color: #6b7280; }
+
+  /* Switchboard: a terminal pinned to the board. The frame is the node; the live
+     terminal is laid over its body by the host (views/wbterminals.js), inset from the
+     edges so the resize handles stay reachable, so the body is the terminal's own
+     background to the edge. */
+  .flow-terminal-card-frame { display: flex; flex-direction: column; width: 100%; height: 100%; overflow: hidden; border: 1px solid #00000021; border-radius: 10px; background: #fff; box-shadow: 0 10px 34px #11182724, 0 2px 8px #11182714; }
+  .flow-terminal-head { flex: none; display: flex; align-items: center; gap: 7px; min-width: 0; padding: 0 4px 0 10px; border-bottom: 1px solid #00000014; color: #1d1d1f; font-size: 12px; cursor: grab; }
+  .flow-terminal-head b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 12px "SF Mono", Menlo, Consolas, monospace; }
+  .flow-terminal-head small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #86868b; font-size: 11px; }
+  .flow-terminal-actions { flex: none; display: flex; gap: 2px; margin-left: auto; }
+  .flow-terminal-btn { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; color: #5a5a5f; cursor: pointer; }
+  .flow-terminal-btn:hover { background: #0000000f; color: #1d1d1f; }
+  .flow-terminal-btn:disabled { opacity: .4; cursor: default; }
+  .flow-terminal-body { position: relative; flex: 1; min-height: 0; background: var(--term-bg, #1c1c1e); color: var(--term-fg, #d4d4d8); }
+  .flow-terminal-watermark { position: absolute; left: 50%; top: 50%; width: 28px; height: 28px; transform: translate(-50%, -50%); opacity: .14; }
+  .flow-terminal-card { display: flex; align-items: center; justify-content: center; overflow: hidden; text-align: center; }
+  .flow-terminal-card p { margin: 0; padding: 0 12px; color: var(--term-fg, #d4d4d8); font-size: 12px; line-height: 1.4; white-space: nowrap; opacity: .8; }
+  .flow-terminal-zoom { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border-radius: 8px; background: color-mix(in srgb, var(--term-fg, #d4d4d8) 14%, transparent); color: var(--term-fg, #d4d4d8); font-size: 12px; font-weight: 500; white-space: nowrap; cursor: pointer; }
+  .flow-terminal-zoom:hover { background: color-mix(in srgb, var(--term-fg, #d4d4d8) 24%, transparent); }
+  .flow-terminal-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+  .flow-terminal-dot.run { background: var(--run, #30b350); }
+  .flow-terminal-dot.chg { background: var(--chg, #f0a020); }
+  .flow-terminal-dot.fail { background: var(--fail, #e5534b); }
+  .flow-terminal-dot.bell { background: var(--link, #0969da); }
+  .flow-terminal-card-frame:where([data-term-theme="dark"] *) { border-color: #374151; background: #111827; }
+  .flow-terminal-head:where([data-term-theme="dark"] *) { border-color: #374151; color: #f3f4f6; }
+  .flow-terminal-head small:where([data-term-theme="dark"] *) { color: #9ca3af; }
+  .flow-terminal-btn:where([data-term-theme="dark"] *) { color: #d1d5db; }
+  .flow-terminal-btn:hover:where([data-term-theme="dark"] *) { background: #ffffff14; color: #fff; }
+
   @media (max-width: 720px) {
     .flow-document-floating { inset: 8px; max-width: calc(100% - 16px); }
     .flow-document-floating .flow-document-panel { width: 100% !important; }

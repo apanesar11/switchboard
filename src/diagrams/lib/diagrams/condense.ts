@@ -57,13 +57,17 @@ export function inspectFlowCondenseSelection(
   if (picked.size < 2) throw new Error("Select at least two nodes to condense.")
   const selected = spec.nodes.filter((node) => picked.has(node.id))
   if (selected.length !== picked.size) {
-    throw new Error("Some selected nodes are no longer in the diagram. Select them again.")
+    throw new Error("Some selected nodes are no longer on the whiteboard. Select them again.")
   }
   if (selected.some((node) => node.shape === "image")) {
     throw new Error("Condense supports text nodes. Leave images out of the selection.")
   }
   if (selected.some((node) => node.shape === "document")) {
     throw new Error("Leave documents out of the selection before condensing.")
+  }
+  // Switchboard: a pinned terminal is a live shell, not words to summarize.
+  if (selected.some((node) => node.shape === "terminal")) {
+    throw new Error("Leave terminals out of the selection before condensing.")
   }
   if (selected.some((node) => !(node.label.trim() || node.detail?.trim()))) {
     throw new Error("Every selected node needs text before it can be condensed.")
@@ -209,6 +213,8 @@ export function replaceFlowSelection(
     width: node.width!,
     height: node.height!,
     detached: originalNodes.get(node.id)?.detached,
+    // Switchboard: so the tidies below leave a pinned terminal where it is.
+    shape: originalNodes.get(node.id)?.shape,
   }))
   const anchor = originalBoxes.find((box) => box.id === selection.anchor.id)!
   let keptBoxes = originalBoxes.filter((box) => !picked.has(box.id))
@@ -230,8 +236,9 @@ export function replaceFlowSelection(
     const byId = new Map(boxes.map((box) => [box.id, box]))
     const continuations = [...new Set(selection.outgoing.filter((edge) => {
       const target = byId.get(edge.to)!
+      // Switchboard: a pinned terminal stays where it was put, whatever it is wired to.
       return (edge.fromSide ?? sides.from) === "right" &&
-        (edge.toSide ?? sides.to) === "left" && !target.detached && target.x > last.x &&
+        (edge.toSide ?? sides.to) === "left" && !target.detached && target.shape !== "terminal" && target.x > last.x &&
         !edges.some((other) => other.to === target.id && other.from !== last.id)
     }).map((edge) => edge.to))]
     const branches = flowBranches(boxes, treeEdges(edges, spec), continuations)

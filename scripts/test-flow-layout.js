@@ -41,6 +41,14 @@ const {
   FLOW_ROOM_GAP,
 } = require(outfile);
 
+// Switchboard: ✦ Answer's question path, to check what it walks past.
+const aiFile = path.join(temp, 'ai.js');
+esbuild.buildSync({
+  entryPoints: [path.join(__dirname, '..', 'src', 'diagrams', 'lib', 'diagrams', 'ai.ts')],
+  outfile: aiFile, bundle: true, format: 'cjs', platform: 'node', logLevel: 'error',
+});
+const { flowQuestionPath } = require(aiFile);
+
 after(() => fs.rmSync(temp, { recursive: true, force: true }));
 
 const W = 200;
@@ -572,4 +580,94 @@ test('a detached box is saved as one', () => {
   });
   const spec = flowSpecFromCanvas({}, [node('a', true), node('b', undefined)], []);
   assert.deepEqual(spec.nodes.map(n => n.detached), [true, undefined]);
+});
+
+// ── Switchboard: a pinned terminal stays where it was put ──
+
+const terminalBox = (id, x, y) => ({ id, x, y, width: 560, height: 340, shape: 'terminal' });
+
+test('a Tab that crowds a pinned terminal moves what is loose around it, never the terminal', () => {
+  const { boxes, edges } = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b']);
+  // Below the branch, in the column it grows down into, with a loose box between.
+  const terminal = terminalBox('terminal-demo', W + FLOW_TAB_GAP_X, 760);
+  const loose = box('loose', W + FLOW_TAB_GAP_X, 690);
+  const canvas = [...boxes, loose, terminal];
+  const { moved } = placeTabChild(canvas, edges, 'q', { id: 'c', width: W, height: H });
+  assert.equal(moved.has('terminal-demo'), false, 'the terminal stays where it was put');
+  // Without the pin, the same Tab pushes a box there out of the way.
+  const unpinned = placeTabChild([...boxes, loose, { ...terminal, shape: 'note' }], edges, 'q', { id: 'c', width: W, height: H });
+  assert.equal(unpinned.moved.has('terminal-demo'), true);
+  const at = apply(canvas, moved);
+  assert.ok(!overlapping(at.get('loose'), terminal), 'the loose box is not pushed onto the terminal');
+});
+
+test('Tab and an answer in parts never land on a pinned terminal: they go down past it', () => {
+  // The terminal sits just right of the box asked from, where the branch would grow.
+  const q = box('q', 0, 0);
+  const terminal = terminalBox('terminal-demo', 260, -100);
+  const one = placeTabChild([q, terminal], [], 'q', { id: 'c', width: W, height: H });
+  assert.equal(one.moved.size, 0, 'neither the terminal nor the box asked from moves');
+  assert.deepEqual(one.position, { x: W + FLOW_TAB_GAP_X, y: terminal.y + terminal.height + FLOW_TAB_GAP_Y });
+
+  const kids = ['a', 'b', 'c'].map(id => ({ id, width: W, height: H }));
+  const parts = placeTabChildren([q, terminal], [], 'q', kids);
+  assert.equal(parts.moved.size, 0);
+  const placed = kids.map(k => ({ ...k, ...parts.positions.get(k.id) }));
+  for (const p of placed) assert.ok(!overlapping(p, terminal), `${p.id} is not under the terminal`);
+  // Still one tidy column, in order, FLOW_TAB_GAP_Y apart.
+  assert.equal(placed[0].y, terminal.y + terminal.height + FLOW_TAB_GAP_Y);
+  assert.equal(placed[1].y - (placed[0].y + H), FLOW_TAB_GAP_Y);
+  assert.equal(placed[2].y - (placed[1].y + H), FLOW_TAB_GAP_Y);
+
+  // A Tab after that keeps the whole branch clear of it too.
+  const wired = kids.map(k => tab('q', k.id));
+  const next = placeTabChild([q, terminal, ...placed], wired, 'q', { id: 'd', width: W, height: H });
+  const at = apply([q, terminal, ...placed], next.moved, [{ id: 'd', ...next.position, width: W, height: H }]);
+  assert.equal(next.moved.has('terminal-demo'), false);
+  for (const id of ['a', 'b', 'c', 'd']) assert.ok(!overlapping(at.get(id), terminal), `${id} is not under the terminal`);
+});
+
+test('a box wired to a pinned terminal is still pushed out of a growing branch’s way', () => {
+  const { boxes, edges } = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b']);
+  // Just under the branch, in its column, with an arrow on to a terminal well clear of it.
+  const wiredBox = box('wired', W + FLOW_TAB_GAP_X, 720);
+  const terminal = terminalBox('terminal-demo', 1200, 720);
+  const arrows = [...edges, tab('wired', 'terminal-demo')];
+  const canvas = [...boxes, wiredBox, terminal];
+  const { position, moved } = placeTabChild(canvas, arrows, 'q', { id: 'c', width: W, height: H });
+  assert.equal(moved.has('terminal-demo'), false, 'the terminal stays where it was put');
+  assert.ok(moved.has('wired'), 'the box wired to it makes room');
+  const at = apply(canvas, moved, [{ id: 'c', ...position, width: W, height: H }]);
+  const all = [...at.values()];
+  for (const a of all) for (const b of all) if (a !== b) assert.ok(!overlapping(a, b), `${a.id} on ${b.id}`);
+});
+
+test('a pinned terminal joined like a branch is never laid out as one, nor carried by a drag', () => {
+  const { boxes, edges } = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b']);
+  const terminal = terminalBox('terminal-demo', W + FLOW_TAB_GAP_X, 1400);
+  const wired = [...edges, tab('q', 'terminal-demo')];
+  const canvas = [...boxes, terminal];
+  // Tidying the tree it seems to hang off leaves it alone…
+  assert.equal(tidyFlowTree(canvas, wired, ['q']).has('terminal-demo'), false);
+  // …so does deleting a sibling, or dragging the box it is wired to.
+  assert.equal(tidyAfterDelete(canvas, wired, new Set(['a'])).has('terminal-demo'), false);
+  assert.deepEqual(flowBranches(canvas, wired, ['q']).get('q')?.includes('terminal-demo') ?? false, false);
+  const dropped = canvas.map(b => (b.id === 'q' ? { ...b, y: 650 } : b));
+  assert.equal(tidyAfterMove(dropped, wired, new Map([['q', { x: 0, y: 600 }]])).has('terminal-demo'), false);
+});
+
+test('a pinned terminal leads nothing into a question, but the walk goes on past it', () => {
+  const node = (id, x, data = {}) => ({ id, position: { x, y: 0 }, data: { label: id, shape: 'rounded', ...data } });
+  const nodes = [
+    node('Where is the session issued', 0),
+    node('demo', 300, { shape: 'terminal', workspace: 'demo' }),
+    node('Which module', 600),
+  ];
+  const edges = [
+    { source: nodes[0].id, target: 'demo', targetHandle: 'left' },
+    { source: 'demo', target: nodes[2].id, targetHandle: 'left', data: { label: 'then' } },
+  ];
+  const path = flowQuestionPath(nodes, edges, nodes[2].id);
+  assert.deepEqual(path.map(step => step.label), ['Where is the session issued']);
+  assert.equal(path[0].arrow, 'then');
 });

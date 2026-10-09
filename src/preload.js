@@ -74,20 +74,53 @@ contextBridge.exposeInMainWorld('sb', {
   codeRename: (id, repoName, from, to) => ipcRenderer.invoke('sb:code:rename', id, repoName, from, to),
   codeDelete: (id, repoName, path) => ipcRenderer.invoke('sb:code:delete', id, repoName, path),
 
-  // Diagrams (§4.17) — the Diagrams tab's flow diagrams, one file each, kept per
-  // workspace beside the config and never in a repo. Every answer is { ok, data } or
-  // { ok:false, error }; a diagram is the admin's row: { id, name, kind, createdAt,
-  // updatedAt, archivedAt } plus `spec` where the whole diagram is asked for. The
+  // Whiteboards (§4.17) — folders of flow diagrams, one file per board, kept beside the
+  // config and never in a repo. Every answer is { ok, data } or { ok:false, error }. A
+  // board is addressed by its id alone; lists and writes answer a summary — { id, name,
+  // kind, folderId, workspace, createdAt, updatedAt, archivedAt, boxes, reads, thumb } —
+  // with `spec` added where the whole board is asked for (get, create, duplicate). The
   // bundle (src/diagrams) validates a spec before it asks for a write.
-  diagramsList: id => ipcRenderer.invoke('sb:diagrams:list', id),
-  diagramsGet: (id, diagramId) => ipcRenderer.invoke('sb:diagrams:get', id, diagramId),
-  diagramsCreate: (id, name, spec) => ipcRenderer.invoke('sb:diagrams:create', id, name, spec),
-  diagramsUpdate: (id, diagramId, name, spec) => ipcRenderer.invoke('sb:diagrams:update', id, diagramId, name, spec),
-  diagramsArchive: (id, diagramId, archived) => ipcRenderer.invoke('sb:diagrams:archive', id, diagramId, !!archived),
-  diagramsDelete: (id, diagramId) => ipcRenderer.invoke('sb:diagrams:delete', id, diagramId),
-  diagramsCreateDocument: (id, text) => ipcRenderer.invoke('sb:diagrams:createDocument', id, text),
-  diagramsGetDocument: (id, documentId) => ipcRenderer.invoke('sb:diagrams:getDocument', id, documentId),
-  diagramsSaveDocument: (id, documentId, text, revision) => ipcRenderer.invoke('sb:diagrams:saveDocument', id, documentId, text, revision),
+  // whiteboardsList: { folders, boards, notice, lastWorkspace, recentWorkspaces, migration },
+  // migration = { error, skipped, legacyRoot, legacyLabel } or null — legacyLabel is where
+  // the old diagrams are now, the home folder written as ~, for the screen's sentences.
+  whiteboardsList: () => ipcRenderer.invoke('sb:wb:list'),
+  whiteboardsGet: id => ipcRenderer.invoke('sb:wb:get', id),
+  // `req`: { folderId, name, spec, workspace? } — `workspace` left out starts the board
+  // with the workspace used last, or the most recent one still on the rail.
+  whiteboardsCreate: req => ipcRenderer.invoke('sb:wb:create', req),
+  // The editor's autosave: the spec only, never the name.
+  whiteboardsSaveSpec: (id, spec) => ipcRenderer.invoke('sb:wb:saveSpec', id, spec),
+  whiteboardsRename: (id, name) => ipcRenderer.invoke('sb:wb:rename', id, name),
+  // The workspace ✦ Answer reads for this board (a rail id, or null). Not an edit: the
+  // board's "edited" time stays.
+  whiteboardsSetWorkspace: (id, wsId) => ipcRenderer.invoke('sb:wb:setWorkspace', id, wsId === undefined ? null : wsId),
+  // `folderId` null is No folder. Refused when that folder has a board of the same name.
+  whiteboardsMove: (id, folderId) => ipcRenderer.invoke('sb:wb:move', id, folderId === undefined ? null : folderId),
+  // A copy beside it, "<name> copy", with copies of its documents.
+  whiteboardsDuplicate: id => ipcRenderer.invoke('sb:wb:duplicate', id),
+  whiteboardsArchive: (id, archived) => ipcRenderer.invoke('sb:wb:archive', id, !!archived),
+  whiteboardsDelete: id => ipcRenderer.invoke('sb:wb:delete', id),
+  // Folders: { id, name, createdAt, moved }. A folder with any board in it — archived
+  // ones too — is not deleted.
+  whiteboardsCreateFolder: name => ipcRenderer.invoke('sb:wb:createFolder', name),
+  whiteboardsRenameFolder: (id, name) => ipcRenderer.invoke('sb:wb:renameFolder', id, name),
+  whiteboardsDeleteFolder: id => ipcRenderer.invoke('sb:wb:deleteFolder', id),
+  // The one-time "your diagrams moved here" bar, read.
+  whiteboardsDismissNotice: () => ipcRenderer.invoke('sb:wb:dismissNotice'),
+  // A workspace just used on a board (a terminal opened): first in the pickers' Recent.
+  whiteboardsNoteWorkspace: wsId => ipcRenderer.invoke('sb:wb:noteWorkspace', wsId),
+  // What a workspace picker offers: { workspaces: [{ id, project, dirLabel }], recent, last }.
+  whiteboardsWorkspaces: () => ipcRenderer.invoke('sb:wb:workspaces'),
+  // Markdown documents, one store for every board, keyed by document id. Each answers
+  // { id, text, revision, path }; a save whose revision is stale answers code 'conflict'.
+  whiteboardsCreateDocument: text => ipcRenderer.invoke('sb:wb:createDocument', text),
+  whiteboardsGetDocument: id => ipcRenderer.invoke('sb:wb:getDocument', id),
+  whiteboardsSaveDocument: (id, text, revision) => ipcRenderer.invoke('sb:wb:saveDocument', id, text, revision),
+  // Try again, after moving the old per-workspace diagrams stopped part way.
+  whiteboardsMigrate: () => ipcRenderer.invoke('sb:wb:migrate'),
+  // After every write: { reason, boardId?, folderId? }, reason one of save, create,
+  // rename, workspace, move, duplicate, archive, delete, folder, notice.
+  onWhiteboardsChanged: cb => subscribe('sb:evt:wbChanged', cb),
   // A picture for a canvas: its bytes and MIME type in, { ok, src } out — the
   // sbimg://image/<file> address main serves it from.
   diagramsSaveImage: (bytes, type) => ipcRenderer.invoke('sb:diagrams:saveImage', bytes, type),
@@ -96,10 +129,10 @@ contextBridge.exposeInMainWorld('sb', {
   // The clipboard's picture as { ok, bytes, type } — Edit ▸ Paste over the canvas,
   // which a menu item delivers instead of a paste event.
   diagramsClipboardImage: () => ipcRenderer.invoke('sb:diagrams:clipboardImage'),
-  // How many diagrams hold edits not yet written (0 or 1), whenever that changes:
+  // How many whiteboards hold edits not yet written (0 or 1), whenever that changes:
   // main has the page write them before a close or a quit.
   diagramsDirty: count => ipcRenderer.invoke('sb:diagrams:dirty', count),
-  // Flush the diagram editor's pending autosave while the page is still live.
+  // Flush the whiteboard editor's pending autosave while the page is still live.
   onDiagramsFlush: cb => subscribe('sb:evt:diagramsFlush', cb),
   diagramsFlushed: id => ipcRenderer.invoke('sb:diagrams:flushed', id),
   // Google Images beside the canvas. A picture dragged out of the panel's <webview>, or
@@ -109,7 +142,7 @@ contextBridge.exposeInMainWorld('sb', {
   // page the picture was on. http(s) and base64 image data: URLs, Google's /imgres and
   // /url wrappers unwrapped.
   diagramsFetchImage: (url, referrer) => ipcRenderer.invoke('sb:diagrams:fetchImage', url, referrer || ''),
-  // The panel's right-click "Add Image to Diagram": { guestId, url, fallback, referrer },
+  // The panel's right-click "Add Image to Whiteboard": { guestId, url, fallback, referrer },
   // where guestId is the guest's webContents id — what webview.getWebContentsId()
   // answers — and `fallback` the thumbnail to try when the full picture at `url` won't
   // come ('' when there is none).
@@ -125,9 +158,11 @@ contextBridge.exposeInMainWorld('sb', {
   // comes back — only whether there is one and its last four characters.
   answerSetKey: (provider, key) => ipcRenderer.invoke('sb:answer:setKey', provider, key),
   answerRemoveKey: provider => ipcRenderer.invoke('sb:answer:removeKey', provider),
-  // Ask. `req`: { provider, wsId, system, user, schema }. Resolves { ok, text, files? }
-  // — the answer's JSON — or { ok:false, error, code }; a CLI's steps arrive meanwhile
-  // as sb:evt:answerStep (id, step). answerStop ends it, CLI process and all.
+  // Ask. `req`: { provider, wsId, system, user, schema, operation? } — `wsId` is the
+  // whiteboard's workspace, or null; a CLI asked to read none answers code 'no-workspace'
+  // (a condensation never does). Resolves { ok, text, files? } — the answer's JSON — or
+  // { ok:false, error, code }; a CLI's steps arrive meanwhile as sb:evt:answerStep
+  // (id, step). answerStop ends it, CLI process and all.
   answerStart: (id, req) => ipcRenderer.invoke('sb:answer:start', id, req),
   answerStop: id => ipcRenderer.invoke('sb:answer:stop', id),
   onAnswerStep: cb => subscribe('sb:evt:answerStep', cb),
