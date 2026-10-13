@@ -405,6 +405,23 @@ export function DiagramsPage({
     })
   }, [])
 
+  // Switchboard: this board as another process wrote it (scripts/whiteboard.js, which a
+  // Claude Code skill runs in a terminal). Read back and handed to the editor, which
+  // takes the drawing in as one undo step; the summary and spec are this page's too, so
+  // a canvas drawn again later — unarchived, say — starts from what the file holds.
+  const takeExternal = useCallback((id: string) => {
+    void getWhiteboard({ id }).then((result) => {
+      if (deleted.current || boardIdNow.current !== id || !result.ok) return
+      const fresh = result.data
+      if (fresh.spec) flowEditorRef.current?.adopt(fresh.spec)
+      setLoaded((prev) =>
+        prev && prev.status === "ready" && prev.board.id === id
+          ? { ...prev, board: { ...prev.board, ...summaryOf(fresh), spec: fresh.spec ?? prev.board.spec, specError: fresh.specError } }
+          : prev,
+      )
+    })
+  }, [])
+
   // Asked again when the folder list no longer has this board: gone, or unreadable.
   const recheckBoard = useCallback(() => {
     const id = boardIdNow.current
@@ -469,6 +486,10 @@ export function DiagramsPage({
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null
     const off = listen("onWhiteboardsChanged", (change) => {
+      // Switchboard: written from outside while it is open — on screen or parked.
+      if (change && change.reason === "save" && change.external && change.boardId === boardIdNow.current) {
+        takeExternal(change.boardId)
+      }
       if (change && change.reason === "save") {
         if (change.boardId === boardIdNow.current || !activeNow.current) return
       }
@@ -482,7 +503,7 @@ export function DiagramsPage({
       off()
       if (timer) clearTimeout(timer)
     }
-  }, [refreshList])
+  }, [refreshList, takeExternal])
 
   // ── What the rest of the page reads ─────────────────────────────────
 

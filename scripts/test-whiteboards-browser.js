@@ -7,7 +7,11 @@
 // workspace, folder and board is fictional; no local config, Claude account, tmux
 // session or ~/.switchboard is read or written.
 //
-// Covers: the Whiteboards rail screen and its home list; opening a board; Actions ▸
+// Covers: the Whiteboards rail screen and its home list; a box resized from its corner
+// (kept in the board file, opened again at its size, copied by Tab) and holding words
+// well past 200 characters, pasted and typed; a board the whiteboard CLI writes to while
+// it is open, drawn at once, not written back, and put back by Undo; opening a board;
+// Actions ▸
 // Open terminal… floating the workspace's own shell (the Terminal tab's xterm, its
 // scrollback, one shell); a second workspace's panel from the tray's + (a toggle: a
 // second press puts its picker away), cascaded and in front; Tile; an edge resize
@@ -240,6 +244,9 @@ if (!process.versions.electron) {
     try {
       // The store as index.js leaves it: migrated (nothing to move here) before the window.
       assert.equal((await whiteboards.migrate()).ok, true);
+      // And watched, as index.js does next, so a board written from a terminal
+      // (scripts/whiteboard.js) reaches the screen.
+      whiteboards.watch();
       const folder = await whiteboards.createFolder('Example folder');
       assert.equal(folder.ok, true, folder.error);
       const doc = await whiteboards.createDocument('# Example brief\n\nSupporting context.');
@@ -302,6 +309,132 @@ if (!process.versions.electron) {
         assert.equal(await run('Array.from(document.querySelectorAll("#side .it.top")).find(b => b.textContent.trim() === "Whiteboards").getAttribute("aria-current")'), 'true');
       });
       await capture('home');
+
+      mark('a box resized from its corner, and words well past 200 characters');
+      // A board of its own, made after the home's count, so nothing later sees it.
+      const sized = await whiteboards.create({ folderId: null, name: 'Sized flow', workspace: wsId, spec: { kind: 'flow', nodes: [
+        { id: 'grow', label: 'Grow this box', position: { x: 60, y: 130 } },
+      ], edges: [] } });
+      assert.equal(sized.ok, true, sized.error);
+      const sizedSlab = `.dgslab[data-wb-board="${sized.data.id}"]`;
+      const growNode = `${sizedSlab} .react-flow__node[data-id="grow"]`;
+      const nodeSize = sel => run(`(() => { const el = document.querySelector(${q(sel)}); return el ? { width: el.offsetWidth, height: el.offsetHeight } : null; })()`);
+      const openSized = async () => {
+        await run(`SB.go({view:'whiteboard',board:${q(sized.data.id)}})`);
+        await until(`!!document.querySelector(${q(growNode)})`);
+        await settled(sizedSlab);
+      };
+      await openSized();
+      const zoom = await run(`Number((document.querySelector(${q(sizedSlab + ' .react-flow__viewport')}).style.transform.match(/scale\\(([^)]+)\\)/) || [])[1])`);
+      assert.ok(zoom > 0, String(zoom));
+      const unsized = await nodeSize(growNode);
+      assert.deepEqual(unsized, { width: 200, height: 52 });
+      await pressOn(growNode);
+      await check('a selected box shows resize handles on its corners and edges', async () => {
+        await until(`document.querySelectorAll(${q(growNode + ' .react-flow__resize-control')}).length === 8`);
+      });
+      const corner = await rect(growNode + ' .react-flow__resize-control.handle.bottom.right');
+      const cx = Math.round(corner.left + corner.width / 2), cy = Math.round(corner.top + corner.height / 2);
+      window.webContents.sendInputEvent({ type: 'mouseMove', x: cx, y: cy });
+      window.webContents.sendInputEvent({ type: 'mouseDown', x: cx, y: cy, button: 'left', clickCount: 1 });
+      for (let i = 1; i <= 10; i++) window.webContents.sendInputEvent({ type: 'mouseMove', x: cx + 16 * i, y: cy + 8 * i, button: 'left' });
+      await frames();
+      window.webContents.sendInputEvent({ type: 'mouseUp', x: cx + 160, y: cy + 80, button: 'left', clickCount: 1 });
+      await frames();
+      await run(`${apiOf(sized.data.id)}.flush()`);
+      const resized = await nodeSize(growNode);
+      await check('dragging a box\'s corner resizes it, and the board file keeps the size', async () => {
+        assert.ok(Math.abs(resized.width - (200 + 160 / zoom)) <= 2, JSON.stringify({ resized, zoom }));
+        assert.ok(Math.abs(resized.height - (52 + 80 / zoom)) <= 2, JSON.stringify({ resized, zoom }));
+        assert.deepEqual(boardFile(sized.data.id).spec.nodes[0].size, resized);
+      });
+      await run('SB.go({view:"whiteboards",folder:"all"})');
+      await until(`SB.state.route.view === "whiteboards"`);
+      await openSized();
+      await check('a resized box opens again at its size', async () => {
+        assert.deepEqual(await nodeSize(growNode), resized);
+      });
+
+      // Pasted then typed: well past the 200 characters a box used to stop at.
+      const long = 'A fictional step that needs a paragraph to explain why it waits on the card. '.repeat(8).trim();
+      assert.ok(long.length > 600);
+      await run(`document.querySelector(${q(growNode)}).dispatchEvent(new MouseEvent("dblclick", {bubbles:true}))`);
+      await until('document.activeElement.isContentEditable');
+      await run(`(() => { const s = getSelection(); s.selectAllChildren(document.activeElement); s.collapseToEnd(); })()`);
+      await run(`(() => { const data = new DataTransfer(); data.setData('text/plain', ${q(' ' + long)}); document.activeElement.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true })); })()`);
+      for (const ch of ' end') window.webContents.sendInputEvent({ type: 'char', keyCode: ch });
+      await until(`document.activeElement.textContent.endsWith(' end')`);
+      // Enter finishes the edit. (Not blur(): this window never has focus, so Chromium
+      // fires no blur event, and the box would go on being edited.)
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+      await until(`!document.querySelector(${q(growNode + ' [contenteditable]')})`);
+      // Let the box settle at its new height first, as a person would: a save landing in
+      // the same frames as a box growing by its last lines can make Chromium log a
+      // "ResizeObserver loop" warning (the code before box resizing did too).
+      await frames(); await sleep(300);
+      await run(`${apiOf(sized.data.id)}.flush()`);
+      await check('a box keeps every word past 200 characters, pasted and typed', async () => {
+        const saved = boardFile(sized.data.id).spec.nodes[0];
+        assert.equal(saved.label, 'Grow this box ' + long + ' end');
+        // Its width is still the one it was given; its words make it taller than that.
+        const drawn = await nodeSize(growNode);
+        assert.equal(drawn.width, resized.width);
+        assert.ok(drawn.height > resized.height, JSON.stringify({ drawn, resized }));
+        assert.deepEqual(saved.size, resized);
+      });
+      await check('the box, still selected once its edit ends, shows its handles again', async () => {
+        await until(`document.querySelectorAll(${q(growNode + ' .react-flow__resize-control')}).length === 8`);
+      });
+      await capture('resized-box');
+
+      // Tab adds a box like this one: the same size, as a note's does.
+      assert.equal(await run(`document.querySelector(${q(growNode)}).classList.contains('selected')`), true);
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
+      await until(`document.querySelectorAll(${q(sizedSlab + ' .react-flow__node')}).length === 2`);
+      await check('Tab after a resized box adds one as wide', async () => {
+        const child = await run(`(() => { const el = Array.from(document.querySelectorAll(${q(sizedSlab + ' .react-flow__node')})).find(n => n.dataset.id !== 'grow'); return { width: el.offsetWidth, height: el.offsetHeight }; })()`);
+        assert.deepEqual(child, resized);
+      });
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+      await frames(); await sleep(300);
+      await run(`${apiOf(sized.data.id)}.flush()`);
+
+      mark('a board written from a terminal while it is open');
+      // What the whiteboard skill runs: the CLI, as a process of its own, on the same store.
+      const whiteboardCli = (args, input) => require('node:child_process').spawnSync(process.execPath, [path.join(repo, 'scripts/whiteboard.js'), ...args], {
+        input, encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      });
+      const fromShow = JSON.parse(whiteboardCli(['show', sized.data.id]).stdout);
+      fromShow.spec.nodes.push({ id: 'from-terminal', label: 'Added from a terminal' });
+      fromShow.spec.edges.push({ from: 'grow', to: 'from-terminal' });
+      const wrote = whiteboardCli(['update', sized.data.id, '-'], JSON.stringify(fromShow));
+      assert.equal(wrote.status, 0, wrote.stderr);
+      const sizedFile = path.join(temp, 'whiteboards', 'boards', sized.data.id + '.json');
+      const written = fs.readFileSync(sizedFile, 'utf8');
+      const fromTerminal = `${sizedSlab} .react-flow__node[data-id="from-terminal"]`;
+      await check('an open board draws what a terminal wrote to it', async () => {
+        await until(`!!document.querySelector(${q(fromTerminal)})`);
+        assert.equal(await run(`document.querySelector(${q(fromTerminal)}).textContent`), 'Added from a terminal');
+        assert.equal(await run(`!!document.querySelector(${q(sizedSlab + ' .react-flow__edge[aria-label="Edge from grow to from-terminal"]')})`), true);
+        // The resized box kept its size through the CLI's write.
+        assert.equal((await nodeSize(growNode)).width, resized.width);
+      });
+      await check('the board does not write it straight back', async () => {
+        await sleep(1200);
+        assert.equal(fs.readFileSync(sizedFile, 'utf8'), written);
+      });
+      await capture('from-terminal');
+      await check('Undo puts back what the board showed before the terminal wrote', async () => {
+        await run(`document.querySelector(${q(sizedSlab + ' [aria-label="Undo · ⌘Z"]')}).click()`);
+        await until(`!document.querySelector(${q(fromTerminal)})`);
+        await run(`${apiOf(sized.data.id)}.flush()`);
+        assert.equal(boardFile(sized.data.id).spec.nodes.some(n => n.id === 'from-terminal'), false);
+      });
+      await run('SB.go({view:"whiteboards",folder:"all"})');
+      await until(`SB.state.route.view === "whiteboards" && !!document.querySelector(${q('#main .wbrow[data-wb-board="' + boardId + '"]')})`);
 
       mark('opening a board');
       await run(`document.querySelector(${q('#main .wbrow[data-wb-board="' + boardId + '"]')}).click()`);
@@ -957,7 +1090,7 @@ if (!process.versions.electron) {
         assert.doesNotMatch(await run(`document.querySelector(${q(canvas + ' .react-flow__background circle')})?.getAttribute('r') || ''`), /NaN/);
       });
 
-      console.log('PASS — Whiteboards: rail screen and home, open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid squares without whiteboards (old ones open Terminal), exit and retry, ✦ Answer\'s Conversation row (New conversation from the keyboard, a workspace changed and back, a CLI on its own)' +
+      console.log('PASS — Whiteboards: rail screen and home, a box resized from its corner and holding 600+ characters, a board the CLI writes to while open, open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid squares without whiteboards (old ones open Terminal), exit and retry, ✦ Answer\'s Conversation row (New conversation from the keyboard, a workspace changed and back, a CLI on its own)' +
         (known.length ? ` (${known.length} known bug${known.length === 1 ? '' : 's'}: ${known.join('; ')})` : ''));
     } catch (error) {
       await capture('failure').catch(() => {});

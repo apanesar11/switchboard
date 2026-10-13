@@ -365,7 +365,8 @@ test('the thumbnail fits up to 14 positioned boxes inside a 4px margin of 40×30
   assert.deepEqual(made.data.thumb, [[4, 4.4, 10.7, 5.5], [25.3, 20.1, 10.7, 5.5]]);
 
   // A note and a picture keep their own size (a picture with none is 240×180), a document
-  // is 240×76, and a box is 200 wide whatever `size` it carries.
+  // is 240×76, and a box resized to 60×24 keeps its width but grows to fit its line of
+  // text (60×40) — under a pixel high at this scale, so drawn 6×4 about its centre.
   const sized = {
     kind: 'flow',
     nodes: [
@@ -377,7 +378,7 @@ test('the thumbnail fits up to 14 positioned boxes inside a 4px margin of 40×30
     edges: [],
   };
   assert.deepEqual((await wb.create({ folderId: null, name: 'Thumb sized', spec: sized })).data.thumb,
-    [[4, 4, 15, 13.1], [24, 4, 12, 11.8], [4, 20.7, 10, 4], [24, 21, 12, 5]]);
+    [[4, 4, 15, 13.1], [24, 4, 12, 11.8], [2.5, 20.3, 6, 4], [24, 21, 12, 5]]);
 
   // Boxes far apart are each far under a pixel: they are still drawn 6×4, about their
   // centres, and stay inside the frame.

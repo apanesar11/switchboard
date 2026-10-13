@@ -22,6 +22,7 @@ import {
   DEFAULT_FLOW_TEXT_SIZE,
   DEFAULT_FLOW_TONE,
   DIAGRAM_TEXT_MAX_LENGTH,
+  FLOW_BOX_TEXT_MAX_LENGTH,
   FLOW_SIDES,
   FLOW_TERMINAL_DEFAULT_SIZE,
   TERMINAL_BASE_FONT,
@@ -29,6 +30,7 @@ import {
   TERMINAL_FONT_MIN,
   TERMINAL_HEADER,
   TERMINAL_MIN_FONT,
+  isFlowBoxShape,
   isFlowSizedShape,
   type FlowEdgeSpec,
   type FlowNodeSpec,
@@ -71,7 +73,7 @@ function clean(value: string | undefined): string | undefined {
 
 function cleanBoxText(value: string | undefined): string | undefined {
   const text = normalizeFlowText(value ?? "")
-  return text.length > 0 ? text.slice(0, DIAGRAM_TEXT_MAX_LENGTH).trimEnd() : undefined
+  return text.length > 0 ? text.slice(0, FLOW_BOX_TEXT_MAX_LENGTH).trimEnd() : undefined
 }
 
 function isSide(value: string | null | undefined): value is FlowSide {
@@ -993,15 +995,20 @@ export function carryOverFlowLayout(
     const aiWords = old.ai === true && old.label === node.label && old.detail === node.detail
     const ai = node.ai ?? (aiWords ? true : undefined)
     const terminal = node.shape === "terminal" && old.shape === "terminal"
+    // A box's shape is left out when it is the default one.
+    const shape = node.shape ?? DEFAULT_FLOW_SHAPE
+    const oldShape = old.shape ?? DEFAULT_FLOW_SHAPE
     return {
       ...node,
       position: node.position ?? old.position,
       // Only onto the same shape it was given for: a size means something
       // different on each (a note's least height, a text's width alone, an
-      // image's proportions), and a box keeps none at all.
+      // image's proportions). Switchboard: every box's means the same, so it
+      // carries from one outline to another.
       size:
         node.size ??
-        (node.shape !== undefined && isFlowSizedShape(node.shape) && node.shape === old.shape
+        (isFlowSizedShape(shape) &&
+        (shape === oldShape || (isFlowBoxShape(shape) && isFlowBoxShape(oldShape)))
           ? old.size
           : undefined),
       dashed: node.dashed ?? old.dashed,

@@ -1,4 +1,4 @@
-import { DIAGRAM_TEXT_MAX_LENGTH, type FlowRichText, type FlowTextParagraph, type FlowTextRun } from "./types"
+import { FLOW_BOX_TEXT_MAX_LENGTH, type FlowRichText, type FlowTextParagraph, type FlowTextRun } from "./types"
 
 export const FLOW_BULLET_INDENT = 1.35
 export const FLOW_CHECKLIST_INDENT = 1.65
@@ -120,13 +120,13 @@ export function richTextVisualLines(value: FlowRichText): FlowRichText {
 /** Validate untrusted JSON; mismatched formatting never attaches to changed words. */
 export function parseFlowRichText(value: unknown, plainText: string): FlowRichText | undefined {
   if (value === undefined || value === null) return undefined
-  if (!Array.isArray(value) || value.length > DIAGRAM_TEXT_MAX_LENGTH + 1) {
+  if (!Array.isArray(value) || value.length > FLOW_BOX_TEXT_MAX_LENGTH + 1) {
     throw new Error("rich text must be an array of paragraphs")
   }
   let characters = Math.max(0, value.length - 1)
   const rich: FlowRichText = value.map((paragraph) => {
     if (!paragraph || typeof paragraph !== "object" || !Array.isArray(paragraph.runs) ||
-        paragraph.runs.length > DIAGRAM_TEXT_MAX_LENGTH + 1) {
+        paragraph.runs.length > FLOW_BOX_TEXT_MAX_LENGTH + 1) {
       throw new Error("each rich text paragraph must contain runs")
     }
     const runs: FlowTextRun[] = []
@@ -135,7 +135,7 @@ export function parseFlowRichText(value: unknown, plainText: string): FlowRichTe
         throw new Error("rich text runs must contain text with normalized line breaks")
       }
       characters += run.text.length
-      if (characters > DIAGRAM_TEXT_MAX_LENGTH * 10) throw new Error("rich text is too long")
+      if (characters > FLOW_BOX_TEXT_MAX_LENGTH * 10) throw new Error("rich text is too long")
       appendTextRun(runs, { text: run.text, bold: run.bold === true, italic: run.italic === true })
     }
     if (paragraph.checked !== undefined && typeof paragraph.checked !== "boolean") {

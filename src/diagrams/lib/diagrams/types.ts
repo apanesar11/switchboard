@@ -76,10 +76,10 @@ export function isFlowBoxShape(shape: FlowShape): shape is FlowBoxShape {
 
 /**
  * The shapes sized by hand in the editor, which keep that size in `size`.
- * A box is always as wide as every other box and as tall as its text.
- * Switchboard: a pinned terminal is sized by hand too.
+ * Switchboard: a pinned terminal is sized by hand too, and so is a box — one
+ * never resized is as wide as every other box and as tall as its text.
  */
-export const FLOW_SIZED_SHAPES = ["note", "text", "image", "terminal"] as const
+export const FLOW_SIZED_SHAPES = [...FLOW_BOX_SHAPES, "note", "text", "image", "terminal"] as const
 
 export function isFlowSizedShape(shape: FlowShape): boolean {
   return (FLOW_SIZED_SHAPES as readonly FlowShape[]).includes(shape)
@@ -196,7 +196,9 @@ export type FlowNodeSpec = {
    * for those shapes. A note grows past it to fit its text, and a text uses
    * only the width — its height always follows its lines. Absent means the
    * default size (a note, an image) or as wide as the words (a text).
-   * Switchboard: a terminal's outer size, header included.
+   * Switchboard: a terminal's outer size, header included. And a box's, which
+   * grows past it to fit its text as a note does; absent, a box is
+   * FLOW_NODE_WIDTH wide and as tall as its text.
    */
   size?: FlowSize
   /**
@@ -286,7 +288,15 @@ export const FLOW_SIZE_MAX = 4_000
 /** An image node's URL, at most. */
 export const FLOW_IMAGE_SRC_MAX_LENGTH = 2_048
 
+/** One line of text: an arrow's label, a diagram's title, a condensed box's words. */
 export const DIAGRAM_TEXT_MAX_LENGTH = 200
+/**
+ * Switchboard: a box's label or second line (a note's, a text's), typed, pasted or
+ * hand-edited. The admin caps these at DIAGRAM_TEXT_MAX_LENGTH; here a box can be
+ * resized to hold a paragraph or two, and 200 was being hit (2026-10-13). A bound
+ * only so a hand-edited file can't hand the layout a novel to wrap on every keystroke.
+ */
+export const FLOW_BOX_TEXT_MAX_LENGTH = 10_000
 export const DIAGRAM_SUMMARY_MAX_LENGTH = 400
 
 // ─────────────────────────────────────────────────────────────────────

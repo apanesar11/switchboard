@@ -173,6 +173,8 @@ import { cx, focusRing } from "@/lib/utils"
 import {
   flowEdgeAppearance,
   flowNodeSize,
+  FLOW_BOX_MIN_SIZE,
+  FLOW_DIAMOND_MIN_SIZE,
   FLOW_IMAGE_DEFAULT_SIZE,
   FLOW_NODE_WIDTH,
   FLOW_TEXT_MIN_WIDTH,
@@ -1100,6 +1102,8 @@ function TextEditor({
 // The handles that resize a note, a text or an image while it is selected:
 // all four corners and edges for a note, keeping its proportions for an
 // image, and only the sides for a text, whose height follows its lines.
+// Switchboard: and a box, every corner and edge as a note has — let go shorter
+// than its text, it grows back to fit it, as a note does.
 function Resizer({
   id,
   box,
@@ -1158,12 +1162,20 @@ function Resizer({
       </>
     )
   }
+  const least =
+    box.shape === "image"
+      ? { width: 24, height: 24 }
+      : box.shape === "diamond"
+        ? FLOW_DIAMOND_MIN_SIZE
+        : isFlowBoxShape(box.shape)
+          ? FLOW_BOX_MIN_SIZE
+          : { width: 80, height: 48 }
   return (
     <NodeResizer
       isVisible
       keepAspectRatio={box.shape === "image"}
-      minWidth={box.shape === "image" ? 24 : 80}
-      minHeight={box.shape === "image" ? 24 : 48}
+      minWidth={least.width}
+      minHeight={least.height}
       maxWidth={FLOW_SIZE_MAX}
       maxHeight={FLOW_SIZE_MAX}
       lineClassName={lineClassName}
@@ -1430,7 +1442,7 @@ function EditableBoxNode({ id, data, selected }: NodeProps) {
     !selectionRect &&
     !editing &&
     !connecting &&
-    (box.shape === "note" || box.shape === "text" || box.shape === "image")
+    (box.shape === "note" || box.shape === "text" || box.shape === "image" || isFlowBoxShape(box.shape))
 
   return (
     <div className={cx("relative size-full", interactive && "group")}>
@@ -1558,6 +1570,13 @@ export type FlowEditorHandle = {
   pasteBoxes: (text: string) => boolean
   /** Switchboard: the diagram as the canvas now holds it — what Rename writes. */
   currentSpec: () => FlowSpec
+  /**
+   * Switchboard: a drawing another process wrote to this board (scripts/whiteboard.js,
+   * which a Claude Code skill runs in a terminal), taken onto the canvas as one undo
+   * step — Undo puts back what was there — and counted as saved, as the drawing a board
+   * opens on is. Nothing happens when the canvas already holds it.
+   */
+  adopt: (spec: FlowSpec) => void
   /**
    * Switchboard: pins `wsId`'s terminal to the board, as a node whose outer client
    * rect is `rect` (the floating panel's), so nothing on screen moves: placed at
@@ -1700,11 +1719,14 @@ function FlowEditorCanvas({
 
   // The parts of the spec the canvas doesn't show (title, summary, direction)
   // ride along untouched into every save.
-  const [meta] = useState<FlowSpecMeta>(() => ({
+  const [meta, setMeta] = useState<FlowSpecMeta>(() => ({
     title: spec.title,
     summary: spec.summary,
     direction: spec.direction,
   }))
+  // Switchboard: the same, for handlers that outlive a render — a drawing adopt()
+  // takes in can bring its own.
+  const metaRef = useRef(meta)
   const [initial] = useState(() => toCanvas(spec))
   const [nodes, setNodes] = useState<Node[]>(initial.nodes)
   const [edges, setEdges] = useState<Edge[]>(initial.edges)
@@ -1866,6 +1888,7 @@ function FlowEditorCanvas({
       cut: () => shortcutsRef.current.cut(),
       pasteBoxes: (text: string) => shortcutsRef.current.pasteBoxes(text),
       currentSpec: () => JSON.parse(latestRef.current) as FlowSpec,
+      adopt: (spec: FlowSpec) => shortcutsRef.current.adopt(spec),
       pinTerminal: (wsId: string, rect: ClientRect, body?: ClientRect | null) =>
         terminalsRef.current.pin(wsId, rect, body),
       unpinTerminal: (wsId: string) => terminalsRef.current.unpin(wsId),
@@ -1874,6 +1897,16 @@ function FlowEditorCanvas({
     }),
     [flush],
   )
+
+  // Switchboard: what adopt() took in is what the board's file already holds — saved,
+  // not something to write back. (Ahead of the autosave below, which it settles.)
+  const adoptedRef = useRef(false)
+  useEffect(() => {
+    if (!adoptedRef.current) return
+    adoptedRef.current = false
+    savedRef.current = json
+    setSavedJson(json)
+  }, [json])
 
   useEffect(() => {
     if (dragging || json === savedJson) return
@@ -2196,7 +2229,13 @@ function FlowEditorCanvas({
     const pinned = new Map(
       nodesRef.current.filter(isTerminal).map((node) => [terminalWorkspace(node), clientRectOf(node)] as const),
     )
-    const next = toCanvas(JSON.parse(snapshot) as FlowSpec)
+    const spec = JSON.parse(snapshot) as FlowSpec
+    const next = toCanvas(spec)
+    // Switchboard: a snapshot's title, summary and direction too — one adopt() took in
+    // can differ from the one before it.
+    const specMeta: FlowSpecMeta = { title: spec.title, summary: spec.summary, direction: spec.direction }
+    metaRef.current = specMeta
+    setMeta(specMeta)
     nodesRef.current = next.nodes
     edgesRef.current = next.edges
     latestRef.current = snapshot
@@ -2243,6 +2282,17 @@ function FlowEditorCanvas({
     if (target === undefined) return
     setPast(pushed)
     restore(target)
+  }
+
+  // Switchboard: see FlowEditorHandle.adopt.
+  function adopt(spec: FlowSpec) {
+    const nextMeta: FlowSpecMeta = { title: spec.title, summary: spec.summary, direction: spec.direction }
+    const next = toCanvas(spec)
+    const snapshot = canvasJson(nextMeta, next.nodes, next.edges)
+    if (snapshot === latestRef.current) return
+    record()
+    adoptedRef.current = true
+    restore(snapshot)
   }
 
   // ─── changes ───
@@ -2466,8 +2516,8 @@ function FlowEditorCanvas({
 
   // Keeps the size a note, text or image was dragged to, then re-sizes it the
   // way the read-only canvas will: a note no shorter than its text needs, a
-  // text as tall as its lines. Where the resize handles left the corner is
-  // where it stays.
+  // text as tall as its lines (Switchboard: a box as a note). Where the resize
+  // handles left the corner is where it stays.
   const resize = useCallback((id: string, size: FlowSize, done: boolean) => {
     if (resizePendingRef.current) {
       resizePendingRef.current = false
@@ -2883,7 +2933,7 @@ function FlowEditorCanvas({
     const from = parent.data as FlowBoxNodeData
     // The next of the same kind — but after a picture, a plain box, since
     // there is no picture to repeat. A note keeps its size; a text runs as
-    // wide as its own words.
+    // wide as its own words. Switchboard: a box resized by hand keeps its size too.
     // Switchboard: after a pinned terminal too — there is no second shell to add.
     const box: FlowBoxNodeData =
       from.shape === "image" || from.shape === "document" || from.shape === "terminal"
@@ -2900,7 +2950,7 @@ function FlowEditorCanvas({
             answeredIn: undefined,
             // Switchboard: in the branch it is added to.
             detached: undefined,
-            size: from.shape === "note" ? from.size : undefined,
+            size: from.shape === "note" || isFlowBoxShape(from.shape) ? from.size : undefined,
           }
     const id = nextFlowNodeId(
       nodes.map((node) => node.id),
@@ -3339,7 +3389,7 @@ function FlowEditorCanvas({
                 )
               : [],
             existing,
-            title: diagramName ?? meta.title,
+            title: diagramName ?? metaRef.current.title,
             split: settings.split,
             subtext: settings.subtext,
           },
@@ -3395,7 +3445,7 @@ function FlowEditorCanvas({
   // invalidate the request, while moves and work elsewhere can continue.
   async function condense(selectedIds: string[]) {
     if (selectedIds.some(isAnswering)) return
-    const currentSpec = () => JSON.parse(canvasJson(meta, nodesRef.current, edgesRef.current)) as FlowSpec
+    const currentSpec = () => JSON.parse(canvasJson(metaRef.current, nodesRef.current, edgesRef.current)) as FlowSpec
     const picked = new Set(selectedIds)
     // Include editor-only edges to empty text, which saving intentionally
     // omits. Adding even an unfinished branch invalidates this replacement.
@@ -3461,7 +3511,7 @@ function FlowEditorCanvas({
             const parent = parentNodes.get(edge.from)
             return parent ? [{ id: parent.id, label: parent.label, detail: parent.detail, arrow: edge.label }] : []
           }),
-          title: diagramName ?? meta.title,
+          title: diagramName ?? metaRef.current.title,
           subtext: known.settings.subtext,
         },
       }, controller.signal, (step) => {
@@ -3545,7 +3595,7 @@ function FlowEditorCanvas({
       }
       nodesRef.current = appliedNodes
       edgesRef.current = appliedEdges
-      latestRef.current = canvasJson(meta, appliedNodes, appliedEdges)
+      latestRef.current = canvasJson(metaRef.current, appliedNodes, appliedEdges)
       setNodes(appliedNodes)
       setEdges(appliedEdges)
       setAnswerNote({ by: provider.name, files: null, seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)), condensed: selectedIds.length })
@@ -3606,7 +3656,7 @@ function FlowEditorCanvas({
       toast({ title: "The answer arrived after its box was deleted, so it wasn't added" })
       return
     }
-    latestRef.current = canvasJson(meta, nodesRef.current, edgesRef.current)
+    latestRef.current = canvasJson(metaRef.current, nodesRef.current, edgesRef.current)
     record()
     // Its own step, apart from whatever was typed just before it landed.
     lastRecordAt.current = 0
@@ -3669,7 +3719,7 @@ function FlowEditorCanvas({
     const nextEdges = [...(quiet ? edgesRef.current : deselected(edgesRef.current)), ...arrows]
     nodesRef.current = nextNodes
     edgesRef.current = nextEdges
-    latestRef.current = canvasJson(meta, nextNodes, nextEdges)
+    latestRef.current = canvasJson(metaRef.current, nextNodes, nextEdges)
     setNodes(nextNodes)
     setEdges(nextEdges)
     setAnswered(added.length)
@@ -4010,9 +4060,9 @@ function FlowEditorCanvas({
           : candidate,
       )
     nodesRef.current = apply(nodesRef.current)
-    latestRef.current = canvasJson(meta, nodesRef.current, edgesRef.current)
+    latestRef.current = canvasJson(metaRef.current, nodesRef.current, edgesRef.current)
     setNodes(apply)
-  }, [record, meta])
+  }, [record])
 
   // Smaller text / Larger text: the type one step smaller or larger in the same box,
   // so the host fits a new grid of rows and columns into it. One undo step a press.
@@ -4029,9 +4079,9 @@ function FlowEditorCanvas({
         candidate.id === id ? withBox(candidate, { ...(candidate.data as FlowBoxNodeData), font }) : candidate,
       )
     nodesRef.current = apply(nodesRef.current)
-    latestRef.current = canvasJson(meta, nodesRef.current, edgesRef.current)
+    latestRef.current = canvasJson(metaRef.current, nodesRef.current, edgesRef.current)
     setNodes(apply)
-  }, [record, meta, store])
+  }, [record, store])
 
   const terminalContext = useMemo<TerminalContextValue>(
     () => ({
@@ -4128,7 +4178,7 @@ function FlowEditorCanvas({
       refreshChoices()
     }
     nodesRef.current = [...nodesRef.current, node]
-    latestRef.current = canvasJson(meta, nodesRef.current, edgesRef.current)
+    latestRef.current = canvasJson(metaRef.current, nodesRef.current, edgesRef.current)
     setNodes((current) => [...current, node])
     scheduleSlots()
     return true
@@ -4148,7 +4198,7 @@ function FlowEditorCanvas({
       current.filter((edge) => edge.source !== node.id && edge.target !== node.id)
     nodesRef.current = keep(nodesRef.current)
     edgesRef.current = unwire(edgesRef.current)
-    latestRef.current = canvasJson(meta, nodesRef.current, edgesRef.current)
+    latestRef.current = canvasJson(metaRef.current, nodesRef.current, edgesRef.current)
     setNodes(keep)
     setEdges(unwire)
     scheduleSlots()
@@ -4394,9 +4444,11 @@ function FlowEditorCanvas({
     copy: () => boolean
     cut: () => boolean
     pasteBoxes: (text: string) => boolean
+    adopt: (spec: FlowSpec) => void
   }>({
     undo,
     redo,
+    adopt,
     flush,
     tab,
     editSelection,
@@ -4416,6 +4468,7 @@ function FlowEditorCanvas({
     shortcutsRef.current = {
       undo,
       redo,
+      adopt,
       flush,
       tab,
       editSelection,

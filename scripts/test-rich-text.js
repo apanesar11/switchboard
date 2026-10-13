@@ -9,7 +9,7 @@ const esbuild = require('esbuild');
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'switchboard-rich-text-'));
 const modules = {};
-for (const name of ['rich-text', 'layout', 'validate', 'flow-editor']) {
+for (const name of ['rich-text', 'layout', 'validate', 'flow-editor', 'types']) {
   const outfile = path.join(temp, name + '.js');
   esbuild.buildSync({ entryPoints: [path.join(__dirname, '..', 'src', 'diagrams', 'lib', 'diagrams', name + '.ts')],
     outfile, bundle: true, format: 'cjs', platform: 'node', logLevel: 'error' });
@@ -22,6 +22,7 @@ const { parseFlowRichText, richTextPlainText, richTextHtml, truncateRichText, ri
 const { layoutDiagram, flowNodeSize, setFlowTextMeasure } = modules.layout;
 const { parseDiagramSpec } = modules.validate;
 const { flowSpecFromCanvas, carryOverFlowLayout } = modules['flow-editor'];
+const { DIAGRAM_TEXT_MAX_LENGTH, FLOW_BOX_TEXT_MAX_LENGTH } = modules.types;
 const rich = [
   { runs: [{ text: 'Connect ' }, { text: 'multiple systems', bold: true }] },
   { bullet: true, runs: [{ text: 'Point of sale' }] },
@@ -370,4 +371,82 @@ test('a pinned terminal with no workspace id fails; its type size is clamped; it
   const box = parseDiagramSpec(spec({ label: 'A step', workspace: 'demo', font: 12, minimized: true }));
   assert.equal(box.ok, true);
   assert.deepEqual([box.value.nodes[0].workspace, box.value.nodes[0].font, box.value.nodes[0].minimized], [undefined, undefined, undefined]);
+});
+
+// ── Switchboard: long words in a box, and boxes resized by hand ──
+
+test('a box holds far more than an arrow label’s 200 characters, marks and all, through save and reload', () => {
+  const long = 'A long thought about the fictional checkout flow and why it waits on the card. '.repeat(40).trim();
+  assert.ok(long.length > 3000);
+  const marked = [{ runs: [{ text: long.slice(0, 6), bold: true }, { text: long.slice(6) }] }];
+  for (const shape of ['rounded', 'box', 'pill', 'diamond', 'note', 'text']) {
+    const parsed = parseDiagramSpec(spec({ label: long, labelRichText: marked, detail: long, shape }));
+    assert.equal(parsed.ok, true, shape);
+    const canvas = layoutDiagram(parsed.value);
+    const saved = flowSpecFromCanvas({}, canvas.nodes, canvas.edges);
+    const reloaded = parseDiagramSpec(JSON.parse(JSON.stringify(saved)));
+    assert.equal(reloaded.ok, true, shape);
+    assert.equal(reloaded.value.nodes[0].label, long, shape);
+    assert.equal(reloaded.value.nodes[0].detail, long, shape);
+    assert.deepEqual(reloaded.value.nodes[0].labelRichText, marked, shape);
+  }
+  // Still bounded, so a hand-edited file can't hand the layout a novel.
+  assert.equal(FLOW_BOX_TEXT_MAX_LENGTH, 10_000);
+  assert.equal(parseDiagramSpec(spec({ label: 'x'.repeat(FLOW_BOX_TEXT_MAX_LENGTH) })).ok, true);
+  const over = parseDiagramSpec(spec({ label: 'x'.repeat(FLOW_BOX_TEXT_MAX_LENGTH + 1) }));
+  assert.equal(over.ok, false);
+  assert.match(over.error, /"label" must be 10000 characters or fewer/);
+  const detail = parseDiagramSpec(spec({ label: 'Step', detail: 'x'.repeat(FLOW_BOX_TEXT_MAX_LENGTH + 1) }));
+  assert.match(detail.error, /"detail" must be 10000 characters or fewer/);
+  // An arrow's label is still one short line.
+  const arrow = parseDiagramSpec({ kind: 'flow', nodes: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+    edges: [{ from: 'a', to: 'b', label: 'x'.repeat(DIAGRAM_TEXT_MAX_LENGTH + 1) }] });
+  assert.equal(arrow.ok, false);
+  assert.match(arrow.error, /200 characters or fewer/);
+});
+
+test('a box resized by hand keeps its size through save and reload, on every outline', () => {
+  for (const shape of ['rounded', 'box', 'pill', 'diamond']) {
+    const parsed = parseDiagramSpec(spec({ label: 'Charge the card', shape, size: { width: 360.4, height: 139.6 } }));
+    assert.equal(parsed.ok, true, shape);
+    assert.deepEqual(parsed.value.nodes[0].size, { width: 360, height: 140 }, shape);
+    const canvas = layoutDiagram(parsed.value);
+    assert.deepEqual({ width: canvas.nodes[0].width, height: canvas.nodes[0].height }, { width: 360, height: 140 }, shape);
+    const saved = flowSpecFromCanvas({}, canvas.nodes, canvas.edges);
+    assert.deepEqual(saved.nodes[0].size, { width: 360, height: 140 }, shape);
+    const reloaded = parseDiagramSpec(JSON.parse(JSON.stringify(saved)));
+    assert.deepEqual(reloaded.value.nodes[0].size, { width: 360, height: 140 }, shape);
+  }
+  // Never resized: as wide as every other box and as tall as its text, as ever.
+  assert.deepEqual(flowNodeSize({ label: 'Charge the card' }), { width: 200, height: 52 });
+  assert.deepEqual(flowNodeSize({ label: 'Charge the card', shape: 'diamond' }), { width: 200, height: 92 });
+  // A document's size is still its own.
+  const documentId = 'a0000000-0000-0000-0000-000000000001';
+  const file = parseDiagramSpec(spec({ label: 'Brief', shape: 'document', documentId, size: { width: 400, height: 300 } }));
+  assert.equal(file.value.nodes[0].size, undefined);
+});
+
+test('a resized box wraps its words to its own width, and grows past its height only when they need it', () => {
+  setFlowTextMeasure(text => text.length * 10);
+  try {
+    // Thirty four-letter words. 128 wide leaves 100 for the label: two words a line.
+    // 528 leaves 500: ten a line. Each line is 18 high, plus 22 of padding.
+    const words = 'aaaa '.repeat(30).trim();
+    assert.deepEqual(flowNodeSize({ label: words, size: { width: 128, height: 40 } }), { width: 128, height: 15 * 18 + 22 });
+    assert.deepEqual(flowNodeSize({ label: words, size: { width: 528, height: 40 } }), { width: 528, height: 3 * 18 + 22 });
+    // Taller than the words need: as tall as it was made.
+    assert.deepEqual(flowNodeSize({ label: words, size: { width: 528, height: 300 } }), { width: 528, height: 300 });
+    // A diamond pads its label further in: 164 wide leaves the same 100.
+    assert.deepEqual(flowNodeSize({ label: words, shape: 'diamond', size: { width: 164, height: 40 } }), { width: 164, height: 15 * 18 + 22 });
+  } finally { setFlowTextMeasure(null); }
+});
+
+test('a box’s size carries over a republish onto any outline, but never onto a note', () => {
+  const before = { kind: 'flow', nodes: [{ id: 'pay', label: 'Pay', size: { width: 320, height: 120 }, position: { x: 0, y: 0 } }], edges: [] };
+  const next = node => ({ kind: 'flow', nodes: [{ id: 'pay', label: 'Pay', ...node }], edges: [] });
+  assert.deepEqual(carryOverFlowLayout(before, next({})).spec.nodes[0].size, { width: 320, height: 120 });
+  assert.deepEqual(carryOverFlowLayout(before, next({ shape: 'diamond' })).spec.nodes[0].size, { width: 320, height: 120 });
+  assert.equal(carryOverFlowLayout(before, next({ shape: 'note' })).spec.nodes[0].size, undefined);
+  // What the republish states itself wins.
+  assert.deepEqual(carryOverFlowLayout(before, next({ size: { width: 240, height: 80 } })).spec.nodes[0].size, { width: 240, height: 80 });
 });

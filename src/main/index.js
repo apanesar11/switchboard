@@ -1739,6 +1739,9 @@ if (!app.requestSingleInstanceLock()) {
   }, err => {
     console.error('[switchboard] whiteboards migration failed:', err);
   });
+  // Then boards written from outside — scripts/whiteboard.js, run by a Claude Code
+  // skill in a terminal — reach the screens as they land, an open board included.
+  whiteboardsReady.then(() => whiteboards.watch());
 
   app.on('second-instance', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;

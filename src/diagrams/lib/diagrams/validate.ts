@@ -19,10 +19,12 @@
 // compiler applies DEFAULT_* itself.
 
 import {
+  DEFAULT_FLOW_SHAPE,
   DIAGRAM_KINDS,
   DIAGRAM_NAME_MAX_LENGTH,
   DIAGRAM_SUMMARY_MAX_LENGTH,
   DIAGRAM_TEXT_MAX_LENGTH,
+  FLOW_BOX_TEXT_MAX_LENGTH,
   FLOW_COORDINATE_LIMIT,
   FLOW_IMAGE_SRC_MAX_LENGTH,
   FLOW_SHAPES,
@@ -336,9 +338,9 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
     const label = workspace !== undefined
       ? workspace
       : shape === "note"
-      ? (optionalText(entry.label, where, "label", undefined, normalizeFlowText) ?? "")
-      : text(entry.label, where, "label", undefined, normalizeFlowText)
-    const detail = optionalText(entry.detail, where, "detail", undefined, normalizeFlowText)
+      ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? "")
+      : text(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText)
+    const detail = optionalText(entry.detail, where, "detail", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText)
     let labelRichText, detailRichText
     try {
       labelRichText = parseFlowRichText(entry.labelRichText, label)
@@ -380,10 +382,9 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       // from an image doesn't carry a dead URL around.
       src: shape === "image" ? imageSrc(entry.src, where) : undefined,
       documentId: shape === "document" ? documentId(entry.documentId, where) : undefined,
-      size:
-        shape !== undefined && isFlowSizedShape(shape)
-          ? optionalSize(entry.size, where)
-          : undefined,
+      // Switchboard: a box's outline is left out when it is the default one, and a
+      // box keeps its size too.
+      size: isFlowSizedShape(shape ?? DEFAULT_FLOW_SHAPE) ? optionalSize(entry.size, where) : undefined,
       // Switchboard: a pinned terminal's workspace, type size and folded state.
       workspace,
       font: shape === "terminal" ? terminalFont(entry.font) : undefined,

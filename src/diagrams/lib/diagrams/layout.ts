@@ -5,7 +5,8 @@
 // edges and laid out in rows (or columns) here, which is what lets Claude
 // author a diagram it will never see rendered. A diagram someone arranged by
 // hand in the editor carries a position (and, for notes, text and images, a
-// size) on every node, and those are used as they are.
+// size) on every node, and those are used as they are. Switchboard: so can a
+// box, resized by hand.
 //
 // PURE, and dependency-free apart from React Flow's *types* (erased at compile
 // time), so it is unit tested in a plain node environment — see layout.test.ts.
@@ -220,7 +221,7 @@ export type FlowBoxNodeData = {
   /** An image's picture. */
   src?: string
   documentId?: string
-  /** The size someone gave a note, text or image — see FlowNodeSpec.size. */
+  /** The size someone gave a note, text, image or box — see FlowNodeSpec.size. */
   size?: FlowSize
   /** Written by ✦ Answer and not edited since — see FlowNodeSpec.ai. */
   ai?: boolean
@@ -342,12 +343,18 @@ function rankNodes(spec: FlowSpec): Map<string, number> {
 }
 
 /**
- * Width of the label column inside a box — the box less its padding. A
- * diamond pads further in (px-8 in DiagramNodes.tsx's SHAPE_STYLES), to keep
- * its label off the clipped corners.
+ * What a box's padding takes off its width for the label column. A diamond
+ * pads further in (px-8 in DiagramNodes.tsx's SHAPE_STYLES), to keep its label
+ * off the clipped corners.
  */
-const FLOW_LABEL_WIDTH = FLOW_NODE_WIDTH - 28
-const FLOW_DIAMOND_LABEL_WIDTH = FLOW_NODE_WIDTH - 64
+const FLOW_LABEL_INSET = 28
+const FLOW_DIAMOND_LABEL_INSET = 64
+/**
+ * Switchboard: the least a box's resize handles take it to — a few characters
+ * of label across, and a diamond wide enough that its points leave some.
+ */
+export const FLOW_BOX_MIN_SIZE: FlowSize = { width: 80, height: 40 }
+export const FLOW_DIAMOND_MIN_SIZE: FlowSize = { width: 120, height: 60 }
 
 type FlowSizing = Pick<
   FlowNodeSpec,
@@ -412,6 +419,8 @@ function detailHeight(lines: string[]): number {
 /**
  * A node's width and height. A box is FLOW_NODE_WIDTH wide and as tall as
  * its text; a note, a text and an image are sized as FlowNodeSpec.size says.
+ * Switchboard: a box resized by hand too — as wide as it was made, and as tall,
+ * unless its text needs more.
  * Exported because the editor re-sizes a node as its text is
  * typed, and it has to land on exactly the size the read-only canvas would
  * give the same node.
@@ -470,14 +479,16 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
     }
   }
 
-  const labelWidth = shape === "diamond" ? FLOW_DIAMOND_LABEL_WIDTH : FLOW_LABEL_WIDTH
+  const width = node.size?.width ?? FLOW_NODE_WIDTH
+  const labelWidth = Math.max(1, width - (shape === "diamond" ? FLOW_DIAMOND_LABEL_INSET : FLOW_LABEL_INSET))
   const lines = richTextLines(node.label, node.labelRichText, labelWidth, fontSize, weight)
   return {
-    width: FLOW_NODE_WIDTH,
+    width,
     height: Math.max(
       // A diamond is clipped out of its box, so a box the height of every
       // other node leaves a sliver with its label poking out of the points.
-      shape === "diamond" ? FLOW_DIAMOND_HEIGHT : FLOW_NODE_MIN_HEIGHT,
+      // Switchboard: one resized by hand is as tall as it was made instead.
+      node.size?.height ?? (shape === "diamond" ? FLOW_DIAMOND_HEIGHT : FLOW_NODE_MIN_HEIGHT),
       // Every line the second line wraps to, not just its first.
       lines.length * lineHeight + detailHeight(detailLines(node.detail, labelWidth, node.detailRichText)) + 22,
     ),

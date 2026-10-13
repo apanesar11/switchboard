@@ -674,6 +674,17 @@ test('a pinned terminal leads nothing into a question, but the walk goes on past
   assert.equal(path[0].arrow, 'then');
 });
 
+test('a question’s path carries each box’s words whole, however long', () => {
+  const long = 'Why the fictional checkout waits on the card before it books the slot. '.repeat(10).trim();
+  assert.ok(long.length > 200);
+  const node = (id, x, data = {}) => ({ id, position: { x, y: 0 }, data: { label: id, shape: 'rounded', ...data } });
+  const nodes = [node('context', 0, { label: long, detail: long }), node('question', 300)];
+  const edges = [{ source: 'context', target: 'question', targetHandle: 'left' }];
+  const path = flowQuestionPath(nodes, edges, 'question');
+  assert.equal(path[0].label, long);
+  assert.equal(path[0].detail, long);
+});
+
 // ── Switchboard: Smaller text and Larger text on a pinned terminal ──
 
 test('Smaller text and Larger text step the type a tenth either way, in the same box', () => {

@@ -14,7 +14,7 @@
 // modules, so it runs unchanged in the browser, the route and vitest.
 
 import type { FlowCanvasEdge, FlowCanvasNode } from "./flow-editor"
-import { DIAGRAM_TEXT_MAX_LENGTH } from "./types"
+import { DIAGRAM_TEXT_MAX_LENGTH, FLOW_BOX_TEXT_MAX_LENGTH } from "./types"
 
 // ─── models and effort ───
 
@@ -189,6 +189,11 @@ function tidy(value: unknown, max = DIAGRAM_TEXT_MAX_LENGTH): string | undefined
   return text.length > 0 ? text.slice(0, max) : undefined
 }
 
+/** Switchboard: a box's words, whole — they can run past an arrow's label's length. */
+function tidyBox(value: unknown): string | undefined {
+  return tidy(value, FLOW_BOX_TEXT_MAX_LENGTH)
+}
+
 /** The route's check on what the editor sent. Anything malformed is refused, not repaired. */
 export function parseFlowAiRequest(raw: unknown): Parsed<FlowAiRequest> {
   if (typeof raw !== "object" || raw === null) return { ok: false, error: "Invalid request" }
@@ -196,7 +201,7 @@ export function parseFlowAiRequest(raw: unknown): Parsed<FlowAiRequest> {
 
   const productId = typeof body.productId === "string" ? body.productId : ""
   if (!productId) return { ok: false, error: "Missing product" }
-  const question = tidy(body.question)
+  const question = tidyBox(body.question)
   if (!question) return { ok: false, error: "Write a question in the box first" }
   if (!isFlowAiModelId(body.model)) return { ok: false, error: "Unknown model" }
   if (!isFlowAiEffort(body.effort) || !modelTakesEffort(body.model, body.effort)) {
@@ -212,21 +217,21 @@ export function parseFlowAiRequest(raw: unknown): Parsed<FlowAiRequest> {
   for (const entry of rawContext) {
     if (typeof entry !== "object" || entry === null) return { ok: false, error: "Invalid context" }
     const step = entry as Record<string, unknown>
-    const label = tidy(step.label)
+    const label = tidyBox(step.label)
     if (!label) return { ok: false, error: "Invalid context" }
-    context.push({ label, detail: tidy(step.detail), arrow: tidy(step.arrow) })
+    context.push({ label, detail: tidyBox(step.detail), arrow: tidy(step.arrow) })
   }
 
   const rawExisting = Array.isArray(body.existing) ? body.existing : []
   if (rawExisting.length > FLOW_AI_MAX_EXISTING) return { ok: false, error: "Too much context" }
-  const existing = rawExisting.map((entry) => tidy(entry)).filter((entry) => entry !== undefined)
+  const existing = rawExisting.map((entry) => tidyBox(entry)).filter((entry) => entry !== undefined)
 
   return {
     ok: true,
     value: {
       productId,
       question,
-      detail: tidy(body.detail),
+      detail: tidyBox(body.detail),
       context,
       existing,
       title: tidy(body.title),
@@ -436,11 +441,11 @@ export function flowQuestionPath(
     const from = byId.get(edge.source)!
     seen.add(from.id)
     const arrow = [tidy(edge.data?.label), carried].filter(Boolean).join(" → ") || undefined
-    const label = tidy(from.data.label)
+    const label = tidyBox(from.data.label)
     // An image or an empty note says nothing, but the walk goes on past it.
     // Switchboard: nor does a pinned terminal, whose label is only its workspace.
     if (label && from.data.shape !== "image" && from.data.shape !== "document" && from.data.shape !== "terminal") {
-      path.push({ label, detail: tidy(from.data.detail), arrow })
+      path.push({ label, detail: tidyBox(from.data.detail), arrow })
       carried = undefined
     } else {
       carried = arrow

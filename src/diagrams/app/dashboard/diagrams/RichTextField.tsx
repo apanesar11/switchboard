@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef } from "react"
-import { DIAGRAM_TEXT_MAX_LENGTH, type FlowRichText } from "@/lib/diagrams/types"
+import { FLOW_BOX_TEXT_MAX_LENGTH, type FlowRichText } from "@/lib/diagrams/types"
 import { continueList, plainTextParagraphs, richTextHtml, richTextPlainText, richTextSelectedParagraphs, shiftListIndent, toggleBullets, toggleChecklist, truncateRichText } from "@/lib/diagrams/rich-text"
 import { FLOW_FORMAT_EVENT, FLOW_PASTE_EVENT, flowCheckbox, flowTextSelection, readRichText, replaceFlowRichText, restoreFlowTextSelection, richTextSelectionLength, selectRichText, toggleFlowCheckbox, type FlowTextCommand } from "@/lib/diagrams/rich-text-dom"
 
@@ -33,8 +33,8 @@ export function RichTextField({
     if (!element) return
     let rich = readRichText(element)
     let plain = richTextPlainText(rich)
-    if (plain.length > DIAGRAM_TEXT_MAX_LENGTH) {
-      rich = truncateRichText(rich, DIAGRAM_TEXT_MAX_LENGTH)
+    if (plain.length > FLOW_BOX_TEXT_MAX_LENGTH) {
+      rich = truncateRichText(rich, FLOW_BOX_TEXT_MAX_LENGTH)
       plain = richTextPlainText(rich)
       element.innerHTML = richTextHtml(rich)
       const range = document.createRange()
@@ -50,7 +50,7 @@ export function RichTextField({
   function paste(text: string) {
     const element = elementRef.current!
     const length = richTextPlainText(readRichText(element)).length
-    const available = Math.max(0, DIAGRAM_TEXT_MAX_LENGTH - length + richTextSelectionLength(element))
+    const available = Math.max(0, FLOW_BOX_TEXT_MAX_LENGTH - length + richTextSelectionLength(element))
     document.execCommand("insertText", false, text.replace(/\r\n?/g, "\n").slice(0, available))
     commit()
   }
@@ -140,7 +140,7 @@ export function RichTextField({
         const input = event.nativeEvent as InputEvent
         if (input.isComposing || !input.data || !input.inputType?.startsWith("insert")) return
         const length = richTextPlainText(readRichText(event.currentTarget)).length
-        if (length - richTextSelectionLength(event.currentTarget) + input.data.length > DIAGRAM_TEXT_MAX_LENGTH) event.preventDefault()
+        if (length - richTextSelectionLength(event.currentTarget) + input.data.length > FLOW_BOX_TEXT_MAX_LENGTH) event.preventDefault()
       }}
       onPaste={(event) => {
         event.preventDefault()
@@ -188,7 +188,7 @@ export function RichTextField({
             event.preventDefault()
             event.stopPropagation()
             const next = continueList(rich, selection)
-            if (richTextPlainText(next.richText).length <= DIAGRAM_TEXT_MAX_LENGTH) {
+            if (richTextPlainText(next.richText).length <= FLOW_BOX_TEXT_MAX_LENGTH) {
               replaceFlowRichText(event.currentTarget, next.richText, next.selection)
               commit()
             }
@@ -204,7 +204,7 @@ export function RichTextField({
           return
         }
         if (event.key === "Enter" && !command && !event.shiftKey && inList) {
-          if (richTextPlainText(readRichText(event.currentTarget)).length >= DIAGRAM_TEXT_MAX_LENGTH) event.preventDefault()
+          if (richTextPlainText(readRichText(event.currentTarget)).length >= FLOW_BOX_TEXT_MAX_LENGTH) event.preventDefault()
           event.stopPropagation()
           return
         }

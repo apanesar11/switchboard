@@ -132,8 +132,11 @@ app.whenReady().then(async () => {
     assert.equal((await node('text')).label.startsWith('Regular'), true);
     await select(0, 7); await run('window.editText("paste", "Ordinary")'); await tick();
     assert.equal((await node('text')).label.startsWith('Ordinary'), true);
+    // A box holds far more than the admin's 200 characters, and stops at 10,000.
     await run('window.editText("selectAll"); window.editText("paste", "x".repeat(250))'); await tick();
-    assert.equal((await node('text')).label.length, 200);
+    assert.equal((await node('text')).label.length, 250);
+    await run('window.editText("selectAll"); window.editText("paste", "x".repeat(10050))'); await tick();
+    assert.equal((await node('text')).label.length, 10000);
     await run('window.editText("selectAll"); window.editText("paste", "<img src=x onerror=alert(1)>")'); await tick();
     assert.equal((await node('text')).label, '<img src=x onerror=alert(1)>');
     assert.equal(await run('document.querySelector("[data-flow-text] img")'), null);

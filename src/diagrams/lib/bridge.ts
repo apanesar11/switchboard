@@ -75,6 +75,8 @@ export type WhiteboardsChange = {
   reason: "save" | "create" | "rename" | "workspace" | "move" | "duplicate" | "archive" | "delete" | "folder" | "notice"
   boardId?: string
   folderId?: string
+  /** Another process made it — scripts/whiteboard.js — and main's watch() saw it land. */
+  external?: boolean
 }
 
 export type FlowDocument = { id: string; text: string; revision: string; path: string }

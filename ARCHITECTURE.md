@@ -791,7 +791,14 @@ be reached from the board's starting boxes without crossing a collapsed arrow (l
 aside, so a branch never folds away what leads to it); the editor hands React Flow those
 boxes marked hidden, lays out and pushes as if they weren't there, shows a "+N" on the box
 they are folded behind, carries them along when that box is dragged, and deletes them with
-it. Unfolding re-tidies the tree around them. A whiteboard has **no limit** on boxes,
+it. Unfolding re-tidies the tree around them. A **box resizes** as a note does (added
+2026-10-13, "I should be able to use the corner to adjust the sizing, similar to how I
+am able to for images"): every corner and edge while it is the only thing selected, its
+`size` kept in the spec for every outline (`FLOW_SIZED_SHAPES`), its words wrapped to
+that width, and taller than it was made only when they need it; Tab after a resized box
+adds one the same size. A box's label and second line each hold up to 10,000 characters
+(`FLOW_BOX_TEXT_MAX_LENGTH`; the admin's 200, `DIAGRAM_TEXT_MAX_LENGTH`, still bounds an
+arrow's label, a title and what ✦ Condense is told to write). A whiteboard has **no limit** on boxes,
 arrows or size (the admin's 60 / 120 / 512 KB, `types.ts` says why not here): the layout
 and save paths stay in single milliseconds into the thousands of boxes. **Actions ▸
 Rename** (`RenameDiagramDialog.tsx`) writes the name and nothing else. And the image
@@ -864,6 +871,21 @@ folder and send nothing, so a picker asks again each time it opens. Every `sb:wb
 handler waits for the migration that runs before the first window (below), so nothing
 reads a half-moved store. Nothing here deletes anything but the one board, or the one
 empty folder, the user asked to delete.
+
+**A terminal can draw on a board too** (added 2026-10-13, for a Claude Code skill: "create
+a flowchart based on this information"). `scripts/whiteboard.js` — `list`, `show`,
+`check`, `create`, `update`, `new-document` — requires this same module and writes
+through it, after the editor's own `parseDiagramSpec` and `layoutDiagram` (bundled with
+esbuild as it runs) have accepted the spec. `update` keeps the arrangement
+(`carryOverFlowLayout`: a surviving id keeps its position, size and styling) and refuses
+a spec that drops nodes unless `--allow-removals`. Main's `watch()`, started once the
+migration is done, watches `boards/` and `store.json`; a write whose stamp (mtime, size,
+inode) is not one this process made is sent as `{ reason: 'save' | 'delete' | 'folder',
+external: true }`. An open board reads itself again and the editor **adopts** the drawing
+(`FlowEditorHandle.adopt`): one undo step, the same restore Undo uses — so a pinned
+terminal stays where it is — and counted as saved, so it is not written straight back.
+An edit made in the app in the same instant as the CLI's write can still win the race;
+Undo has the other.
 
 | `window.sb` | channel | returns |
 |---|---|---|

@@ -39,6 +39,11 @@
 // order to keep the folder sane: an object of the right kind, under a name that is
 // unique in its folder.
 //
+// Another process may write here too: scripts/whiteboard.js, the CLI a Claude Code
+// skill draws with, requires this module and writes through it. watch() — started by
+// index.js — tells the app's screens of a board file or store.json changed that way,
+// as a change with `external: true`, so an open board takes the new drawing in.
+//
 // Before this module there was one folder of diagrams per workspace,
 // `diagrams/<workspace>-<hash>/`. migrate() — called by index.js before the first window,
 // never at require time — copies those into the store once, one folder per project, and
@@ -92,17 +97,17 @@ const THUMB_MIN_H = 4;
 const THUMB_STRETCH = 2;
 
 // What the editor draws a node at, in flow units — lib/diagrams/layout.ts flowNodeSize
-// and the constants beside it, which this mirrors for the preview only. A box is always
-// 200 wide and as tall as its text; a note, a text and an image keep the size someone
-// gave them in `size`. Main has no fonts to measure with, so a label's lines are counted
+// and the constants beside it, which this mirrors for the preview only. A box is 200
+// wide and as tall as its text until someone resizes it; a box, a note, a text and an
+// image keep the size someone gave them in `size`. Main has no fonts to measure with, so a label's lines are counted
 // at an average glyph width: exact for the usual one-line box, and close enough for the
 // rest at a twentieth of the size.
 const FLOW_BOX_WIDTH = 200;
 const FLOW_BOX_MIN_HEIGHT = 52;
 const FLOW_DIAMOND_HEIGHT = 92;
 const FLOW_BOX_TEXT_PAD_Y = 22;
-const FLOW_LABEL_WIDTH = FLOW_BOX_WIDTH - 28;
-const FLOW_DIAMOND_LABEL_WIDTH = FLOW_BOX_WIDTH - 64;
+const FLOW_LABEL_INSET = 28;
+const FLOW_DIAMOND_LABEL_INSET = 64;
 const FLOW_NOTE_SIZE = 176;
 const FLOW_NOTE_PAD = 14;
 const FLOW_IMAGE_SIZE = { width: 240, height: 180 };
@@ -143,6 +148,14 @@ const summaryCache = new Map();
 let legacyRootName;
 // What the last migrate() failed with, for list() to report until one succeeds.
 let lastMigrationError = null;
+// Each file's stamp as this process last wrote it (or watch() last told of it), so
+// watch() can tell a write of its own from another process's.
+const knownStamps = new Map();
+// What watch() started: { stop }, or null.
+let watching = null;
+// How long a file has to be quiet before watch() looks at it: an atomic write is a
+// create and a rename, and an editor may save in more steps than that.
+const WATCH_SETTLE_MS = 120;
 
 // ── where things live ───────────────────────────────────────────────────────
 
@@ -246,6 +259,13 @@ async function writeAtomic(file, text) {
     await fs.promises.unlink(tmp).catch(() => {});
     throw err;
   }
+  // Ours: watch() is not to tell of it as another process's.
+  try { knownStamps.set(file, stampOf(await fs.promises.stat(file))); } catch (_) {}
+}
+
+/** What tells one version of a file from the next without reading it. */
+function stampOf(st) {
+  return `${st.mtimeMs}:${st.size}:${st.ino}`;
 }
 
 function isFileSync(file) {
@@ -277,10 +297,11 @@ function byName(a, b) {
 // ── change events ───────────────────────────────────────────────────────────
 
 /**
- * onChange(fn) → unsubscribe. `fn({ reason, boardId?, folderId? })` runs after every
- * successful write, reason ∈ save | create | rename | workspace | move | duplicate |
- * archive | delete | folder | notice. index.js forwards it as sb:evt:wbChanged. The
- * recent-workspaces list changes no board or folder and says nothing.
+ * onChange(fn) → unsubscribe. `fn({ reason, boardId?, folderId?, external? })` runs
+ * after every successful write, reason ∈ save | create | rename | workspace | move |
+ * duplicate | archive | delete | folder | notice. index.js forwards it as
+ * sb:evt:wbChanged. The recent-workspaces list changes no board or folder and says
+ * nothing. `external` marks a change another process made, which watch() saw.
  */
 function onChange(fn) {
   if (typeof fn !== 'function') return () => {};
@@ -288,10 +309,11 @@ function onChange(fn) {
   return () => listeners.delete(fn);
 }
 
-function emit(reason, boardId, folderId) {
+function emit(reason, boardId, folderId, external) {
   const event = { reason };
   if (boardId !== undefined) event.boardId = boardId;
   if (folderId !== undefined) event.folderId = folderId;
+  if (external) event.external = true;
   for (const fn of listeners) {
     try { fn(event); } catch (err) { console.error('[switchboard] whiteboards: a change listener failed:', err); }
   }
@@ -630,11 +652,13 @@ function flowNodeSize(node) {
     const width = size ? size.width : Math.min(FLOW_TEXT_MAX_WIDTH, Math.max(FLOW_TEXT_MIN_WIDTH, words + FLOW_TEXT_PAD_X * 2 + 2));
     return { width, height: textLines(label, wrapAt, fontSize) * lineHeight + detailHeight(wrapAt) + FLOW_TEXT_PAD_Y * 2 };
   }
-  // A box, of any outline. A diamond pads its label further in and stands taller.
+  // A box, of any outline. A diamond pads its label further in and stands taller —
+  // unless it was resized, when it is as tall as it was made, or as its text needs.
   const diamond = shape === 'diamond';
-  const labelWidth = diamond ? FLOW_DIAMOND_LABEL_WIDTH : FLOW_LABEL_WIDTH;
+  const width = size ? size.width : FLOW_BOX_WIDTH;
+  const labelWidth = Math.max(1, width - (diamond ? FLOW_DIAMOND_LABEL_INSET : FLOW_LABEL_INSET));
   const text = textLines(label, labelWidth, fontSize) * lineHeight + detailHeight(labelWidth) + FLOW_BOX_TEXT_PAD_Y;
-  return { width: FLOW_BOX_WIDTH, height: Math.max(diamond ? FLOW_DIAMOND_HEIGHT : FLOW_BOX_MIN_HEIGHT, text) };
+  return { width, height: Math.max(size ? size.height : diamond ? FLOW_DIAMOND_HEIGHT : FLOW_BOX_MIN_HEIGHT, text) };
 }
 
 /**
@@ -744,7 +768,7 @@ async function boardSummaries() {
       if (err && err.code === 'ENOENT') continue;
       throw err;
     }
-    const stamp = `${st.mtimeMs}:${st.size}:${st.ino}`;
+    const stamp = stampOf(st);
     const cached = summaryCache.get(file);
     if (cached && cached.stamp === stamp) {
       if (cached.summary) out.push(cached.summary);
@@ -1958,6 +1982,71 @@ async function finishMigration(loaded, legacyRoot, skipped) {
   return { ok: true, data: { boards: moved.length, folders: folders.size, skipped, legacyRoot: m.legacyRoot } };
 }
 
+// ── another process's writes ────────────────────────────────────────────────
+
+/**
+ * watch() → stop. Tells onChange's listeners of a board file or store.json that another
+ * process changed — scripts/whiteboard.js, or a hand edit — once it has been quiet for
+ * WATCH_SETTLE_MS: a board's as { reason: 'save', boardId, folderId, external: true }
+ * (or 'delete' when it went), store.json's as { reason: 'folder', external: true }. A
+ * write of this process's own is known by its stamp and not told twice. Watching only
+ * — it never writes — and a second call hands back the first one's stop. index.js
+ * starts it once the store is migrated.
+ */
+function watch() {
+  if (watching) return watching.stop;
+  const timers = new Map();
+  const handles = [];
+  let stopped = false;
+  const look = async (file, boardId) => {
+    let st = null;
+    try { st = await fs.promises.stat(file); } catch (_) {}
+    const stamp = st ? stampOf(st) : 'gone';
+    if (stopped || knownStamps.get(file) === stamp) return;
+    knownStamps.set(file, stamp);
+    if (!boardId) return emit('folder', undefined, undefined, true);
+    if (!st) return emit('delete', boardId, undefined, true);
+    const row = await readBoardFile(file);
+    if (!row || row.broken || stopped) return;
+    const { store } = await loadStore();
+    emit('save', boardId, effectiveFolder(store, row.folderId), true);
+  };
+  const soon = (file, boardId) => {
+    clearTimeout(timers.get(file));
+    timers.set(file, setTimeout(() => {
+      timers.delete(file);
+      look(file, boardId).catch(err => console.error('[switchboard] whiteboards: could not read a changed file:', why(err)));
+    }, WATCH_SETTLE_MS));
+  };
+  const on = (dir, pick) => {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const handle = fs.watch(dir, (_event, name) => {
+        const hit = name ? pick(String(name)) : null;
+        if (hit) soon(hit.file, hit.boardId);
+      });
+      handle.on('error', err => console.error('[switchboard] whiteboards: stopped watching', dir + ':', why(err)));
+      handles.push(handle);
+    } catch (err) {
+      console.error('[switchboard] whiteboards: cannot watch', dir + ':', why(err));
+    }
+  };
+  on(boardsDir(), name => {
+    const match = BOARD_FILE_RE.exec(name);
+    return match ? { file: path.join(boardsDir(), name), boardId: match[1].toLowerCase() } : null;
+  });
+  on(rootDir(), name => (name === 'store.json' ? { file: storeFile(), boardId: null } : null));
+  const stop = () => {
+    stopped = true;
+    for (const timer of timers.values()) clearTimeout(timer);
+    timers.clear();
+    for (const handle of handles) handle.close();
+    if (watching && watching.stop === stop) watching = null;
+  };
+  watching = { stop };
+  return stop;
+}
+
 /** Every write that has been started has finished — the quit path waits on this. */
 function settle() {
   return Promise.all(Array.from(chains.values())).then(() => ({ ok: true }), () => ({ ok: true }));
@@ -1992,6 +2081,7 @@ module.exports = {
   migrate,
   settle,
   onChange,
+  watch,
   IMAGE_TYPES,
   // For the tests, and for a sentence that has to name the folder.
   rootDir,
