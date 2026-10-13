@@ -389,7 +389,7 @@ Optional configuration fields:
   paths, or null). Whether a Grid square shows Terminal or Changes is not here: it is
   this Mac's choice, in localStorage (§4.10).
 - `answer` is the ✦ Answer block (§4.18): who answers, the models and efforts, Web
-  access and Subtext. Never a key — those are in `keys.json`.
+  access and Details. Never a key — those are in `keys.json`.
 
 Whiteboards keep a store of their own beside this file, `whiteboards/` (§4.17), and
 nothing about them is in `config.json`: the folders, the workspace a new board starts
@@ -1331,13 +1331,41 @@ A CLI is slower — it opens and searches files first — and knows the code; an
 in seconds, much as the admin's ✦ Answer does. The user rejected sending an API any part
 of the workspace: "the API options will be very limited." The prompt and the answer's
 JSON shape are the admin's either way (`lib/diagrams/ai.ts`, mirrored by hand), with
-Switchboard's changes marked "Switchboard:" — no cap of four, the Subtext variant of the
+Switchboard's changes marked "Switchboard:" — no cap of four, the Details levels of the
 prompt, link stripping — so re-copying the admin's file would undo them; a CLI is
-also told it is in the workspace, that it can only read, and — with Subtext on — to name
-the file in a box's second line when the answer came from code (`lib/diagrams/answer.ts`).
+also told it is in the workspace, that it can only read, and to name the file in a box's
+second line when the answer came from code (`lib/diagrams/answer.ts`).
 
-**Subtext** (off by default) is that second line: off, the prompt asks for none and the
-bundle drops whatever the model wrote there anyway. **Web access** (on by default) gives
+**Details** (Low by default; added 2026-10-13, "sometimes when it responds, it's very
+little information and it's not very useful") is how much each answer box says, three
+segments under **Answer as** in the ✦ Answer menu, with a line under them saying what the
+level gives. **Low** is the admin's box: a label of at most 8 words and one short line
+under it, or none when the label says it all. **Medium** asks for a label of at most 12
+words and, under it, two or three sentences (about 30 to 60 words) that explain it;
+**High** a label of at most 15 words and a paragraph of five to eight sentences (about 90
+to 160 words) — how it works or why, the specifics, any caveat. Medium and High never
+leave the second line empty. The level is in the system prompt (`ai.ts` `BOX_RULES`) and
+said again as the last line of the question (`BOX_REMINDER`), since a CLI's answers on a
+board are one conversation and a level changed since its last answer has to win over the
+answers before it. Read back, a box's words are kept whole up to a box's own bound
+(`FLOW_BOX_TEXT_MAX_LENGTH`) rather than an arrow label's 200 characters, so a High
+paragraph is never cut, and drawn wider than a Low box (`ANSWER_WIDTH`: 280 at Medium,
+360 at High, kept in the box's `size` as a hand-resized box's is) so it reads as text
+rather than a column 800 pixels tall. The Claude API's `max_tokens` follows the level
+too (`CLAUDE_MAX_TOKENS`: 4,096, 8,192, 12,000 — forty High boxes are some 10,000
+tokens), and a cut-off answer at Medium or High says to try less Details; OpenAI's has
+no cap and the CLIs their own. Measured with Claude Code on 2026-10-13: a box's second
+line averaged 8 words at Low, 46–56 at Medium and 138–162 at High, and a board's
+conversation answered at Low and continued at High answered at High. ✦ Condense
+ignores Details: it writes a few short concept boxes.
+
+Two switches went with it. **Subtext** (off by default) let the model write a line under
+the label at all; now it always may — "that should always be true" — Low writing one when
+it helps, Medium and High always. **Read the boxes
+before it** (on by default) could leave out the boxes leading up to the question; now
+they always go (`flowQuestionPath`), "especially now, because we're using the same
+conversation for the entire tree". A `subtext` or `context` already in config.json's
+`answer` block is left there (`config.save` merges) and never read. **Web access** (on by default) gives
 whoever answers its own web tools — a page a box links to, or a search — and main adds a
 line to the system prompt saying so, and to use them only when the question needs
 something the diagram (and the code) can't tell it — the prompts still say diagram,
@@ -1360,7 +1388,7 @@ reads the model and effort from the stored settings, never from the request.
 | `window.sb` | channel | returns |
 |---|---|---|
 | `sb.answerStatus({fresh})` | `sb:answer:status` | `{ ok, settings, providers, keysSafe }` — `settings.provider` is never null: with nothing chosen it is the first one ready (a CLI that is here, then an API with a key). `fresh` looks for the CLIs again |
-| `sb.answerSetSettings(patch)` | `sb:answer:setSettings` | the status, after merging `{ provider, split, context, web, subtext, claudeCodeEffort, claudeApiModel, openaiModel, openaiEffort }` |
+| `sb.answerSetSettings(patch)` | `sb:answer:setSettings` | the status, after merging `{ provider, split, details, web, claudeCodeEffort, claudeApiModel, openaiModel, openaiEffort }` — `details` one of `low`, `medium`, `high` |
 | `sb.answerSetKey(provider, key)` | `sb:answer:setKey` | the status — after the provider accepted the key (`GET /v1/models`); a refused key is never stored and answers `{ ok:false, error, code:'bad-key' }` |
 | `sb.answerRemoveKey(provider)` | `sb:answer:removeKey` | the status |
 | `sb.answerStart(id, req)` | `sb:answer:start` | `{ ok, text, files?, conversation? }` — the answer's JSON, which the bundle reads into boxes, and for a CLI's turn of the board's conversation `{ turns, resumed }` (how many questions it holds now, and whether this one continued it) — or `{ ok:false, error, code }`, `code` one of `missing`, `signed-out`, `no-key`, `bad-key`, `timeout`, `stopped`, `no-workspace`. `req`: `{ provider, wsId, system, user, schema, operation?, boardId? }` — `wsId` is the board's workspace, or null; `operation: 'condense'` for ✦ Condense; `boardId` the board asking, sent with an answer and never with a condense |
@@ -1454,7 +1482,7 @@ workspace change forgets them, and a deleted board takes them with its file.
 `--system-prompt-snapshot off` because Claude Code otherwise records the system prompt —
 `--append-system-prompt` included — on a conversation's first request and sends that
 record on every resume, whatever later launches pass, and ours changes from one question
-to the next (Web access, Subtext): probed, a resume without it answered from the first
+to the next (Web access, Details): probed, a resume without it answered from the first
 turn's prompt. A Claude Code too old for `--system-prompt-snapshot` or `--name` (commander's
 `unknown option`) is asked once more without it, and that is remembered until the app
 quits. Read-only twice for Codex because `codex exec resume` keeps no sandbox of its own:
@@ -2201,7 +2229,7 @@ AbortController wired to Stop until the body is in. Failures carry a `code` the 
 act on. Each provider's request is built by a pure function (`claudeCodeArgs`,
 `codexArgs`, `claudeApiBody`, `openAiBody`) and its answer read by another
 (`claudeAnswerText`, `readOpenAiStream`), so `scripts/test-answer.js` (`npm run
-test:diagrams`) checks them with Electron stubbed — Web access and Subtext included, with
+test:diagrams`) checks them with Electron stubbed — Web access and Details included, with
 the bundle's prompt and answer reading beside them, and `resolveAnswerDir` for a CLI, an
 API, a condensation, a path handed over as an id and a lookup that throws — and the
 conversations against stand-in `claude` and `codex` scripts on `PATH`: a start and its
@@ -3183,8 +3211,8 @@ whiteboard; the two APIs need a key and see only the whiteboard.` — a row per 
 whiteboard's workspace first · slower` or `Only the whiteboard · fast` — whether it is
 ready on this Mac, one action),
 and under an API's row, opened by Add key / Edit, its key field, its model and (OpenAI)
-its effort; after the list, the Web access and Subtext switches, a whole row each (the
-✦ Answer menu has the same two). It asks main on the way in (and looks for the CLIs again after 30 s away),
+its effort; after the list, the Web access switch, a whole row (the ✦ Answer menu has
+the same one; Details is the menu's alone, beside Answer as). It asks main on the way in (and looks for the CLIs again after 30 s away),
 follows `sb:evt:answerStatus`, and never holds a key: the field is sent to main on Save
 and emptied.
 

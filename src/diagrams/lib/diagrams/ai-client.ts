@@ -213,7 +213,7 @@ export async function requestFlowAnswer(
       onStep,
     )
     return {
-      parts: parseFlowAiAnswer(result.text, ask.question.split, ask.question.subtext !== false),
+      parts: parseFlowAiAnswer(result.text, ask.question.split),
       files: result.files,
       conversation: result.conversation,
     }

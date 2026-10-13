@@ -89,12 +89,15 @@ const PROVIDERS = [
 
 const PROVIDER_IDS = PROVIDERS.map(p => p.id);
 
+// How much each answer box says (lib/diagrams/ai.ts FLOW_AI_DETAILS): Low, a few words
+// and a short line, is the default; Medium and High explain under the label.
+const DETAILS = ['low', 'medium', 'high'];
+
 const DEFAULTS = {
   provider: null,                     // null: the first one that is ready (effectiveProvider)
   split: 'auto',
-  context: true,
+  details: 'low',                     // how much each answer box says: low, medium or high
   web: true,                          // Web access: it may open a link or search, when it needs to
-  subtext: false,                     // a line of detail under each answer box
   claudeCodeEffort: 'own',
   claudeApiModel: 'claude-sonnet-5-5',
   openaiModel: 'gpt-5.6-terra',
@@ -138,9 +141,8 @@ function settings() {
   return {
     provider: pickFrom(PROVIDER_IDS, s.provider, null),
     split: s.split === 'one' ? 'one' : 'auto',
-    context: typeof s.context === 'boolean' ? s.context : DEFAULTS.context,
+    details: pickFrom(DETAILS, s.details, DEFAULTS.details),
     web: typeof s.web === 'boolean' ? s.web : DEFAULTS.web,
-    subtext: typeof s.subtext === 'boolean' ? s.subtext : DEFAULTS.subtext,
     claudeCodeEffort: pickFrom(CLAUDE_CODE_EFFORTS, s.claudeCodeEffort, DEFAULTS.claudeCodeEffort),
     claudeApiModel: pickFrom(CLAUDE_MODELS.map(m => m.id), s.claudeApiModel, DEFAULTS.claudeApiModel),
     openaiModel: model,
@@ -154,9 +156,8 @@ function setSettings(patch) {
   const next = Object.assign({}, settings());
   if ('provider' in p) next.provider = pickFrom(PROVIDER_IDS, p.provider, next.provider);
   if ('split' in p) next.split = p.split === 'one' ? 'one' : 'auto';
-  if ('context' in p) next.context = !!p.context;
+  if ('details' in p) next.details = pickFrom(DETAILS, p.details, next.details);
   if ('web' in p) next.web = !!p.web;
-  if ('subtext' in p) next.subtext = !!p.subtext;
   if ('claudeCodeEffort' in p) next.claudeCodeEffort = pickFrom(CLAUDE_CODE_EFFORTS, p.claudeCodeEffort, next.claudeCodeEffort);
   if ('claudeApiModel' in p) next.claudeApiModel = pickFrom(CLAUDE_MODELS.map(m => m.id), p.claudeApiModel, next.claudeApiModel);
   if ('openaiModel' in p) next.openaiModel = pickFrom(OPENAI_MODELS.map(m => m.id), p.openaiModel, next.openaiModel);
@@ -672,7 +673,7 @@ function cliDir(r) {
  * is not), or the kept one (--resume). Either
  * way --system-prompt-snapshot off: Claude Code otherwise records the system prompt on a
  * conversation's first request and sends that record on every resume, and ours changes
- * from one question to the next (Web access, Subtext). The rest — the tools, dontAsk —
+ * from one question to the next (Web access, Details). The rest — the tools, dontAsk —
  * is given at every launch, a resume included. An id that is not a UUID is never
  * passed — it would be an argument of its own — and the turn keeps nothing instead.
  */
@@ -1316,6 +1317,12 @@ const CLAUDE_WEB_TOOLS = [
 // sent back to carry on, before giving up.
 const CLAUDE_MAX_RESUMES = 3;
 
+// Room for the answer's JSON, by Details: a box is a few words at Low and a paragraph
+// at High — some 250 tokens with its label — and an answer can hold up to 40 boxes
+// (FLOW_AI_MAX_PARTS). Tokens are paid for as written, so the ceiling costs nothing;
+// High's stays well inside API_TIMEOUT_MS at the API's pace.
+const CLAUDE_MAX_TOKENS = { low: 4096, medium: 8192, high: 12000 };
+
 /**
  * The Messages API request. The answer comes back as the response's text, in the
  * schema's shape (structured outputs) — not as a forced tool call, which Opus 5.5,
@@ -1325,7 +1332,7 @@ const CLAUDE_MAX_RESUMES = 3;
 function claudeApiBody(r, s, web) {
   const body = {
     model: s.claudeApiModel,
-    max_tokens: 4096,
+    max_tokens: CLAUDE_MAX_TOKENS[s.details] || CLAUDE_MAX_TOKENS.low,
     system: r.system,
     messages: [{ role: 'user', content: r.user }],
     output_config: { format: { type: 'json_schema', schema: r.schema } },
@@ -1388,7 +1395,10 @@ function askClaudeApi(r, s, web) {
       // A long web turn is paused, not finished: sent back as it is, it carries on.
       if (data.stop_reason === 'pause_turn' && resumes < CLAUDE_MAX_RESUMES) continue;
       if (data.stop_reason === 'refusal') return { ok: false, error: 'Claude declined to answer that' };
-      if (data.stop_reason === 'max_tokens') return { ok: false, error: 'The answer was cut off before it finished — try asking for less' };
+      if (data.stop_reason === 'max_tokens') {
+        const less = r.operation !== 'condense' && s.details !== 'low' ? ', or with less Details' : '';
+        return { ok: false, error: 'The answer was cut off before it finished — try asking for less' + less };
+      }
       const text = claudeAnswerText(turn);
       if (!text) return { ok: false, error: 'The Claude API answered without boxes' };
       return { ok: true, text };

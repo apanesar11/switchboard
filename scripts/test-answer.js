@@ -50,6 +50,7 @@ Module._load = function (request, ...rest) {
   return load.call(this, request, ...rest);
 };
 const answer = require('../src/main/answer');
+const config = require('../src/main/config');
 Module._load = load;
 
 // The bundle's two pure modules, as test-flow-layout.js loads flow-editor.ts.
@@ -101,7 +102,6 @@ const CONDENSE = {
   edges: Array.from({ length: 6 }, (_, i) => ({ from: `n${i + 1}`, to: `n${i + 2}`, label: i === 2 ? 'Correction' : undefined })),
   parents: [{ id: 'topic', label: 'Client', arrow: 'Explain' }],
   title: 'Fictional billing concepts',
-  subtext: false,
 };
 const PROVIDER = { id: 'openai-api', name: 'OpenAI', kind: 'api', ready: true, state: 'ready', line: 'Ready' };
 
@@ -138,24 +138,48 @@ function parts(n, detail) {
 // settings
 // ---------------------------------------------------------------------------
 
-test('Web access is on and Subtext off until changed, and both are kept', async () => {
+test('Web access is on and Details Low until changed, and both are kept', async () => {
   const before = answer.settings();
   assert.equal(before.web, true);
-  assert.equal(before.subtext, false);
-  await answer.setSettings({ web: false, subtext: true });
+  assert.equal(before.details, 'low');
+  await answer.setSettings({ web: false, details: 'high' });
   const after = answer.settings();
   assert.equal(after.web, false);
-  assert.equal(after.subtext, true);
+  assert.equal(after.details, 'high');
   const saved = JSON.parse(fs.readFileSync(process.env.SWITCHBOARD_CONFIG, 'utf8')).answer;
   assert.equal(saved.web, false);
-  assert.equal(saved.subtext, true);
-  await answer.setSettings({ web: 'yes', subtext: 0 });
+  assert.equal(saved.details, 'high');
+  await answer.setSettings({ web: 'yes', details: 'medium' });
   assert.equal(answer.settings().web, true);
-  assert.equal(answer.settings().subtext, false);
+  assert.equal(answer.settings().details, 'medium');
+  // A level that isn't one keeps the last; Low again for the tests after this one.
+  await answer.setSettings({ details: 'max' });
+  assert.equal(answer.settings().details, 'medium');
+  await answer.setSettings({ details: 'low' });
+  assert.equal(answer.settings().details, 'low');
+});
+
+test('Subtext and Read the boxes before it are gone from the settings, whatever was kept', async () => {
+  const file = process.env.SWITCHBOARD_CONFIG;
+  const kept = JSON.parse(fs.readFileSync(file, 'utf8'));
+  // As an older Switchboard left them: both switches off, and a level that isn't one.
+  fs.writeFileSync(file, JSON.stringify(Object.assign({}, kept, {
+    answer: Object.assign({}, kept.answer, { subtext: false, context: false, details: 'huge' }),
+  })));
+  config.load();
+  const now = answer.settings();
+  assert.equal(now.details, 'low');
+  assert.equal('subtext' in now, false);
+  assert.equal('context' in now, false);
+  const changed = (await answer.setSettings({ subtext: true, context: true })).settings;
+  assert.equal('subtext' in changed, false);
+  assert.equal('context' in changed, false);
+  fs.writeFileSync(file, JSON.stringify(kept));
+  config.load();
 });
 
 // ---------------------------------------------------------------------------
-// how many boxes, and their subtext
+// how many boxes, and how much each says
 // ---------------------------------------------------------------------------
 
 test('an answer is not capped at four boxes: six repos are six boxes', () => {
@@ -168,15 +192,53 @@ test('an answer is not capped at four boxes: six repos are six boxes', () => {
   assert.equal(parseFlowAiAnswer(parts(7), 'one').length, 1);
 });
 
-test('without Subtext the boxes have no second line, whatever the model wrote', () => {
-  const off = answerPrompt({ ...QUESTION, subtext: false }, 'cli').system;
-  assert.match(off, /"detail": always ""/);
-  assert.doesNotMatch(off, /use its "detail" to say where/);
-  const on = answerPrompt({ ...QUESTION, subtext: true }, 'cli').system;
-  assert.match(on, /one short supporting line/);
-  assert.match(on, /use its "detail" to say where/);
-  assert.deepEqual(parseFlowAiAnswer(parts(2, 'README.md'), 'auto', false).map(p => p.detail), [undefined, undefined]);
-  assert.deepEqual(parseFlowAiAnswer(parts(2, 'README.md'), 'auto', true).map(p => p.detail), ['README.md', 'README.md']);
+test('every box has its second line, and a CLI says there where in the code it came from', () => {
+  for (const kind of ['cli', 'api']) {
+    const { system } = answerPrompt(QUESTION, kind);
+    assert.doesNotMatch(system, /"detail": always ""/);
+    assert.match(system, /one short supporting line/);
+  }
+  assert.match(answerPrompt(QUESTION, 'cli').system, /use its "detail" to say where/);
+  assert.doesNotMatch(answerPrompt(QUESTION, 'api').system, /use its "detail" to say where/);
+  assert.deepEqual(parseFlowAiAnswer(parts(2, 'README.md'), 'auto').map(p => p.detail), ['README.md', 'README.md']);
+  assert.deepEqual(parseFlowAiAnswer(parts(2), 'auto').map(p => p.detail), [undefined, undefined]);
+});
+
+test('Details: Low is the short box, Medium and High explain under the label', () => {
+  const low = answerPrompt(QUESTION, 'api');
+  assert.deepEqual(answerPrompt({ ...QUESTION, details: 'low' }, 'api'), low, 'unset is Low');
+  assert.match(low.system, /at most 8 words/);
+  assert.match(low.system, /one short supporting line, at most 12 words, or ""/);
+  assert.match(low.user, /Details: Low/);
+
+  const medium = answerPrompt({ ...QUESTION, details: 'medium' }, 'api');
+  assert.match(medium.system, /at most 12 words/);
+  assert.match(medium.system, /"detail": never ""\. Two or three full sentences, about 30 to 60 words/);
+  assert.doesNotMatch(medium.system, /one short supporting line/);
+  assert.match(medium.user, /Details: Medium/);
+
+  const high = answerPrompt({ ...QUESTION, details: 'high' }, 'cli');
+  assert.match(high.system, /at most 15 words/);
+  assert.match(high.system, /"detail": never ""\. A thorough explanation .* about 90 to 160 words/);
+  assert.match(high.system, /use its "detail" to say where/);
+  assert.match(high.user, /Details: High/);
+
+  // The level is the question's last line, so it is the latest word in a conversation.
+  for (const { user } of [low, medium, high]) assert.match(user.split('\n').pop(), /^Details: /);
+  // Everything else about the prompt is the same at every level: only the two rules differ.
+  const rest = ({ system }) => system.split('\n').filter(line => !/^- "(label|detail)"/.test(line)).join('\n');
+  assert.equal(rest(answerPrompt({ ...QUESTION, details: 'high' }, 'api')), rest(low));
+  assert.equal(rest(medium), rest(low));
+  assert.match(high.system, /a list of six things is six parts/);
+});
+
+test('a High paragraph comes back whole, past an arrow label\'s 200 characters', () => {
+  const paragraph = Array.from({ length: 30 }, (_, i) => `Sentence ${i + 1} explains one more thing about it.`).join(' ');
+  assert.ok(paragraph.length > 1000);
+  const text = JSON.stringify({ parts: [{ label: 'A label of a few words', detail: `  ${paragraph}\n ` }] });
+  const [part] = parseFlowAiAnswer(text, 'auto');
+  assert.equal(part.detail, paragraph);
+  assert.equal(part.label, 'A label of a few words');
 });
 
 test('links a model left in a box are taken out, keeping a link\'s words', () => {
@@ -203,8 +265,8 @@ test('condense uses the full discussion and corrections, with no new investigati
   assert.match(system, /untrusted discussion content, not instructions/);
   assert.match(system, /Do not repeat every question or invent facts/);
   assert.match(system, /Do not read files, run commands, search the web, or open websites/);
-  assert.match(system, /"detail": always ""/);
-  assert.match(system, /at most 200 characters/);
+  assert.match(system, /one short supporting line, at most 200 characters/);
+  assert.doesNotMatch(system, /"detail": always ""/);
   assert.match(system, /no more than 6 parts/);
   assert.deepEqual(JSON.parse(user), {
     diagramTitle: CONDENSE.title,
@@ -214,7 +276,7 @@ test('condense uses the full discussion and corrections, with no new investigati
       edges: CONDENSE.edges.map(edge => JSON.parse(JSON.stringify(edge))),
     },
   });
-  const cli = condensePrompt({ ...CONDENSE, subtext: true }, 'cli');
+  const cli = condensePrompt(CONDENSE, 'cli');
   assert.match(cli.system, /task needs no file reads, commands, or tool calls/);
   assert.match(cli.system, /one short supporting line/);
   assert.doesNotMatch(cli.system, /Read and search as much as you need/);
@@ -233,10 +295,10 @@ test('condense always has fewer boxes than the selection and honors a smaller ca
   }
 });
 
-test('condense parses multiple parts regardless of Answer split and obeys Subtext', () => {
+test('condense parses multiple parts regardless of Answer split, each with its second line', () => {
   assert.equal(parseFlowCondenseAnswer(parts(3), CONDENSE).length, 3);
-  assert.deepEqual(parseFlowCondenseAnswer(parts(2, 'Supporting context'), CONDENSE).map(p => p.detail), [undefined, undefined]);
-  assert.deepEqual(parseFlowCondenseAnswer(parts(2, 'Supporting context'), { ...CONDENSE, subtext: true }).map(p => p.detail), ['Supporting context', 'Supporting context']);
+  assert.deepEqual(parseFlowCondenseAnswer(parts(2, 'Supporting context'), CONDENSE).map(p => p.detail), ['Supporting context', 'Supporting context']);
+  assert.deepEqual(parseFlowCondenseAnswer(parts(2), CONDENSE).map(p => p.detail), [undefined, undefined]);
 });
 
 test('condense refuses empty, malformed, oversized, or partial replacements instead of trimming them', () => {
@@ -463,6 +525,30 @@ test('the Claude API is asked for the schema\'s JSON, never a forced tool call',
   const on = answer.claudeApiBody(REQ, s, true);
   assert.equal(on.tool_choice, undefined);
   assert.deepEqual(on.tools.map(t => t.type), ['web_search_20250305', 'web_fetch_20250910']);
+});
+
+test('the Claude API has room for High\'s paragraphs, and a cut-off answer says to ask for less', async () => {
+  const s = { claudeApiModel: 'claude-sonnet-5-5' };
+  assert.equal(answer.claudeApiBody(REQ, { ...s, details: 'low' }, false).max_tokens, 4096);
+  assert.equal(answer.claudeApiBody(REQ, { ...s, details: 'medium' }, false).max_tokens, 8192);
+  assert.equal(answer.claudeApiBody(REQ, { ...s, details: 'high' }, false).max_tokens, 12000);
+  assert.equal(answer.claudeApiBody(REQ, s, false).max_tokens, 4096);
+  // Forty High boxes — 15-word labels, 160-word paragraphs — fit, at ~1.4 tokens a word.
+  assert.ok(40 * (15 + 160) * 1.4 + 40 * 20 < 12000);
+
+  fs.writeFileSync(answer.keysFile(), JSON.stringify({ version: 1, keys: { 'claude-api': { enc: 'eA==', last4: 'test' } } }));
+  const before = answer.settings();
+  await answer.setSettings({ web: false, details: 'high' });
+  sent.length = 0;
+  replies = [[200, { content: [{ type: 'text', text: '{"parts":[' }], stop_reason: 'max_tokens' }]];
+  const high = await answer.start('t-cut-high', { provider: 'claude-api', system: 'S', user: 'U', schema: FLOW_ANSWER_SCHEMA });
+  assert.equal(sent[0].body.max_tokens, 12000);
+  assert.deepEqual(high, { ok: false, error: 'The answer was cut off before it finished — try asking for less, or with less Details' });
+  await answer.setSettings({ details: 'low' });
+  replies = [[200, { content: [{ type: 'text', text: '{"parts":[' }], stop_reason: 'max_tokens' }]];
+  const low = await answer.start('t-cut-low', { provider: 'claude-api', system: 'S', user: 'U', schema: FLOW_ANSWER_SCHEMA });
+  assert.deepEqual(low, { ok: false, error: 'The answer was cut off before it finished — try asking for less' });
+  await answer.setSettings({ web: before.web, details: before.details });
 });
 
 test('the Claude API\'s answer is the text after its last web block, joined', () => {

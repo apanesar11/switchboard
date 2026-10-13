@@ -229,10 +229,12 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   the card says so while one waits — and a copy of a whiteboard, or one given another
   workspace, starts a conversation of its own. The APIs and ✦ Condense take each question
   on its own, and so does a Codex older than 0.132, which can't continue one — the row
-  says so. Two switches under the chevron, and in
-  Settings: **Web access** (on) lets whichever answers open a link in the question or
-  search the web, only when the question needs it; **Subtext** (off) adds a line of detail
-  under each answer box.
+  says so. Under the chevron, and in Settings, **Web access** (on) lets whichever answers
+  open a link in the question or search the web, only when the question needs it. Under
+  the chevron alone, **Details** says how much each answer box holds: **Low** (the
+  default) a few words, and a short line under them when it helps; **Medium** two or
+  three sentences under each box, in a wider box; **High** a full paragraph, wider
+  still. Every answer reads the boxes leading up to its question.
 
   **✦ Condense** appears when you drag-select several connected text nodes, including
   sibling branches with the same parent (⌘I also works). It replaces the discussion
@@ -261,7 +263,7 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   quietly showing incomplete data. Removing a saved connection leaves its database intact.
 - **Settings** — the row under Usage, or ⌘,: who answers ✦ Answer on this Mac, one row
   each — whether a CLI is installed and signed in, and the keys for the two APIs with the
-  model each one uses — and the Web access and Subtext switches. The workspace a CLI
+  model each one uses — and the Web access switch. The workspace a CLI
   reads is not here: each whiteboard keeps its own. A key is checked with its provider before it is kept, encrypted with
   your Mac's Keychain in `~/.switchboard/keys.json`, and never shown again — only its last
   four characters.

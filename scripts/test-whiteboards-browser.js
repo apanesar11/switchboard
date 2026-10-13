@@ -29,8 +29,10 @@
 // squares cleared from localStorage; the exit footer and retry inside a panel; ✦ Answer's
 // Conversation row (its count from the REAL store through answer.js, New conversation
 // from the keyboard keeping Tab and Enter in the menu, a workspace changed and changed
-// back leaving nothing to continue, a CLI that answers on its own); and no renderer
-// errors along the way.
+// back leaving nothing to continue, a CLI that answers on its own); ✦ Answer's Details
+// (Low, Medium, High where Subtext and Read the boxes before it were, a pick sent to
+// main, an answer at High asked with its level and the boxes before it and drawn 360
+// wide, and Undo of it); and no renderer errors along the way.
 //
 // SWITCHBOARD_WHITEBOARD_CAPTURE=<dir> saves screenshots of each stage there;
 // SWITCHBOARD_WHITEBOARD_DEBUG=1 prints each stage and the renderer's errors as they come.
@@ -88,6 +90,10 @@ if (!process.versions.electron) {
   let answerStatus = { ok: true, settings: {}, providers: [], keysSafe: {} };
   let alone = null;
   const resets = [];
+  // What the ✦ Answer menu asked main to change, as answer.js would merge it.
+  const settingsChanges = [];
+  // What ✦ Answer asked whoever answers — main's side stubbed: two boxes, at once.
+  const answersAsked = [];
   const conversationStore = {
     async get(boardId, provider) {
       const res = await whiteboards.conversation(boardId, provider);
@@ -113,6 +119,20 @@ if (!process.versions.electron) {
   handle('grid:save', views => ({ views }));
   handle('usage:get', () => ({ ok: false, configured: false }));
   handle('answer:status', () => answerStatus);
+  handle('answer:start', (_id, req) => {
+    answersAsked.push(req);
+    const n = answersAsked.length;
+    const paragraph = 'An example paragraph that explains the answer in full sentences. '.repeat(8).trim();
+    return { ok: true, files: 0, conversation: null, text: JSON.stringify({ parts: [
+      { label: `Example answer ${n}a`, detail: paragraph },
+      { label: `Example answer ${n}b`, detail: paragraph },
+    ] }) };
+  });
+  handle('answer:setSettings', patch => {
+    settingsChanges.push(patch);
+    answerStatus = { ...answerStatus, settings: { ...answerStatus.settings, ...patch } };
+    return answerStatus;
+  });
   handle('answer:conversation', async boardId => {
     const res = await answer.conversation(boardId, { conversations: conversationStore, lookup: id => (dirs[id] ? workspace(id) : null) });
     // A CLI this Mac has too old to keep one: what answer.js says once a resume is refused.
@@ -952,7 +972,7 @@ if (!process.versions.electron) {
       // Claude Code ready to answer, as main announces it; a conversation of twelve
       // questions kept in the board's own file.
       const cliStatus = provider => ({ ok: true, keysSafe: true,
-        settings: { provider, chosen: provider, split: 'auto', context: true, web: false, subtext: true,
+        settings: { provider, chosen: provider, split: 'auto', details: 'low', web: false,
           claudeCodeEffort: 'own', claudeApiModel: 'claude-sonnet-5-5', openaiModel: 'gpt-6-luna', openaiEffort: 'medium' },
         providers: [
           { id: 'claude-code', name: 'Claude Code', kind: 'cli', ready: true, state: 'ready', line: 'Installed · signed in', installed: true, signedIn: true,
@@ -1008,6 +1028,28 @@ if (!process.versions.electron) {
       });
       await capture('answer-conversation');
 
+      // Details: three levels under Answer as, Low unless changed; the two switches it
+      // replaced — Subtext, Read the boxes before it — are gone, both always on now.
+      const details = popover + ' [role=radiogroup][aria-label="Details"]';
+      const detailsSays = () => run(`(() => { const group = document.querySelector(${q(details)}); return group ? { levels: Array.from(group.querySelectorAll('[role=radio]')).map(b => b.textContent.trim() + (b.getAttribute('aria-checked') === 'true' ? '*' : '')), hint: group.nextElementSibling?.textContent.trim() } : null; })()`);
+      await check('Details offers Low, Medium and High, Low first, in place of the two switches', async () => {
+        assert.deepEqual(await detailsSays(), { levels: ['Low*', 'Medium', 'High'], hint: 'A few words, and a short line when it helps' });
+        const menuText = await run(`document.querySelector(${q(popover)}).textContent`);
+        assert.doesNotMatch(menuText, /Subtext|Read the boxes before it/);
+        assert.match(menuText, /Web access/);
+      });
+      await run(`Array.from(document.querySelectorAll(${q(details + ' [role=radio]')})).find(b => b.textContent.trim() === 'High').click()`);
+      await check('picking High tells main, and the menu says what High gives', async () => {
+        await waitFor(() => settingsChanges.length > 0, 'the change');
+        assert.deepEqual(settingsChanges, [{ details: 'high' }]);
+        await waitFor(async () => (await detailsSays())?.levels[2] === 'High*', 'High to be checked');
+        assert.deepEqual(await detailsSays(), { levels: ['Low', 'Medium', 'High*'], hint: 'A full paragraph under each box' });
+      });
+      await capture('answer-details-high');
+      await run(`Array.from(document.querySelectorAll(${q(details + ' [role=radio]')})).find(b => b.textContent.trim() === 'Low').click()`);
+      await waitFor(() => settingsChanges.length === 2, 'the change back');
+      await waitFor(async () => (await detailsSays())?.levels[0] === 'Low*', 'Low to be checked');
+
       // Change… to the other workspace and back, in the open menu: main forgot the
       // conversation at the first change, so there is none to continue after the second.
       await pickWorkspace(otherId);
@@ -1061,6 +1103,54 @@ if (!process.versions.electron) {
       await closeAnswerMenu();
       alone = null;
       await whiteboards.setConversation(boardId, 'codex', null);
+
+      // ✦ Answer at High, from the toolbar: the question goes with the level as its last
+      // line and the boxes leading up to it, and the answer's boxes are drawn wide. Undo
+      // takes each answer off again. Last in this section, as the answers move the view.
+      answerStatus = { ...answerStatus, settings: { ...answerStatus.settings, details: 'high' } };
+      window.webContents.send('sb:evt:answerStatus', answerStatus);
+      const nodesBefore = await nodeCount();
+      const selectBox = id => run(`(() => { const box = document.querySelector(${q(canvas + ' .react-flow__node[data-id="' + id + '"]')}); const r = box.getBoundingClientRect(); const o = { bubbles: true, cancelable: true, view: window, clientX: r.x + 8, clientY: r.y + 8, button: 0, pointerId: 1, isPrimary: true }; for (const [E, type] of [[PointerEvent, 'pointerdown'], [MouseEvent, 'mousedown'], [PointerEvent, 'pointerup'], [MouseEvent, 'mouseup'], [MouseEvent, 'click']]) box.dispatchEvent(new E(type, o)); })()`);
+      const answerButton = `Array.from(document.querySelectorAll(${q(canvas + ' button')})).find(b => b.textContent.trim() === 'Answer')`;
+      const answerBoxes = () => run(`Array.from(document.querySelectorAll(${q(canvas + ' .react-flow__node')})).filter(n => n.textContent.includes('Example answer')).map(n => ({ id: n.dataset.id, width: n.offsetWidth }))`);
+      await selectBox('start');
+      await waitFor(async () => run(`!!${answerButton}`), 'the question\'s toolbar');
+      await run(`${answerButton}.click()`);
+      await check('✦ Answer at High asks with the level last, and draws its boxes 360 wide', async () => {
+        await waitFor(() => answersAsked.length === 1, 'the question');
+        const [req] = answersAsked;
+        assert.equal(req.provider, 'codex');
+        assert.match(req.system, /about 90 to 160 words/);
+        assert.match(req.user, /^The question box: Review the design$/m);
+        assert.match(req.user.split('\n').pop(), /^Details: High\./);
+        await waitFor(async () => (await nodeCount()) === nodesBefore + 2, 'the two answers');
+        const boxes = await answerBoxes();
+        assert.deepEqual(boxes.map(b => b.width), [360, 360]);
+        await run(`${apiOf(boardId)}.flush()`);
+        const saved = boardFile(boardId).spec.nodes.filter(n => n.label.startsWith('Example answer'));
+        assert.deepEqual(saved.map(n => n.size?.width), [360, 360]);
+        assert.ok(saved.every(n => n.detail.length > 500), 'a paragraph is kept whole');
+      });
+      await capture('answer-details-boxes');
+      // A question asked from an answer goes with the boxes leading up to it — always.
+      // Both answers land selected (so the bar offers Condense): the question first, then
+      // the one answer, so that is all that is selected.
+      const [firstAnswer] = await answerBoxes();
+      await selectBox('start');
+      await frames();
+      await selectBox(firstAnswer.id);
+      await waitFor(async () => run(`!!${answerButton}`), 'the answer box\'s toolbar');
+      await run(`${answerButton}.click()`);
+      await check('a question further along sends the boxes before it', async () => {
+        await waitFor(() => answersAsked.length === 2, 'the second question');
+        assert.match(answersAsked[1].user, /^Boxes leading to the question, first to last:\n- Review the design\n/m);
+        assert.match(answersAsked[1].user, /^The question box: Example answer 1a$/m);
+        await waitFor(async () => (await nodeCount()) === nodesBefore + 4, 'the second answer');
+      });
+      for (const left of [nodesBefore + 2, nodesBefore]) {
+        await run(`document.querySelector(${q(canvas + ' [aria-label="Undo · ⌘Z"]')}).click()`);
+        await waitFor(async () => (await nodeCount()) === left, 'Undo to take an answer off');
+      }
       answerStatus = { ok: true, settings: {}, providers: [], keysSafe: {} };
       window.webContents.send('sb:evt:answerStatus', answerStatus);
       assert.equal(boardFile(boardId).workspace, wsId);
@@ -1090,7 +1180,7 @@ if (!process.versions.electron) {
         assert.doesNotMatch(await run(`document.querySelector(${q(canvas + ' .react-flow__background circle')})?.getAttribute('r') || ''`), /NaN/);
       });
 
-      console.log('PASS — Whiteboards: rail screen and home, a box resized from its corner and holding 600+ characters, a board the CLI writes to while open, open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid squares without whiteboards (old ones open Terminal), exit and retry, ✦ Answer\'s Conversation row (New conversation from the keyboard, a workspace changed and back, a CLI on its own)' +
+      console.log('PASS — Whiteboards: rail screen and home, a box resized from its corner and holding 600+ characters, a board the CLI writes to while open, open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid squares without whiteboards (old ones open Terminal), exit and retry, ✦ Answer\'s Conversation row (New conversation from the keyboard, a workspace changed and back, a CLI on its own), ✦ Answer\'s Details (Low, Medium, High; High sent to main, asked with, and drawn wide)' +
         (known.length ? ` (${known.length} known bug${known.length === 1 ? '' : 's'}: ${known.join('; ')})` : ''));
     } catch (error) {
       await capture('failure').catch(() => {});

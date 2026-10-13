@@ -1495,7 +1495,7 @@ input.wbfield::placeholder{color:var(--sec)}
 .stbtns > span{margin-left:6px}
 .stfoot{display:flex;align-items:flex-start;gap:8px;margin-top:16px;max-width:660px;font-size:var(--fs-sm)}
 .stfoot .ic{margin-top:2px}
-/* Web access and Subtext: on/off rows after the list, the whole row the switch, its
+/* Web access: an on/off row after the list, the whole row the switch, its
    switch where a provider row has its radio. */
 .stopts{margin-top:18px}
 .stsw{width:auto;text-align:left;cursor:default}

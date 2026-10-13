@@ -125,11 +125,10 @@ export type AnswerSettings = {
   /** What the user picked, or null while main is choosing for them. */
   chosen: ProviderId | null
   split: "auto" | "one"
-  context: boolean
+  /** How much each answer box says: Low (a few words), Medium or High. */
+  details: "low" | "medium" | "high"
   /** Web access: whoever answers may open a link or search the web, when it needs to. */
   web: boolean
-  /** A line of detail under each answer box. */
-  subtext: boolean
   claudeCodeEffort: string
   claudeApiModel: string
   openaiModel: string

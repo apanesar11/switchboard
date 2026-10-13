@@ -289,14 +289,12 @@ SB.views = SB.views || {};
       list.appendChild(row(p, settings));
       if (p.kind === 'api' && st.editing === p.id) list.appendChild(keyPanel(p, settings));
     });
-    // Whichever of the four answers, and in the ✦ Answer menu too.
+    // Whichever of the four answers, and in the ✦ Answer menu too. How much each box
+    // says (Details) is the menu's alone, beside Answer as.
     var options = h('div.stlist.stopts', null,
       switchRow('Web access',
         'Opens a link in the question, or searches the web, only when the answer needs it. Public pages only.',
-        settings.web, function () { change({ web: !settings.web }); }),
-      switchRow('Subtext',
-        'A line of detail under each answer box, such as the file it came from. Off: just the answer.',
-        settings.subtext, function () { change({ subtext: !settings.subtext }); }));
+        settings.web, function () { change({ web: !settings.web }); }));
     return h('div.stsec', null,
       h('div.sth', null, '✦ Answer on whiteboards'),
       h('p.stdesc.sec', null,

@@ -77,6 +77,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useImperativeHandle,
   useLayoutEffect,
   useMemo,
@@ -176,6 +177,7 @@ import {
   FLOW_BOX_MIN_SIZE,
   FLOW_DIAMOND_MIN_SIZE,
   FLOW_IMAGE_DEFAULT_SIZE,
+  FLOW_NODE_MIN_HEIGHT,
   FLOW_NODE_WIDTH,
   FLOW_TEXT_MIN_WIDTH,
   layoutDiagram,
@@ -246,8 +248,11 @@ import {
 } from "@/lib/diagrams/upload"
 import { normalizeFlowText, normalizeWorkspaceId } from "@/lib/diagrams/validate"
 import {
+  FLOW_AI_DETAILS,
+  FLOW_AI_DETAILS_NAMES,
   FLOW_AI_MAX_EXISTING,
   flowQuestionPath,
+  type FlowAiDetails,
   type FlowAiPart,
 } from "@/lib/diagrams/ai"
 // Switchboard: who answers is one of four (lib/diagrams/answer.ts), chosen on this Mac
@@ -436,6 +441,17 @@ const IMAGE_CASCADE = 30
 const ANSWERED_NOTICE_MS = 8_000
 /** The placeholder drawn where an answer will land, while it is awaited. */
 const ANSWER_GHOST_SIZE = { width: FLOW_NODE_WIDTH, height: 52 }
+/**
+ * Switchboard: how wide an answer's boxes start, by Details — Low's are every other
+ * box's width; Medium's sentences and High's paragraph get a wider box, so they read
+ * as text rather than a tall column of it. Kept in the box's `size` like a box
+ * resized by hand, so it stays that wide; it grows down to fit.
+ */
+const ANSWER_WIDTH: Record<FlowAiDetails, number | undefined> = {
+  low: undefined,
+  medium: 280,
+  high: 360,
+}
 
 /**
  * Switchboard: how far in from a pinned terminal's left, right and bottom edges the
@@ -3301,9 +3317,9 @@ function FlowEditorCanvas({
 
   // ─── ✦ Answer ───
 
-  // Sends `node`'s text — with the boxes leading up to it, unless that is
-  // switched off — to the model picked in the toolbar, then hangs the answer
-  // off the box's right side. The canvas stays usable while it thinks.
+  // Sends `node`'s text — with the boxes leading up to it — to the model picked
+  // in the toolbar, then hangs the answer off the box's right side. The canvas
+  // stays usable while it thinks.
   async function ask(node: Node) {
     // Switchboard: one answer per box, but any number of boxes at once.
     if (isAnswering(node.id)) return
@@ -3381,17 +3397,17 @@ function FlowEditorCanvas({
           question: {
             question,
             detail: box.detail?.trim() || undefined,
-            context: settings.context
-              ? flowQuestionPath(
-                  canvasNodes as unknown as FlowCanvasNode[],
-                  canvasEdges as unknown as FlowCanvasEdge[],
-                  node.id,
-                )
-              : [],
+            // Switchboard: always — "Read the boxes before it" was a switch until
+            // 2026-10-13, and off it cut a question from the branch it was asked on.
+            context: flowQuestionPath(
+              canvasNodes as unknown as FlowCanvasNode[],
+              canvasEdges as unknown as FlowCanvasEdge[],
+              node.id,
+            ),
             existing,
             title: diagramName ?? metaRef.current.title,
             split: settings.split,
-            subtext: settings.subtext,
+            details: settings.details,
           },
         },
         controller.signal,
@@ -3415,7 +3431,7 @@ function FlowEditorCanvas({
         files: provider.kind === "cli" ? files : null,
         seconds: Math.max(1, Math.round((Date.now() - turnAt) / 1000)),
       })
-      addAnswers(node.id, parts, workspace)
+      addAnswers(node.id, parts, workspace, settings.details)
     } catch (err) {
       if (!live()) return
       setFailure({
@@ -3512,7 +3528,6 @@ function FlowEditorCanvas({
             return parent ? [{ id: parent.id, label: parent.label, detail: parent.detail, arrow: edge.label }] : []
           }),
           title: diagramName ?? metaRef.current.title,
-          subtext: known.settings.subtext,
         },
       }, controller.signal, (step) => {
         if (live()) setSteps((all) => ({ ...all, [serial]: [...(all[serial] ?? []).slice(-49), step] }))
@@ -3648,7 +3663,7 @@ function FlowEditorCanvas({
   // go in without taking the keyboard, the selection or the view from you.
   // Switchboard: each box carries the workspace a CLI read for it (`workspace`, taken
   // when it was asked) — the tag under its corner. Null for an API's answer.
-  function addAnswers(parentId: string, parts: FlowAiPart[], workspace: string | null) {
+  function addAnswers(parentId: string, parts: FlowAiPart[], workspace: string | null, details: FlowAiDetails) {
     // Switchboard: answering a detached box makes it a branch again.
     const settle = (node: Node) => (node.id === parentId ? attached(node) : node)
     const current = nodesRef.current.map(settle)
@@ -3661,9 +3676,11 @@ function FlowEditorCanvas({
     // Its own step, apart from whatever was typed just before it landed.
     lastRecordAt.current = 0
     const taken = current.map((node) => node.id)
+    const width = ANSWER_WIDTH[details]
     const fresh = parts.map((part) => {
       const box: FlowBoxNodeData = {
         ...plainBox({ label: part.label, shape: "rounded", tone: "default" }),
+        ...(width === undefined ? {} : { size: { width, height: FLOW_NODE_MIN_HEIGHT } }),
         detail: part.detail,
         ai: true,
         answeredIn: workspace ?? undefined,
@@ -6008,10 +6025,10 @@ function MenuSwitch({
 }
 
 // Under the chevron: who answers — the four ways, each saying whether it can on
-// this Mac — and how: a CLI's effort, an API's model; then whether it reads the boxes
-// before the question, writes a line under each box, and may go on the web. Kept by
-// main, on this Mac, for every diagram; the Settings screen shows and changes the same
-// things.
+// this Mac — and how: a CLI's effort, an API's model; then whether it may go on the
+// web, how many boxes an answer is (Answer as) and how much each one says (Details).
+// Kept by main, on this Mac, for every diagram; the Settings screen shows and changes
+// who answers, the keys and Web access.
 // Switchboard: and which workspace a CLI reads — the whiteboard's own, kept with the
 // whiteboard rather than on this Mac — in a row of its own, whose Change… opens a
 // short picker beside the menu; and, under Web access, the whiteboard's conversation
@@ -6047,6 +6064,7 @@ function AiSettingsMenu({
   const [picking, setPicking] = useState(() => !condensing && (takePickerFirst?.() ?? false))
   const pickerRef = useRef<HTMLDivElement | null>(null)
   const changeRef = useRef<HTMLButtonElement | null>(null)
+  const detailsHintId = useId()
   // The rail as it is now, each time the picker opens.
   useEffect(() => {
     if (picking) refreshChoices?.()
@@ -6195,28 +6213,34 @@ function AiSettingsMenu({
                 <Segment label="Let it decide" checked={settings.split === "auto"} onClick={() => onChange({ split: "auto" })} />
                 <Segment label="One box" checked={settings.split === "one"} onClick={() => onChange({ split: "one" })} />
               </div>
+              {/* How much each box says. Every answer reads the boxes leading up to its
+                  question; this is how much goes under each label — a short line at
+                  Low when one helps, sentences at Medium, a paragraph at High. */}
+              <MenuHeading>Details</MenuHeading>
+              <div
+                role="radiogroup"
+                aria-label="Details"
+                aria-describedby={detailsHintId}
+                className="grid grid-cols-3 gap-0.5 rounded-lg bg-white/5 p-0.5"
+              >
+                {FLOW_AI_DETAILS.map((details) => (
+                  <Segment
+                    key={details}
+                    label={FLOW_AI_DETAILS_NAMES[details]}
+                    checked={settings.details === details}
+                    onClick={() => onChange({ details })}
+                  />
+                ))}
+              </div>
+              <p id={detailsHintId} className="px-2 text-[11px] leading-4 text-gray-400">
+                {DETAILS_HINTS[settings.details]}
+              </p>
             </>
           ) : (
             <p className="px-2 py-2 text-xs text-gray-400">
               A few readable concepts replace the selected discussion. Its parent stays connected.
             </p>
           )}
-          <div className="mt-1 flex flex-col">
-            {!condensing ? (
-              <MenuSwitch
-                label="Read the boxes before it"
-                hint="The arrows leading to the question"
-                on={settings.context}
-                onToggle={() => onChange({ context: !settings.context })}
-              />
-            ) : null}
-            <MenuSwitch
-              label="Subtext"
-              hint="A line of detail under each box"
-              on={settings.subtext}
-              onToggle={() => onChange({ subtext: !settings.subtext })}
-            />
-          </div>
         </div>
       </div>
       <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-white/10 px-2 pb-0.5 pt-2 text-[11px] text-gray-400">
@@ -6494,6 +6518,13 @@ function HowItAnswers({
       ) : null}
     </>
   )
+}
+
+// What each Details level gives, under its three segments in the ✦ Answer menu.
+const DETAILS_HINTS: Record<FlowAiDetails, string> = {
+  low: "A few words, and a short line when it helps",
+  medium: "Two or three sentences under each box",
+  high: "A full paragraph under each box",
 }
 
 const EFFORT_LABELS: Record<string, string> = {
