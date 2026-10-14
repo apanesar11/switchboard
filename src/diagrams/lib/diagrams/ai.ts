@@ -479,8 +479,9 @@ export function flowQuestionPath(
     const arrow = [tidy(edge.data?.label), carried].filter(Boolean).join(" → ") || undefined
     const label = tidyBox(from.data.label)
     // An image or an empty note says nothing, but the walk goes on past it.
-    // Switchboard: nor does a pinned terminal, whose label is only its workspace.
-    if (label && from.data.shape !== "image" && from.data.shape !== "document" && from.data.shape !== "terminal") {
+    // Switchboard: nor does a pinned terminal, whose label is only its workspace, nor a
+    // teleport, whose label is only "Teleport".
+    if (label && from.data.shape !== "image" && from.data.shape !== "document" && from.data.shape !== "terminal" && from.data.shape !== "teleport") {
       path.push({ label, detail: tidyBox(from.data.detail), arrow })
       carried = undefined
     } else {

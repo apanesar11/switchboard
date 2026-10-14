@@ -251,3 +251,8 @@ test('condense refuses a pinned terminal in the selection, and keeps one beside 
   assert.deepEqual(kept.position, { x: 900, y: 0 });
   assert.equal(kept.workspace, 'demo');
 });
+
+test('a teleport in the selection is refused, as a terminal is', () => {
+  const spec = flow([node('a', 0, 0), node('b', 300, 0), node('jump', 600, 0, { label: 'Teleport', shape: 'teleport', teleportTo: 'a' })], [edge('a', 'b')]);
+  assert.throws(() => inspectFlowCondenseSelection(spec, ['a', 'b', 'jump']), /Leave teleports out of the selection/);
+});

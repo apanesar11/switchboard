@@ -12,11 +12,13 @@
 // Switchboard: a box an answer wrote carries a small tag under its corner naming
 // the workspace that answer read, and a pinned terminal draws here as a still card
 // (an archived whiteboard's read-only canvas has no live terminal to show; the
-// editor draws its own, FlowEditor.tsx TerminalNode).
+// editor draws its own, FlowEditor.tsx TerminalNode). A teleport draws here for
+// both canvases, naming where it goes; a click on it takes the view there — on the
+// read-only canvas through FlowBoxNode below, in the editor through its onNodeClick.
 
 import { useLayoutEffect, useRef, useState } from "react"
-import { Handle, Position, type NodeProps } from "@xyflow/react"
-import { RiImageLine, RiSparkling2Fill, RiFileTextLine, RiTerminalBoxLine } from "@remixicon/react"
+import { Handle, Position, getViewportForBounds, useReactFlow, useStore, useStoreApi, type NodeProps, type Viewport } from "@xyflow/react"
+import { RiDoorOpenLine, RiImageLine, RiSparkling2Fill, RiFileTextLine, RiTerminalBoxLine } from "@remixicon/react"
 import { cx } from "@/lib/utils"
 import {
   FLOW_TEXT_METRICS,
@@ -26,6 +28,7 @@ import {
 import { installFlowTextMeasure } from "@/lib/diagrams/measure"
 import {
   FLOW_SIDES,
+  TELEPORT_LABEL,
   TERMINAL_HEADER,
   isFlowBoxShape,
   type FlowBoxShape,
@@ -258,6 +261,62 @@ export function TerminalDot({ dot }: { dot?: string }) {
 }
 
 /**
+ * Switchboard: what a teleport says it goes to — the destination's words on one line,
+ * or what it is when it has none (a picture, an empty note) — or null when there is
+ * no such node.
+ */
+export function teleportDestinationName(box: FlowBoxNodeData | undefined): string | null {
+  if (!box) return null
+  if (box.shape === "terminal") return `${box.workspace ?? box.label} terminal`
+  if (box.shape === "teleport") return TELEPORT_LABEL
+  const words = box.label.replace(/\s+/g, " ").trim()
+  if (words) return words
+  return box.shape === "image" ? "Image" : box.shape === "note" ? "Note" : box.shape === "text" ? "Text" : "Untitled"
+}
+
+/**
+ * Switchboard: where a teleport leaves the view — `rect` (a node, in canvas units)
+ * framed in a pane of `pane`'s size: at the zoom it was at, or life size when that
+ * was smaller, and further out only for a node too big to fit.
+ */
+export function teleportViewport(
+  rect: { x: number; y: number; width: number; height: number },
+  pane: { width: number; height: number },
+  zoom: number,
+): Viewport {
+  return getViewportForBounds(rect, pane.width, pane.height, 0.15, Math.min(2.5, Math.max(zoom, 1)), 0.3)
+}
+
+/** Switchboard: how long the view takes to fly to a teleport's destination. */
+export const TELEPORT_DURATION_MS = 450
+
+/**
+ * Switchboard: a teleport's face — a pill of its own colour, so it never reads as a
+ * step, saying where it goes. The destination's words come from React Flow's own
+ * store, so renaming that node renames it here too, on either canvas.
+ */
+function TeleportFace({ to }: { to?: string }) {
+  const name = useStore((state) =>
+    to ? teleportDestinationName(state.nodeLookup.get(to)?.data as FlowBoxNodeData | undefined) : null,
+  )
+  return (
+    <div
+      className="flow-teleport"
+      data-linked={name !== null}
+      title={name !== null ? `Teleport to ${name}` : "Teleport · no destination yet"}
+    >
+      <span className="flow-teleport-icon">
+        <RiDoorOpenLine className="size-[18px]" aria-hidden="true" />
+      </span>
+      <span className="flow-teleport-text">
+        <b>{TELEPORT_LABEL}</b>
+        <small>{name !== null ? `to ${name}` : "No destination yet"}</small>
+      </span>
+    </div>
+  )
+}
+
+/**
  * The box itself, shared by the read-only node below and the editor's
  * editable one, so a diagram looks identical whether you are reading it or
  * arranging it. `children` is where each caller puts its handles.
@@ -265,6 +324,7 @@ export function TerminalDot({ dot }: { dot?: string }) {
 export function FlowBox({
   labelOverride,
   onToggleCheck,
+  onTeleport,
   className,
   children,
   ...box
@@ -272,6 +332,8 @@ export function FlowBox({
   /** Drawn in place of the label and detail — the editor's text fields. */
   labelOverride?: React.ReactNode
   onToggleCheck?: (field: "label" | "detail", paragraph: number) => void
+  /** Switchboard: a click on a teleport, on the read-only canvas. */
+  onTeleport?: (event: React.MouseEvent) => void
   className?: string
   children?: React.ReactNode
 }) {
@@ -317,6 +379,15 @@ export function FlowBox({
             </div>
           )}
         </div>
+        {children}
+      </div>
+    )
+  }
+
+  if (shape === "teleport") {
+    return (
+      <div className={cx("relative size-full", className)} onClick={onTeleport}>
+        <TeleportFace to={box.teleportTo} />
         {children}
       </div>
     )
@@ -402,11 +473,36 @@ function FlowImage({ src, alt }: { src?: string; alt: string }) {
   )
 }
 
+/**
+ * Switchboard: a teleport on the read-only canvas — clicked, the view flies to the
+ * node it goes to. (The editor handles its own clicks: it selects the node, and
+ * offers Back.)
+ */
+function useTeleportClick(to: string | undefined): ((event: React.MouseEvent) => void) | undefined {
+  const { getViewport, setViewport } = useReactFlow()
+  const store = useStoreApi()
+  if (!to) return undefined
+  return (event) => {
+    const { nodeLookup, domNode } = store.getState()
+    const target = nodeLookup.get(to)
+    const pane = domNode?.getBoundingClientRect()
+    if (!target || target.hidden || !pane) return
+    event.stopPropagation()
+    const width = target.measured?.width ?? target.width ?? 0
+    const height = target.measured?.height ?? target.height ?? 0
+    void setViewport(
+      teleportViewport({ ...target.position, width, height }, pane, getViewport().zoom),
+      { duration: TELEPORT_DURATION_MS },
+    )
+  }
+}
+
 export function FlowBoxNode({ data }: NodeProps) {
   const box = data as FlowBoxNodeData
+  const teleport = useTeleportClick(box.shape === "teleport" ? box.teleportTo : undefined)
 
   return (
-    <FlowBox {...box}>
+    <FlowBox {...box} className={teleport ? "cursor-pointer" : undefined} onTeleport={teleport}>
       {/* A diagram's edges are routed by React Flow, so these handles carry
           real geometry — one per side, named after it, and each edge names the
           pair it uses (layoutFlow). They are all "source" handles; the canvas

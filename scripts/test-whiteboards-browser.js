@@ -10,7 +10,10 @@
 // Covers: the Whiteboards rail screen and its home list; a box resized from its corner
 // (kept in the board file, opened again at its size, copied by Tab) and holding words
 // well past 200 characters, pasted and typed; a board the whiteboard CLI writes to while
-// it is open, drawn at once, not written back, and put back by Undo; opening a board;
+// it is open, drawn at once, not written back, and put back by Undo; a teleport placed
+// from the rail and given its destination by a click, a click on one flying the view to
+// its destination and Back, Escape while it waits, and its destination deleted and
+// undone; opening a board;
 // Actions ▸
 // Open terminal… floating the workspace's own shell (the Terminal tab's xterm, its
 // scrollback, one shell); a second workspace's panel from the tray's + (a toggle: a
@@ -452,6 +455,107 @@ if (!process.versions.electron) {
         await until(`!document.querySelector(${q(fromTerminal)})`);
         await run(`${apiOf(sized.data.id)}.flush()`);
         assert.equal(boardFile(sized.data.id).spec.nodes.some(n => n.id === 'from-terminal'), false);
+      });
+      await run('SB.go({view:"whiteboards",folder:"all"})');
+      await until(`SB.state.route.view === "whiteboards" && !!document.querySelector(${q('#main .wbrow[data-wb-board="' + boardId + '"]')})`);
+
+      mark('a teleport: placed, given a destination, clicked, and Back');
+      // A board of its own: a box far from the others, a teleport that goes to it, and
+      // the rail's Teleport placing another that is given its destination by a click.
+      const tele = await whiteboards.create({ folderId: null, name: 'Teleport flow', workspace: wsId, spec: { kind: 'flow', nodes: [
+        { id: 'start', label: 'Start here', position: { x: 60, y: 130 } },
+        { id: 'jump', label: 'Teleport', shape: 'teleport', teleportTo: 'far', position: { x: 60, y: 260 } },
+        { id: 'far', label: 'Far away step', position: { x: 3000, y: 2200 } },
+      ], edges: [] } });
+      assert.equal(tele.ok, true, tele.error);
+      const teleSlab = `.dgslab[data-wb-board="${tele.data.id}"]`;
+      const teleNode = id => `${teleSlab} .react-flow__node[data-id="${id}"]`;
+      const teleView = () => run(`document.querySelector(${q(teleSlab + ' .react-flow__viewport')}).style.transform`);
+      const teleBanner = () => run(`document.querySelector(${q(teleSlab + ' .react-flow__panel.top.center')})?.textContent || ''`);
+      await run(`SB.go({view:'whiteboard',board:${q(tele.data.id)}})`);
+      await until(`!!document.querySelector(${q(teleNode('far'))})`);
+      await settled(teleSlab);
+      await check('a teleport says where it goes', async () => {
+        assert.equal(await run(`document.querySelector(${q(teleNode('jump'))}).textContent`), 'Teleportto Far away step');
+      });
+      await capture('teleport-board');
+
+      // The rail's Teleport, then a click on an empty part of the canvas.
+      await run(`document.querySelector(${q(teleSlab + ' [aria-label="Teleport (P)"]')}).click()`);
+      const telePane = await rect(teleSlab + ' .react-flow__pane');
+      await press(telePane.left + telePane.width * 0.72, telePane.top + telePane.height * 0.2);
+      await check('a teleport placed from the rail asks where it goes', async () => {
+        await until(`!!document.querySelector(${q(teleNode('teleport'))})`);
+        assert.equal(await run(`document.querySelector(${q(teleNode('teleport'))}).textContent`), 'TeleportNo destination yet');
+        assert.match(await teleBanner(), /Click the box this teleport goes to/);
+      });
+      await capture('teleport-picking');
+      await pressOn(teleNode('start'));
+      await run(`${apiOf(tele.data.id)}.flush()`);
+      await check('the next node clicked is where it goes, and the board file keeps it', async () => {
+        assert.equal(await teleBanner(), '');
+        assert.equal(await run(`document.querySelector(${q(teleNode('teleport'))}).textContent`), 'Teleportto Start here');
+        assert.equal(await run(`document.querySelector(${q(teleNode('teleport'))}).classList.contains('selected')`), true);
+        const saved = boardFile(tele.data.id).spec.nodes.find(n => n.id === 'teleport');
+        assert.deepEqual([saved.shape, saved.label, saved.teleportTo], ['teleport', 'Teleport', 'start']);
+      });
+
+      // A click on the first teleport flies the view to the far box.
+      const teleFrom = await teleView();
+      await pressOn(teleNode('jump'));
+      await settled(teleSlab);
+      await check('a click on a teleport flies to where it goes and selects it', async () => {
+        const pane = await rect(teleSlab + ' .react-flow__pane');
+        const far = await rect(teleNode('far'));
+        assert.ok(Math.abs(far.left + far.width / 2 - (pane.left + pane.width / 2)) <= 2, JSON.stringify({ far, pane }));
+        assert.ok(Math.abs(far.top + far.height / 2 - (pane.top + pane.height / 2)) <= 2, JSON.stringify({ far, pane }));
+        // From a view zoomed out to fit the board, it lands at life size.
+        assert.match(await teleView(), /scale\(1\)/);
+        assert.equal(await run(`document.querySelector(${q(teleNode('far'))}).classList.contains('selected')`), true);
+        assert.match(await teleBanner(), /Back/);
+      });
+      await capture('teleport-landed');
+      await run(`Array.from(document.querySelectorAll(${q(teleSlab + ' .react-flow__panel.top.center button')})).find(b => b.textContent.trim() === 'Back').click()`);
+      await settled(teleSlab);
+      await check('Back puts the view where it was and selects the teleport again', async () => {
+        assert.equal(await teleView(), teleFrom);
+        assert.equal(await run(`document.querySelector(${q(teleNode('jump'))}).classList.contains('selected')`), true);
+        assert.equal(await teleBanner(), '');
+      });
+
+      // Change destination, then Escape: it still goes where it went.
+      await run(`document.querySelector(${q(teleNode('jump') + ' [aria-label="Change destination"]')}).click()`);
+      await until(`(document.querySelector(${q(teleSlab + ' .react-flow__panel.top.center')})?.textContent || '').includes('Click the box')`);
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+      await check('Escape leaves a teleport going where it went', async () => {
+        await until(`!(document.querySelector(${q(teleSlab + ' .react-flow__panel.top.center')})?.textContent || '').includes('Click the box')`);
+        assert.equal(await run(`document.querySelector(${q(teleNode('jump'))}).textContent`), 'Teleportto Far away step');
+      });
+
+      // Enter on the selected teleport goes too; Delete there takes the destination away.
+      assert.equal(await run(`document.querySelector(${q(teleNode('jump'))}).classList.contains('selected')`), true);
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+      await check('Enter on a selected teleport goes there too', async () => {
+        await until(`document.querySelector(${q(teleNode('far'))}).classList.contains('selected')`);
+        await settled(teleSlab);
+        assert.match(await teleView(), /scale\(1\)/);
+      });
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Backspace' });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Backspace' });
+      await until(`!document.querySelector(${q(teleNode('far'))})`);
+      await run(`${apiOf(tele.data.id)}.flush()`);
+      await check('a teleport whose destination is deleted has none, in the file too', async () => {
+        assert.equal(await run(`document.querySelector(${q(teleNode('jump'))}).textContent`), 'TeleportNo destination yet');
+        assert.equal(boardFile(tele.data.id).spec.nodes.find(n => n.id === 'jump').teleportTo, undefined);
+      });
+      await run(`document.querySelector(${q(teleSlab + ' [aria-label="Undo · ⌘Z"]')}).click()`);
+      await run(`${apiOf(tele.data.id)}.flush()`);
+      await check('Undo brings the destination back, and the teleport goes there again', async () => {
+        await until(`!!document.querySelector(${q(teleNode('far'))})`);
+        assert.equal(await run(`document.querySelector(${q(teleNode('jump'))}).textContent`), 'Teleportto Far away step');
+        assert.equal(boardFile(tele.data.id).spec.nodes.find(n => n.id === 'jump').teleportTo, 'far');
       });
       await run('SB.go({view:"whiteboards",folder:"all"})');
       await until(`SB.state.route.view === "whiteboards" && !!document.querySelector(${q('#main .wbrow[data-wb-board="' + boardId + '"]')})`);
@@ -1180,7 +1284,7 @@ if (!process.versions.electron) {
         assert.doesNotMatch(await run(`document.querySelector(${q(canvas + ' .react-flow__background circle')})?.getAttribute('r') || ''`), /NaN/);
       });
 
-      console.log('PASS — Whiteboards: rail screen and home, a box resized from its corner and holding 600+ characters, a board the CLI writes to while open, open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid squares without whiteboards (old ones open Terminal), exit and retry, ✦ Answer\'s Conversation row (New conversation from the keyboard, a workspace changed and back, a CLI on its own), ✦ Answer\'s Details (Low, Medium, High; High sent to main, asked with, and drawn wide)' +
+      console.log('PASS — Whiteboards: rail screen and home, a box resized from its corner and holding 600+ characters, a board the CLI writes to while open, a teleport (placed, given its destination, clicked, Back, Escape, Enter, its destination deleted and undone), open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid squares without whiteboards (old ones open Terminal), exit and retry, ✦ Answer\'s Conversation row (New conversation from the keyboard, a workspace changed and back, a CLI on its own), ✦ Answer\'s Details (Low, Medium, High; High sent to main, asked with, and drawn wide)' +
         (known.length ? ` (${known.length} known bug${known.length === 1 ? '' : 's'}: ${known.join('; ')})` : ''));
     } catch (error) {
       await capture('failure').catch(() => {});

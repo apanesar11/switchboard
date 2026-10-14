@@ -69,6 +69,10 @@ export function inspectFlowCondenseSelection(
   if (selected.some((node) => node.shape === "terminal")) {
     throw new Error("Leave terminals out of the selection before condensing.")
   }
+  // Switchboard: nor a teleport, which is a way across the board, not words.
+  if (selected.some((node) => node.shape === "teleport")) {
+    throw new Error("Leave teleports out of the selection before condensing.")
+  }
   if (selected.some((node) => !(node.label.trim() || node.detail?.trim()))) {
     throw new Error("Every selected node needs text before it can be condensed.")
   }

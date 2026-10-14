@@ -206,6 +206,17 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   Switchboard; conflicting edits offer **Reload file** or **Save my version**. Archived
   documents open for reading.
 
+  **Teleport** (P on the toolbar) is a button on the canvas that takes you to another
+  box on the same whiteboard, however far away. Place one and it asks where it goes:
+  click the box — nothing is drawn between them, and under the word Teleport it says
+  "to" and that box's words. Click the teleport (or select it and press Enter) and the
+  view flies to its box and selects it; **Back** at the top of the canvas puts the view
+  where it was. The crosshair on its corner, or **Change destination** in its toolbar, picks
+  another box; Esc or a click on empty canvas leaves it as it was. ⇧- or ⌘-click
+  selects a teleport without going anywhere. Delete the box it goes to and it says **No
+  destination yet** until you pick another (⌘Z brings both back). Arrows can still point
+  at a teleport, so it works as a flowchart's off-page connector.
+
   **✦ Answer** leads a box's toolbar (and ⌘I or ⌘↵): write a question in a box and the
   answer comes back as a box for each part it has, hanging off it, as one undo step. Several boxes
   can wait on their answers at once. The chevron beside it picks who answers — **Claude

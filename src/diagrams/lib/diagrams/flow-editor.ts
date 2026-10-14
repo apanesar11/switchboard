@@ -25,6 +25,7 @@ import {
   FLOW_BOX_TEXT_MAX_LENGTH,
   FLOW_SIDES,
   FLOW_TERMINAL_DEFAULT_SIZE,
+  TELEPORT_LABEL,
   TERMINAL_BASE_FONT,
   TERMINAL_FONT_MAX,
   TERMINAL_FONT_MIN,
@@ -107,13 +108,20 @@ export function flowSpecFromCanvas(
       .map((node) => node.id),
   )
 
+  // Switchboard: what a teleport may still go to — a node that is part of the drawing.
+  const kept = new Set(nodes.filter((node) => !blank.has(node.id)).map((node) => node.id))
+
   const specNodes: FlowNodeSpec[] = nodes.filter((node) => !blank.has(node.id)).map((node) => {
-    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, answeredIn, detached, workspace, font, minimized } =
+    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, answeredIn, detached, workspace, font, minimized, teleportTo } =
       node.data
     // Switchboard: a pinned terminal is labelled with its workspace, as the
-    // validator labels it.
+    // validator labels it — and a teleport "Teleport".
     const terminal = shape === "terminal" ? (workspace ?? label) : undefined
-    const cleanLabel = terminal ?? cleanBoxText(label) ?? (shape === "note" ? "" : UNTITLED_FLOW_LABEL)
+    const cleanLabel =
+      terminal ??
+      (shape === "teleport" ? TELEPORT_LABEL : undefined) ??
+      cleanBoxText(label) ??
+      (shape === "note" ? "" : UNTITLED_FLOW_LABEL)
     const cleanDetail = cleanBoxText(detail)
     return {
       id: node.id,
@@ -147,6 +155,11 @@ export function flowSpecFromCanvas(
       workspace: terminal,
       font: terminal !== undefined && typeof font === "number" ? Math.round(font * 1000) / 1000 : undefined,
       minimized: terminal !== undefined && minimized === true ? true : undefined,
+      // Switchboard: a teleport's destination, while it is still on the board.
+      teleportTo:
+        shape === "teleport" && teleportTo && teleportTo !== node.id && kept.has(teleportTo)
+          ? teleportTo
+          : undefined,
     }
   })
 
@@ -995,6 +1008,7 @@ export function carryOverFlowLayout(
     const aiWords = old.ai === true && old.label === node.label && old.detail === node.detail
     const ai = node.ai ?? (aiWords ? true : undefined)
     const terminal = node.shape === "terminal" && old.shape === "terminal"
+    const teleport = node.shape === "teleport" && old.shape === "teleport"
     // A box's shape is left out when it is the default one.
     const shape = node.shape ?? DEFAULT_FLOW_SHAPE
     const oldShape = old.shape ?? DEFAULT_FLOW_SHAPE
@@ -1024,6 +1038,12 @@ export function carryOverFlowLayout(
       // Switchboard: a pinned terminal keeps its type size and whether it is folded.
       font: node.font ?? (terminal ? old.font : undefined),
       minimized: node.minimized ?? (terminal ? old.minimized : undefined),
+      // Switchboard: a teleport keeps where it goes, while that node is still there.
+      teleportTo:
+        node.teleportTo ??
+        (teleport && old.teleportTo && next.nodes.some((other) => other.id === old.teleportTo)
+          ? old.teleportTo
+          : undefined),
     }
   })
   const edges = next.edges.map((edge) => {

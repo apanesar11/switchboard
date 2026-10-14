@@ -36,6 +36,7 @@ const {
   flowNodeFoldGroups,
   toggleFlowNodeFold,
   carryFoldedPositions,
+  carryOverFlowLayout,
   FLOW_TAB_GAP_X,
   FLOW_TAB_GAP_Y,
   FLOW_ROOM_GAP,
@@ -50,6 +51,14 @@ esbuild.buildSync({
   outfile: aiFile, bundle: true, format: 'cjs', platform: 'node', logLevel: 'error',
 });
 const { flowQuestionPath } = require(aiFile);
+
+// Switchboard: the validator, for a teleport's destination as a spec states it.
+const validateFile = path.join(temp, 'validate.js');
+esbuild.buildSync({
+  entryPoints: [path.join(__dirname, '..', 'src', 'diagrams', 'lib', 'diagrams', 'validate.ts')],
+  outfile: validateFile, bundle: true, format: 'cjs', platform: 'node', logLevel: 'error',
+});
+const { parseDiagramSpec } = require(validateFile);
 
 after(() => fs.rmSync(temp, { recursive: true, force: true }));
 
@@ -730,4 +739,76 @@ test('Larger text stops while the box still holds a usable grid', () => {
   // A big box is capped by the spec's own limit instead.
   assert.ok(stepTerminalFont(79, 1, 1, { width: 4000, height: 4000 }) <= 80);
   assert.equal(stepTerminalFont(80, 1, 1, { width: 4000, height: 4000 }), null);
+});
+
+// ── Switchboard: a teleport and where it goes ──
+
+test('a teleport says "Teleport" and goes to a node named in any case, never itself or one that is gone', () => {
+  const parsed = parseDiagramSpec({ kind: 'flow', nodes: [
+    { id: 'Checkout', label: 'Checkout' },
+    { id: 'to-checkout', label: 'Go to checkout', shape: 'teleport', teleportTo: 'checkout' },
+    { id: 'nowhere', shape: 'teleport', teleportTo: 'deleted-box' },
+    { id: 'loop', shape: 'teleport', teleportTo: 'LOOP' },
+    { id: 'plain', label: 'A box', teleportTo: 'Checkout' },
+  ], edges: [] });
+  assert.equal(parsed.ok, true, parsed.error);
+  const [checkout, to, nowhere, loop, plain] = parsed.value.nodes;
+  assert.equal(checkout.teleportTo, undefined);
+  // Its label is always "Teleport", and its destination is spelt as that node spells it.
+  assert.deepEqual([to.label, to.teleportTo], ['Teleport', 'Checkout']);
+  assert.deepEqual([nowhere.label, nowhere.teleportTo], ['Teleport', undefined]);
+  assert.equal(loop.teleportTo, undefined, 'never to itself');
+  assert.equal(plain.teleportTo, undefined, 'only a teleport goes anywhere');
+});
+
+test('a teleport is saved with where it goes only while that node is on the board', () => {
+  const data = (extra) => ({ label: '', shape: 'rounded', tone: 'default', dashed: false, textSize: 'medium', align: 'center', bold: false, italic: false, ...extra });
+  const node = (id, extra) => ({ id, position: { x: 0, y: 0 }, data: data(extra) });
+  const spec = flowSpecFromCanvas({}, [
+    node('target', { label: 'Target' }),
+    node('teleport', { label: 'anything', shape: 'teleport', teleportTo: 'target' }),
+    node('teleport-2', { shape: 'teleport', teleportTo: 'gone' }),
+    // A free text never typed into is not part of the drawing, so nothing goes to it.
+    node('teleport-3', { shape: 'teleport', teleportTo: 'blank' }),
+    node('blank', { shape: 'text' }),
+    node('teleport-4', { shape: 'teleport', teleportTo: 'teleport-4' }),
+  ], []);
+  const by = new Map(spec.nodes.map(n => [n.id, n]));
+  assert.deepEqual([by.get('teleport').label, by.get('teleport').teleportTo, by.get('teleport').shape], ['Teleport', 'target', 'teleport']);
+  assert.equal(by.get('teleport-2').teleportTo, undefined);
+  assert.equal(by.get('teleport-3').teleportTo, undefined);
+  assert.equal(by.get('teleport-4').teleportTo, undefined);
+  assert.equal(by.has('blank'), false);
+  // What is saved is what the validator accepts, unchanged.
+  const again = parseDiagramSpec(JSON.parse(JSON.stringify(spec)));
+  assert.equal(again.ok, true, again.error);
+  assert.equal(again.value.nodes.find(n => n.id === 'teleport').teleportTo, 'target');
+});
+
+test('a board rewritten from a terminal keeps where a teleport goes, while that node is still there', () => {
+  const before = { kind: 'flow', nodes: [
+    { id: 'a', label: 'A' },
+    { id: 'b', label: 'B' },
+    { id: 'jump', label: 'Teleport', shape: 'teleport', teleportTo: 'b' },
+    { id: 'jump-2', label: 'Teleport', shape: 'teleport', teleportTo: 'a' },
+  ], edges: [] };
+  // The rewrite states neither destination, and has dropped a.
+  const next = { kind: 'flow', nodes: [
+    { id: 'b', label: 'B' },
+    { id: 'jump', label: 'Teleport', shape: 'teleport' },
+    { id: 'jump-2', label: 'Teleport', shape: 'teleport' },
+  ], edges: [] };
+  const { spec } = carryOverFlowLayout(before, next);
+  assert.equal(spec.nodes.find(n => n.id === 'jump').teleportTo, 'b');
+  assert.equal(spec.nodes.find(n => n.id === 'jump-2').teleportTo, undefined);
+});
+
+test('a question\'s path walks past a teleport, whose only word is "Teleport"', () => {
+  const node = (id, x, data = {}) => ({ id, position: { x, y: 0 }, data: { label: id, shape: 'rounded', ...data } });
+  const nodes = [node('Start here', 0), node('teleport', 300, { label: 'Teleport', shape: 'teleport' }), node('Ask', 600)];
+  const edges = [
+    { source: 'Start here', target: 'teleport', targetHandle: 'left' },
+    { source: 'teleport', target: 'Ask', targetHandle: 'left' },
+  ];
+  assert.deepEqual(flowQuestionPath(nodes, edges, 'Ask').map(step => step.label), ['Start here']);
 });

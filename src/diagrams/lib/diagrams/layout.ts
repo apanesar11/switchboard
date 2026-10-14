@@ -19,6 +19,7 @@ import {
   DEFAULT_FLOW_TEXT_ALIGN,
   DEFAULT_FLOW_TEXT_SIZE,
   DEFAULT_FLOW_TONE,
+  FLOW_TELEPORT_SIZE,
   FLOW_TERMINAL_DEFAULT_SIZE,
   FLOW_TERMINAL_FLOOR,
   TERMINAL_HEADER,
@@ -233,6 +234,8 @@ export type FlowBoxNodeData = {
   workspace?: string
   font?: number
   minimized?: boolean
+  /** Switchboard: the node a teleport takes you to — see FlowNodeSpec.teleportTo. */
+  teleportTo?: string
 }
 
 /** What a flow edge carries, so the editor can read an edge back into a spec. */
@@ -429,6 +432,8 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
   const shape = node.shape ?? DEFAULT_FLOW_SHAPE
   if (shape === "image") return node.size ?? FLOW_IMAGE_DEFAULT_SIZE
   if (shape === "document") return { width: 240, height: 76 }
+  // Switchboard: a teleport is always the one size, whatever it links to.
+  if (shape === "teleport") return FLOW_TELEPORT_SIZE
   // Switchboard: a pinned terminal is the size it was given — pinned at a high zoom,
   // that can be less than its resize handles allow, so only the floor of a header
   // and a sliver of body binds here — and folded, only its header, in place.
@@ -706,6 +711,7 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
       workspace: node.workspace,
       font: node.font,
       minimized: node.minimized === true ? true : undefined,
+      teleportTo: node.teleportTo,
     } satisfies FlowBoxNodeData,
     draggable: false,
     selectable: false,

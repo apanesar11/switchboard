@@ -218,6 +218,7 @@ function shapeCount(spec) {
 
 function describeNode(node) {
   if (node.shape === 'terminal') return `the pinned ${node.workspace || node.label} terminal`;
+  if (node.shape === 'teleport') return `${node.id} (a teleport${node.teleportTo ? ` to ${node.teleportTo}` : ''})`;
   const label = String(node.label || '').replace(/\s+/g, ' ').trim();
   return `${node.id}${label ? ` ("${label.length > 40 ? label.slice(0, 39) + '…' : label}")` : ''}`;
 }

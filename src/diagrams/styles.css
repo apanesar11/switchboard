@@ -229,6 +229,40 @@
   .flow-terminal-btn:hover:where([data-term-theme="dark"] *) { background: #ffffff14; color: #fff; }
   .flow-terminal-sep:where([data-term-theme="dark"] *) { background: #ffffff24; }
 
+  /* Switchboard: a teleport — a button on the board that takes the view to another
+     node. A pill of its own colour, so it never reads as a step; pale and dashed
+     while it has nowhere to go. Clickable on the read-only canvas too, where React
+     Flow turns its nodes' pointer events off. */
+  .flow-teleport { display: flex; align-items: center; gap: 10px; width: 100%; height: 100%; padding: 0 16px 0 8px; border: 1.5px solid transparent; border-radius: 9999px; background: linear-gradient(135deg, #0ea5e9, #6366f1) border-box; color: #fff; box-shadow: 0 6px 18px #4f46e538, inset 0 0 0 1px #ffffff2e; pointer-events: auto; -webkit-user-select: none; user-select: none; }
+  .flow-teleport-icon { flex: none; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: #ffffff33; box-shadow: inset 0 0 0 1px #ffffff47; }
+  .flow-teleport-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; text-align: left; }
+  .flow-teleport-text b { font-size: 14px; font-weight: 600; }
+  .flow-teleport-text small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; opacity: .9; }
+  .flow-teleport[data-linked=false] { border: 1.5px dashed #818cf8; background: #fff; color: #4338ca; box-shadow: 0 1px 3px #1118271a; }
+  .flow-teleport[data-linked=false] .flow-teleport-icon { background: #eef2ff; box-shadow: none; }
+  .flow-teleport[data-linked=false] .flow-teleport-text small { color: #6b7280; opacity: 1; }
+  .flow-teleport[data-linked=false]:where([data-term-theme="dark"] *) { border-color: #6366f1; background: #111827; color: #c7d2fe; }
+  .flow-teleport[data-linked=false] .flow-teleport-icon:where([data-term-theme="dark"] *) { background: #312e81; }
+  .flow-teleport[data-linked=false] .flow-teleport-text small:where([data-term-theme="dark"] *) { color: #9ca3af; }
+  /* Change destination, on the editor's teleport: over its top-right edge on hover. */
+  .flow-teleport-retarget { position: absolute; right: -6px; top: -8px; z-index: 5; display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid #d1d5db; border-radius: 50%; background: #fff; color: #4f46e5; box-shadow: 0 1px 4px #1118271f; cursor: pointer; }
+  .flow-teleport-retarget:hover { background: #eef2ff; }
+  .flow-teleport-retarget:focus-visible { outline: 2px solid #6366f1; outline-offset: 2px; }
+  .flow-teleport-retarget:where([data-term-theme="dark"] *) { border-color: #374151; background: #111827; color: #a5b4fc; }
+  .flow-teleport-retarget:hover:where([data-term-theme="dark"] *) { background: #1e1b4b; }
+  /* A placing tool aims rather than points, and so does a teleport waiting for its
+     destination, at the nodes it can go to. */
+  .flow-placing .react-flow__pane, .flow-picking .react-flow__node { cursor: crosshair !important; }
+  /* Where a teleport landed: a ring that closes in on the node and fades. */
+  .flow-teleport-arrival { position: absolute; border: 3px solid #6366f1; border-radius: 14px; pointer-events: none; animation: flow-teleport-arrive 1.3s cubic-bezier(.16, 1, .3, 1) both; }
+  @keyframes flow-teleport-arrive {
+    0% { opacity: 0; transform: scale(1.35); }
+    25% { opacity: 1; transform: scale(1); }
+    70% { opacity: 1; transform: scale(1); }
+    100% { opacity: 0; transform: scale(1); }
+  }
+  @media (prefers-reduced-motion: reduce) { .flow-teleport-arrival { animation: none; } }
+
   @media (max-width: 720px) {
     .flow-document-floating { inset: 8px; max-width: calc(100% - 16px); }
     .flow-document-floating .flow-document-panel { width: 100% !important; }

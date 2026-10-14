@@ -112,6 +112,7 @@ const FLOW_NOTE_SIZE = 176;
 const FLOW_NOTE_PAD = 14;
 const FLOW_IMAGE_SIZE = { width: 240, height: 180 };
 const FLOW_DOCUMENT_SIZE = { width: 240, height: 76 };
+const FLOW_TELEPORT_SIZE = { width: 200, height: 56 };
 const FLOW_TEXT_MAX_WIDTH = 320;
 const FLOW_TEXT_MIN_WIDTH = 40;
 const FLOW_TEXT_PAD_X = 4;
@@ -629,6 +630,7 @@ function flowNodeSize(node) {
   const size = isObject(s) && Number.isFinite(s.width) && Number.isFinite(s.height) && s.width > 0 && s.height > 0 ? s : null;
   if (shape === 'image') return size ? { width: size.width, height: size.height } : FLOW_IMAGE_SIZE;
   if (shape === 'document') return FLOW_DOCUMENT_SIZE;
+  if (shape === 'teleport') return FLOW_TELEPORT_SIZE;
 
   const label = typeof node.label === 'string' ? node.label : '';
   const detail = typeof node.detail === 'string' ? node.detail : '';

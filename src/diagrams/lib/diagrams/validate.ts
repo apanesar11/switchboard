@@ -35,6 +35,7 @@ import {
   FLOW_TEXT_SIZES,
   FLOW_TONES,
   FLOW_WORKSPACE_ID_MAX_LENGTH,
+  TELEPORT_LABEL,
   TERMINAL_FONT_MAX,
   TERMINAL_FONT_MIN,
   isFlowSizedShape,
@@ -335,8 +336,11 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
     const shape = optionalEnum<FlowShape>(entry.shape, FLOW_SHAPES, where, "shape")
     // Switchboard: a terminal is labelled with its workspace's id, whatever it says.
     const workspace = shape === "terminal" ? terminalWorkspace(entry.workspace, where) : undefined
+    // Switchboard: and a teleport always says "Teleport".
     const label = workspace !== undefined
       ? workspace
+      : shape === "teleport"
+      ? TELEPORT_LABEL
       : shape === "note"
       ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? "")
       : text(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText)
@@ -389,8 +393,19 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       workspace,
       font: shape === "terminal" ? terminalFont(entry.font) : undefined,
       minimized: shape === "terminal" && entry.minimized === true ? true : undefined,
+      // Switchboard: a teleport's destination, resolved once every id is known (below).
+      teleportTo: shape === "teleport" && typeof entry.teleportTo === "string" ? entry.teleportTo : undefined,
     }
   })
+
+  // Switchboard: a teleport's destination is another node's id, spelt as that node
+  // spells it. One that names no node (it was deleted) or the teleport itself is
+  // dropped rather than failing the board: the teleport then asks for a destination.
+  for (const node of nodes) {
+    if (node.teleportTo === undefined) continue
+    const found = byKey.get(node.teleportTo.trim().toLowerCase())
+    node.teleportTo = found !== undefined && found !== node.id ? found : undefined
+  }
 
   const rawEdges = array(raw.edges, "", "edges")
 

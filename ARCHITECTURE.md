@@ -815,6 +815,32 @@ set outright; a pane gone part-way jumps to the end, a pan or zoom by hand wins,
 board already off screen is framed at once, not animated, when it is back. `npm run
 test:diagrams` covers the layout and folding (`scripts/test-flow-layout.js`).
 
+**A teleport takes the view across the board** (added 2026-10-13, the user's ask: "a
+button … When you click on it, it'll take you to another completely separate node"). A
+`shape: "teleport"` node is always labelled "Teleport", is always `FLOW_TELEPORT_SIZE`, and
+names where it goes in `teleportTo`, another node's id — kept as that node spells it,
+dropped by the validator when it names no node or the teleport itself, and by
+`flowSpecFromCanvas` once that node has gone, so a board never saves a dangling one; a
+republish from a terminal keeps it (`carryOverFlowLayout`) while the node is still there.
+It is a property rather than an arrow on purpose: an arrow across the board would draw
+the very line a teleport exists to avoid, and would hang the destination off the
+teleport's branch, where Tab's layout would move it. Arrows into or out of one are still
+ordinary arrows (an off-page connector). The rail's **Teleport** (P) places one and
+waits for its destination: the next node clicked is it (one undo step), Escape or a click
+on the pane leaves it without; **Change destination** (the crosshair on its corner on hover,
+or its toolbar) waits again. A click on a teleport — `onNodeClick`, so a drag never
+counts, and not with ⇧ or ⌘, which select — or Enter with it selected opens whatever
+folds its destination away (`unfoldTo`), selects it, flies there
+(`DiagramNodes.tsx teleportViewport`: life size or the zoom it was at, further out only
+for a node too big to fit) and rings it; **Back** (a stack of the views before each
+teleport, `TELEPORT_BACK_LIMIT`) flies back and selects the teleport. The face reads its
+destination's words from React Flow's store, so a rename shows at once, and a destination
+deleted, cut or condensed away is let go of in memory as well, so a new node given its id
+never quietly becomes it. ✦ Answer's question path walks past a teleport and Condense
+refuses one; a copy pasted with its destination goes to the pasted copy, and pasted
+without it, to the same node on the same board only. An archived board's read-only
+canvas flies there too, without Back.
+
 **Condense replaces an explored discussion.** A rectangle selection of connected text
 nodes, or sibling branches sharing an outside parent, gets **✦ Condense** in the
 floating toolbar; ⌘I dispatches to it for multiple selected nodes. The complete selected

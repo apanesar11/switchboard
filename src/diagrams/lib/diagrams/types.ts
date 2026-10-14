@@ -49,6 +49,8 @@ export type DiagramSpec = FlowSpec
 // Switchboard: and a "terminal" — a workspace's live terminal pinned to the
 // whiteboard (it needs `workspace`). Only the editor makes one; it is never
 // asked of an author, and no answer, condense or copy ever writes one.
+// Switchboard: and a "teleport" — a button that, clicked, takes the view to
+// another node on the same board (`teleportTo`). Its label is always "Teleport".
 export const FLOW_SHAPES = [
   "box",
   "rounded",
@@ -59,6 +61,7 @@ export const FLOW_SHAPES = [
   "image",
   "document",
   "terminal",
+  "teleport",
 ] as const
 
 export type FlowShape = (typeof FLOW_SHAPES)[number]
@@ -214,6 +217,13 @@ export type FlowNodeSpec = {
   font?: number
   /** Switchboard: a terminal folded to its title bar, in place. */
   minimized?: boolean
+  /**
+   * Switchboard: the id of the node a "teleport" takes you to — any other node on
+   * the board, and nothing joins the two on the canvas. Only kept on a teleport,
+   * and only while that node is still there; absent, the teleport has no
+   * destination yet and a click asks for one.
+   */
+  teleportTo?: string
 }
 
 export type FlowEdgeSpec = {
@@ -333,6 +343,10 @@ export const FLOW_TERMINAL_MIN_SIZE: FlowSize = { width: 280, height: 140 }
  * open again at the size it was pinned at.
  */
 export const FLOW_TERMINAL_FLOOR: FlowSize = { width: 96, height: TERMINAL_HEADER + 16 }
+
+/** Switchboard: what a teleport always says, and the size it is drawn at. */
+export const TELEPORT_LABEL = "Teleport"
+export const FLOW_TELEPORT_SIZE: FlowSize = { width: 200, height: 56 }
 
 /** A rectangle on screen, in client (window) pixels. */
 export type ClientRect = { left: number; top: number; width: number; height: number }

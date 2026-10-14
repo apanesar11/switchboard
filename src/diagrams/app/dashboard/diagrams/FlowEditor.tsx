@@ -48,6 +48,11 @@
 // branches already explored. The who-answers menu says how far it has got and offers
 // New conversation; a CLI's answer asked while another of the board's is on its way
 // waits its turn, and the card over the strip says so.
+// Switchboard: a teleport (the rail's Teleport, P) is a node that, clicked, flies the
+// view to another node on the board — any node, joined to it by nothing drawn. Placed,
+// it asks for its destination at once: the next node clicked is where it goes (Change
+// destination asks again). A click on it selects where it landed and offers Back,
+// which puts the view where it was; Enter does the same from the keyboard.
 // Switchboard: a workspace's terminal can be pinned to the board as a node of its
 // own ("terminal"). The node is only a frame — header, buttons, a dark body — and
 // the host lays the live terminal over its body itself, from the geometry this
@@ -121,6 +126,7 @@ import {
   type NodeChange,
   type NodeProps,
   type ReactFlowState,
+  type Viewport,
 } from "@xyflow/react"
 import {
   RiAddLine,
@@ -142,8 +148,10 @@ import {
   RiIndentDecrease,
   RiIndentIncrease,
   RiCloseLine,
+  RiCrosshair2Line,
   RiCursorLine,
   RiDeleteBinLine,
+  RiDoorOpenLine,
   RiErrorWarningLine,
   RiFileCopyLine,
   RiFolderImageLine,
@@ -229,6 +237,7 @@ import {
   TERMINAL_FONT_MIN,
   TERMINAL_HEADER,
   TERMINAL_MIN_FONT,
+  TELEPORT_LABEL,
   isFlowBoxShape,
   type ClientRect,
   type TerminalSlot,
@@ -289,6 +298,8 @@ import { DiagramFileCopyContext } from "./DiagramFileCopy"
 import {
   FlowBox,
   FLOW_TEXT_WRAP,
+  TELEPORT_DURATION_MS,
+  teleportViewport,
   flowLabelClass,
   flowLabelStyle,
   FLOW_SIDE_POSITIONS,
@@ -338,8 +349,9 @@ const REVEAL_MARGIN = { left: 84, right: 32, top: 72, bottom: 64 }
 /**
  * What a click on the empty canvas does: select (dragging draws a selection
  * box), pan (dragging moves the view), or place a box, a note or a text.
+ * Switchboard: or a teleport.
  */
-type Tool = "select" | "hand" | "shape" | "note" | "text" | "document"
+type Tool = "select" | "hand" | "shape" | "note" | "text" | "document" | "teleport"
 
 /** A ✦ Answer being waited for. */
 type Asking = {
@@ -417,7 +429,7 @@ function notReady(provider: ProviderStatus): AnswerFailure | null {
 
 /**
  * The single-letter keys for the tools, and "i" for an image. Switchboard: "g"
- * for Google Images.
+ * for Google Images, "p" for a teleport (a portal).
  */
 const TOOL_KEYS: Record<string, Tool | "image" | "images"> = {
   v: "select",
@@ -427,7 +439,13 @@ const TOOL_KEYS: Record<string, Tool | "image" | "images"> = {
   t: "text",
   i: "image",
   g: "images",
+  p: "teleport",
 }
+
+/** Switchboard: how many places Back can step back through. */
+const TELEPORT_BACK_LIMIT = 20
+/** Switchboard: how long the ring round a teleport's destination is on the page. */
+const TELEPORT_ARRIVAL_MS = 2_000
 
 // What a free text and a note show while they are empty and being typed in.
 const TEXT_PLACEHOLDER = "Type something"
@@ -696,8 +714,14 @@ function isText(box: FlowBoxNodeData): boolean {
 
 /** Whether a node has text you can edit directly on the canvas. */
 function hasText(box: FlowBoxNodeData): boolean {
-  // Switchboard: nor has a pinned terminal — its label is only its workspace.
-  return box.shape !== "image" && box.shape !== "document" && box.shape !== "terminal"
+  // Switchboard: nor has a pinned terminal — its label is only its workspace — nor a
+  // teleport, which always says "Teleport".
+  return box.shape !== "image" && box.shape !== "document" && box.shape !== "terminal" && box.shape !== "teleport"
+}
+
+/** Switchboard: whether `node` is a teleport. */
+function isTeleport(node: Node): boolean {
+  return (node.data as FlowBoxNodeData).shape === "teleport"
 }
 
 /** Switchboard: whether `node` is a pinned terminal. */
@@ -806,6 +830,8 @@ function deselected<T extends { selected?: boolean }>(items: T[]): T[] {
 // boxes from an older copy.
 type FlowCopy = {
   documents?: Promise<Map<string, string>>
+  /** Switchboard: the board it was copied from — where a teleport's destination is. */
+  board: string
   text: string
   nodes: { id: string; position: { x: number; y: number }; width?: number; height?: number; data: FlowBoxNodeData }[]
   edges: {
@@ -949,6 +975,10 @@ type EditorContextValue = {
   /** Collapsed nodes keep their hidden-node count visible on the canvas. */
   folds: ReadonlyMap<string, FoldBadge>
   expandFold: (id: string) => void
+  /** Switchboard: the teleport whose destination the next node clicked becomes. */
+  pickingId: string | null
+  /** Switchboard: a teleport's Change destination. */
+  pickDestination: (id: string) => void
 }
 
 // How the boxes and arrows reach the editor's state. A context rather than
@@ -1482,7 +1512,8 @@ function EditableBoxNode({ id, data, selected }: NodeProps) {
       <div
         aria-hidden="true"
         className={cx(
-          "pointer-events-none absolute -inset-1 rounded-[10px] border-2 transition-opacity",
+          "pointer-events-none absolute -inset-1 border-2 transition-opacity",
+          box.shape === "teleport" ? "rounded-full" : "rounded-[10px]",
           selected
             ? "border-brand opacity-100"
             : "border-brand/40 opacity-0 group-hover:opacity-100",
@@ -1500,6 +1531,31 @@ function EditableBoxNode({ id, data, selected }: NodeProps) {
         <div
           aria-hidden="true"
           className="pointer-events-none absolute -inset-2 animate-pulse rounded-xl border-2 border-violet-400 dark:border-violet-500"
+        />
+      ) : null}
+      {/* Switchboard: a teleport's Change destination, over its edge on hover — a
+          click on the teleport itself goes there. nodrag: a press here is not a drag. */}
+      {editor !== null && box.shape === "teleport" && interactive && !editor.pickingId ? (
+        <button
+          type="button"
+          aria-label="Change destination"
+          title="Change destination"
+          className={cx(
+            "flow-teleport-retarget nodrag nopan transition-opacity",
+            selected ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+          )}
+          onClick={(event) => {
+            event.stopPropagation()
+            editor.pickDestination(id)
+          }}
+        >
+          <RiCrosshair2Line className="size-3.5" aria-hidden="true" />
+        </button>
+      ) : null}
+      {editor !== null && editor.pickingId === id ? (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -inset-2 animate-pulse rounded-full border-2 border-indigo-400 dark:border-indigo-500"
         />
       ) : null}
       {/* One dot per side, outside the (clippable) box for the same reason.
@@ -1761,6 +1817,12 @@ function FlowEditorCanvas({
   const [tool, setTool] = useState<Tool>("select")
   // Which box the shape tool places — the last one picked from its menu.
   const [shapeChoice, setShapeChoice] = useState<FlowBoxShape>("rounded")
+  // Switchboard: teleports. The one whose destination the next node clicked becomes;
+  // where the view was before each teleport, latest last, for Back; and the node a
+  // teleport just landed on, ringed for a moment (serial: a ring per landing).
+  const [picking, setPicking] = useState<string | null>(null)
+  const [teleportBack, setTeleportBack] = useState<{ viewport: Viewport; from: string }[]>([])
+  const [arrival, setArrival] = useState<{ id: string; serial: number } | null>(null)
 
   // ✦ Answer. Switchboard: any number at once, one per box — `askings` are
   // the answers being waited for, oldest first (the box that asked, and what
@@ -1795,7 +1857,7 @@ function FlowEditorCanvas({
     const timer = setTimeout(() => setAnswered(null), ANSWERED_NOTICE_MS)
     return () => clearTimeout(timer)
   }, [answered])
-  const placing = tool === "shape" || tool === "note" || tool === "text" || tool === "document"
+  const placing = tool === "shape" || tool === "note" || tool === "text" || tool === "document" || tool === "teleport"
   // For an upload landing later, which mustn't act on the tool it started with.
   const toolRef = useRef(tool)
   useEffect(() => {
@@ -2715,9 +2777,21 @@ function FlowEditorCanvas({
     openDocument(nodesRef.current.find((node) => node.id === inserted.id)!, true)
   }
 
+  // Switchboard: a teleport at `at`, clear of what is there, and then the click that
+  // says where it goes.
+  function placeTeleport(at: { x: number; y: number }) {
+    record()
+    const box: FlowBoxNodeData = plainBox({ label: TELEPORT_LABEL, shape: "teleport", tone: "default" })
+    const { width, height } = boxSize(box)
+    const position = clearOfBoxes({ x: snap(at.x - width / 2), y: snap(at.y - height / 2), width, height }, nodesRef.current.map(rectOf))
+    const inserted = insertBox(box, position)
+    pickDestination(inserted.id)
+  }
+
   // Places a toolbar item at the click or drop, centred except for free text.
-  function placeNew(shape: FlowBoxShape | "note" | "text" | "document", at: { x: number; y: number }) {
+  function placeNew(shape: FlowBoxShape | "note" | "text" | "document" | "teleport", at: { x: number; y: number }) {
     if (shape === "document") { void placeDocument(at); return }
+    if (shape === "teleport") { placeTeleport(at); return }
     record()
     const item = PALETTE.find((entry) => entry.shape === shape)
     const box =
@@ -2923,6 +2997,9 @@ function FlowEditorCanvas({
   // A click on empty canvas with a placing tool out puts the thing there, and
   // the tool goes back to Select — the next click is to type or to arrange.
   function onPaneClick(event: React.MouseEvent) {
+    // Switchboard: a click on nothing while a teleport waits for its destination
+    // leaves it without one.
+    if (picking !== null) { setPicking(null); return }
     if (!placing) return
     placeNew(
       tool === "shape" ? shapeChoice : tool,
@@ -2951,8 +3028,9 @@ function FlowEditorCanvas({
     // there is no picture to repeat. A note keeps its size; a text runs as
     // wide as its own words. Switchboard: a box resized by hand keeps its size too.
     // Switchboard: after a pinned terminal too — there is no second shell to add.
+    // Switchboard: and after a teleport, which is a way across the board, not a step.
     const box: FlowBoxNodeData =
-      from.shape === "image" || from.shape === "document" || from.shape === "terminal"
+      from.shape === "image" || from.shape === "document" || from.shape === "terminal" || from.shape === "teleport"
         ? plainBox({ label: "", shape: "rounded", tone: "default" })
         : {
             ...from,
@@ -3121,6 +3199,115 @@ function FlowEditorCanvas({
     return true
   }
 
+  // ─── Switchboard: teleports ───
+
+  // Change destination, or a teleport just placed: the next node clicked is where it
+  // goes. Escape, or a click on nothing, leaves it as it was.
+  function pickDestination(id: string) {
+    changeEditing(null)
+    setImageMenu(false)
+    setTool("select")
+    setPicking(id)
+  }
+
+  function cancelPicking(): boolean {
+    if (picking === null) return false
+    setPicking(null)
+    return true
+  }
+
+  // The node clicked while picking: where `teleportId` goes from now on (one undo
+  // step), and the teleport selected again, with its toolbar. Never itself.
+  function chooseDestination(teleportId: string, target: Node) {
+    setPicking(null)
+    const teleport = nodesRef.current.find((node) => node.id === teleportId)
+    if (!teleport || !isTeleport(teleport) || target.id === teleportId) return
+    if ((teleport.data as FlowBoxNodeData).teleportTo !== target.id) {
+      updateNode(teleportId, { teleportTo: target.id })
+    }
+    select(teleport)
+  }
+
+  // A click on a teleport, or Enter on one: the view flies to the node it goes to,
+  // which is selected and ringed, and Back puts the view where it was. One with
+  // nowhere to go asks where instead. A destination folded away is opened first.
+  function teleport(node: Node) {
+    const to = (node.data as FlowBoxNodeData).teleportTo
+    const target = to ? nodesRef.current.find((candidate) => candidate.id === to) : undefined
+    if (!target || target.id === node.id) {
+      pickDestination(node.id)
+      return
+    }
+    const folded = fold.hidden.has(target.id)
+    if (!unfoldTo(target.id)) return
+    const from = getViewport()
+    const fly = () => {
+      if (!alive.current) return
+      const landed = nodesRef.current.find((candidate) => candidate.id === target.id)
+      const bounds = wrapperRef.current?.getBoundingClientRect()
+      if (!landed || !bounds) return
+      changeEditing(null)
+      select(landed)
+      setTeleportBack((stack) => [...stack.slice(-(TELEPORT_BACK_LIMIT - 1)), { viewport: from, from: node.id }])
+      setArrival((last) => ({ id: landed.id, serial: (last?.serial ?? 0) + 1 }))
+      void setViewport(teleportViewport(rectOf(landed), bounds, from.zoom), { duration: TELEPORT_DURATION_MS })
+    }
+    // Opened, the branch is laid out again: it is flown to once it is where it lands.
+    if (folded) requestAnimationFrame(() => requestAnimationFrame(fly))
+    else fly()
+  }
+
+  // Back: the view as it was before the last teleport, and the teleport that left
+  // from there selected again.
+  function goBack() {
+    const last = teleportBack[teleportBack.length - 1]
+    if (!last) return
+    setTeleportBack((stack) => stack.slice(0, -1))
+    setArrival(null)
+    changeEditing(null)
+    const from = nodesRef.current.find((node) => node.id === last.from)
+    if (from && !fold.hidden.has(from.id)) select(from)
+    void setViewport(last.viewport, { duration: TELEPORT_DURATION_MS })
+  }
+
+  // For the nodes, through the context: one function for the editor's whole life.
+  const pickRef = useRef(pickDestination)
+  useEffect(() => {
+    pickRef.current = pickDestination
+  })
+  const pickDestinationStable = useCallback((id: string) => pickRef.current(id), [])
+
+  // A teleport that went away (deleted, undone, cut) is no longer waited on.
+  const pickingNode = picking === null ? undefined : nodes.find((node) => node.id === picking && isTeleport(node))
+  useEffect(() => {
+    if (picking !== null && !pickingNode) setPicking(null)
+  }, [picking, pickingNode])
+
+  // A node a teleport went to that has gone (deleted, cut, condensed) is let go of
+  // now, rather than when it is saved (flowSpecFromCanvas leaves it out) — or a new
+  // node given its id would quietly become where the teleport goes.
+  useEffect(() => {
+    const dangling = (ids: Set<string>, node: Node) => {
+      const to = (node.data as FlowBoxNodeData).teleportTo
+      return to !== undefined && !ids.has(to)
+    }
+    if (!nodes.some((node) => (node.data as FlowBoxNodeData).teleportTo !== undefined)) return
+    const ids = new Set(nodes.map((node) => node.id))
+    if (!nodes.some((node) => dangling(ids, node))) return
+    setNodes((now) => {
+      const present = new Set(now.map((node) => node.id))
+      return now.map((node) =>
+        dangling(present, node) ? { ...node, data: { ...(node.data as FlowBoxNodeData), teleportTo: undefined } } : node,
+      )
+    })
+  }, [nodes])
+
+  useEffect(() => {
+    if (arrival === null) return
+    const timer = setTimeout(() => setArrival(null), TELEPORT_ARRIVAL_MS)
+    return () => clearTimeout(timer)
+  }, [arrival])
+
   function duplicate(node: Node, documentCopied = false) {
     const original = node.data as FlowBoxNodeData
     // Switchboard: one terminal per workspace on a board — a pinned one has no copy.
@@ -3184,6 +3371,7 @@ function FlowEditorCanvas({
       .join("\n")
     const documentIds = [...new Set(chosen.map((node) => (node.data as FlowBoxNodeData).documentId).filter((id): id is string => !!id))]
     flowCopy = {
+      board: boardId,
       // Capture the words at Copy time, including edits awaiting autosave. A paste
       // into any workspace creates independent Markdown files from this snapshot.
       documents: documentIds.length ? Promise.all(documentIds.map(async (id) => {
@@ -3265,20 +3453,24 @@ function FlowEditorCanvas({
     const current = nodesRef.current
     const taken = current.map((node) => node.id)
     const renamed = new Map<string, string>()
-    const added: Node[] = copy.nodes.map((node) => {
+    for (const node of copy.nodes) {
       const id = nextFlowNodeId(taken, node.data.label)
       taken.push(id)
       renamed.set(node.id, id)
-      return {
-        id,
-        type: EDIT_NODE_TYPE,
-        position: { x: node.position.x + dx, y: node.position.y + dy },
-        width: node.width,
-        height: node.height,
-        data: { ...node.data },
-        selected: true,
-      }
-    })
+    }
+    // Switchboard: a teleport pasted with where it goes goes to the copy of it; pasted
+    // without, it still goes to the same node — on the board it was copied from.
+    const destination = (to: string | undefined) =>
+      to === undefined ? undefined : (renamed.get(to) ?? (copy.board === boardId ? to : undefined))
+    const added: Node[] = copy.nodes.map((node) => ({
+      id: renamed.get(node.id)!,
+      type: EDIT_NODE_TYPE,
+      position: { x: node.position.x + dx, y: node.position.y + dy },
+      width: node.width,
+      height: node.height,
+      data: { ...node.data, teleportTo: destination(node.data.teleportTo) },
+      selected: true,
+    }))
     const arrows = copy.edges.map((edge) =>
       editableEdge(
         {
@@ -4031,7 +4223,7 @@ function FlowEditorCanvas({
     }
     const dropped = event.dataTransfer.getData(DRAG_MIME)
     const shape =
-      dropped === "note" || dropped === "text" || dropped === "document"
+      dropped === "note" || dropped === "text" || dropped === "document" || dropped === "teleport"
         ? dropped
         : FLOW_BOX_SHAPES.find((option) => option === dropped)
     if (!shape) return
@@ -4433,6 +4625,8 @@ function FlowEditorCanvas({
     }
     if (soleNode) {
       if ((soleNode.data as FlowBoxNodeData).shape === "document") { openDocument(soleNode); return true }
+      // Switchboard: Enter on a teleport goes where it goes.
+      if (isTeleport(soleNode)) { teleport(soleNode); return true }
       if (!hasText(soleNode.data as FlowBoxNodeData)) return false
       changeEditing(soleNode.id)
       return true
@@ -4462,6 +4656,7 @@ function FlowEditorCanvas({
     cut: () => boolean
     pasteBoxes: (text: string) => boolean
     adopt: (spec: FlowSpec) => void
+    cancelPicking: () => boolean
   }>({
     undo,
     redo,
@@ -4480,6 +4675,7 @@ function FlowEditorCanvas({
     copy: () => false,
     cut: () => false,
     pasteBoxes: () => false,
+    cancelPicking: () => false,
   })
   useEffect(() => {
     shortcutsRef.current = {
@@ -4492,6 +4688,7 @@ function FlowEditorCanvas({
       go,
       nudge,
       clearSelection,
+      cancelPicking,
       duplicate: () => {
         if (!soleNode || editingNode) return false
         duplicate(soleNode)
@@ -4650,12 +4847,13 @@ function FlowEditorCanvas({
         event.key === "Escape" &&
         !event.shiftKey &&
         // An open menu or panel closes first (its own listener does that),
-        // then a tool goes away, then an answer being waited for is stopped
+        // then a teleport stops waiting for its destination (Switchboard), then
+        // a tool goes away, then an answer being waited for is stopped
         // (only from its own box, or with nothing selected — a deselecting
         // Escape mustn't throw away minutes of thinking), then the selection,
         // then (the page's own Escape) full screen.
         !wrapperRef.current?.querySelector("[data-flow-popover]") &&
-        (shortcuts.tool("Escape") || shortcuts.escapeAsking() || shortcuts.clearSelection())
+        (shortcuts.cancelPicking() || shortcuts.tool("Escape") || shortcuts.escapeAsking() || shortcuts.clearSelection())
       ) {
         event.preventDefault()
         event.stopPropagation()
@@ -4813,6 +5011,8 @@ function FlowEditorCanvas({
       answeringIds,
       folds,
       expandFold,
+      pickingId: picking,
+      pickDestination: pickDestinationStable,
     }),
     [
       editingId,
@@ -4831,8 +5031,14 @@ function FlowEditorCanvas({
       answeringIds,
       folds,
       expandFold,
+      picking,
+      pickDestinationStable,
     ],
   )
+
+  // Switchboard: the node a teleport landed on, where it is now.
+  const arrivalNode = arrival === null ? undefined : nodes.find((node) => node.id === arrival.id)
+  const arrivalRect = arrivalNode ? rectOf(arrivalNode) : null
 
   // The boxes the floating toolbar sits over: the one being typed in, or the
   // selection.
@@ -4858,8 +5064,12 @@ function FlowEditorCanvas({
             "relative h-full flex-1 bg-gray-50 dark:bg-gray-900",
             imagesOpen ? "min-w-[360px]" : "min-w-0",
             FLOW_EDGE_THEME,
-            // A placing tool aims rather than points.
-            placing && "[&_.react-flow__pane]:!cursor-crosshair",
+            // A placing tool aims rather than points. Switchboard: in styles.css — Tailwind
+            // reads `__` in an arbitrary variant as two spaces, so `[&_.react-flow__pane]`
+            // never matched the pane.
+            placing && "flow-placing",
+            // Switchboard: and so does a teleport waiting for its destination, at nodes.
+            picking !== null && "flow-picking",
           )}
           onDoubleClick={onCanvasDoubleClick}
           onPointerMove={(event) => {
@@ -4927,6 +5137,19 @@ function FlowEditorCanvas({
             onNodeDoubleClick={(_, node) => {
               if (tool !== "hand" && (node.data as FlowBoxNodeData).shape === "document") openDocument(node)
               if (tool !== "hand" && hasText(node.data as FlowBoxNodeData)) changeEditing(node.id)
+            }}
+            onNodeClick={(event, node) => {
+              // Switchboard: while a teleport waits for its destination, the node
+              // clicked is it.
+              if (picking !== null) {
+                chooseDestination(picking, node)
+                return
+              }
+              // A click on a teleport goes where it goes — not with ⇧ or ⌘ held, which
+              // select it as they would any node, and not with the hand out.
+              if (tool !== "select" || event.shiftKey || event.metaKey || event.ctrlKey) return
+              const clicked = nodesRef.current.find((candidate) => candidate.id === node.id)
+              if (clicked && isTeleport(clicked)) teleport(clicked)
             }}
             onPaneClick={onPaneClick}
             onEdgeDoubleClick={() => {
@@ -5029,6 +5252,15 @@ function FlowEditorCanvas({
                       : undefined
                   }
                   onOpenDocument={soleNode && (soleNode.data as FlowBoxNodeData).shape === "document" ? () => openDocument(soleNode) : undefined}
+                  teleport={
+                    soleNode && isTeleport(soleNode)
+                      ? {
+                          linked: (soleNode.data as FlowBoxNodeData).teleportTo !== undefined,
+                          onGo: () => teleport(soleNode),
+                          onPick: () => pickDestination(soleNode.id),
+                        }
+                      : undefined
+                  }
                   onDuplicate={soleNode && !isTerminal(soleNode) ? () => duplicate(soleNode) : undefined}
                   onDelete={deleteSelection}
                   branch={
@@ -5077,6 +5309,70 @@ function FlowEditorCanvas({
                 />
               )}
             </FloatingBar>
+
+            {/* Switchboard: where a teleport landed, ringed for a moment. */}
+            {arrivalRect ? (
+              <ViewportPortal key={`arrival-${arrival?.serial}`}>
+                <div
+                  aria-hidden="true"
+                  className="flow-teleport-arrival"
+                  style={{
+                    left: arrivalRect.x - 8,
+                    top: arrivalRect.y - 8,
+                    width: arrivalRect.width + 16,
+                    height: arrivalRect.height + 16,
+                    animationDelay: `${Math.round(TELEPORT_DURATION_MS * 0.6)}ms`,
+                  }}
+                />
+              </ViewportPortal>
+            ) : null}
+
+            {/* Switchboard: a teleport waiting for its destination says so, and Back
+                takes the view to where it was before the last teleport. */}
+            {pickingNode || teleportBack.length > 0 ? (
+              <Panel position="top-center" className="!mt-3">
+                <div
+                  data-canvas-overlay
+                  className="flex items-center gap-1 rounded-full bg-gray-900 py-1 pl-3 pr-1 text-xs text-white shadow-lg ring-1 ring-black/10 dark:bg-gray-800 dark:ring-white/10"
+                >
+                  {pickingNode ? (
+                    <>
+                      <RiCrosshair2Line className="size-3.5 shrink-0 text-indigo-300" aria-hidden="true" />
+                      <span role="status" className="px-1">Click the box this teleport goes to</span>
+                      <button
+                        type="button"
+                        onClick={() => setPicking(null)}
+                        className={cx("flex items-center gap-1.5 rounded-full px-2.5 py-1 text-gray-300 hover:bg-white/10 hover:text-white", focusRing)}
+                      >
+                        Cancel
+                        <kbd className="rounded bg-white/15 px-1 font-sans text-[10px] text-gray-200">Esc</kbd>
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={goBack}
+                        title="Back to where you were before the last teleport"
+                        className={cx("-ml-2 flex items-center gap-1.5 rounded-full px-2.5 py-1 font-medium hover:bg-white/10", focusRing)}
+                      >
+                        <RiArrowGoBackLine className="size-3.5" aria-hidden="true" />
+                        Back
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Dismiss"
+                        title="Dismiss"
+                        onClick={() => setTeleportBack([])}
+                        className={cx("flex size-6 items-center justify-center rounded-full text-gray-400 hover:bg-white/10 hover:text-white", focusRing)}
+                      >
+                        <RiCloseLine className="size-3.5" aria-hidden="true" />
+                      </button>
+                    </>
+                  )}
+                </div>
+              </Panel>
+            ) : null}
 
             {ghosts.map((ghost) => (
               <ViewportPortal key={ghost.serial}>
@@ -5622,6 +5918,7 @@ function BoxBar({
   onChange,
   onEditText,
   onOpenDocument,
+  teleport,
   onDuplicate,
   onDelete,
   ai,
@@ -5634,6 +5931,8 @@ function BoxBar({
   onChange: (patch: Partial<FlowBoxNodeData>) => void
   onOpenDocument?: () => void
   onEditText?: () => void
+  /** Switchboard: for one teleport selected on its own — go there, or say where. */
+  teleport?: { linked: boolean; onGo: () => void; onPick: () => void }
   onDuplicate?: () => void
   onDelete: () => void
   /** ✦ Answer, for one box with text selected on its own. */
@@ -5648,8 +5947,11 @@ function BoxBar({
   const tone = shared(boxes, "tone")
   const dashed = shared(boxes, "dashed")
   const allBoxes = boxes.every((box) => isFlowBoxShape(box.shape))
-  // Switchboard: nor a pinned terminal, which is the terminal's colours.
-  const colourable = boxes.every((box) => box.shape !== "image" && box.shape !== "document" && box.shape !== "terminal")
+  // Switchboard: nor a pinned terminal, which is the terminal's colours, nor a
+  // teleport, which is a teleport's.
+  const colourable = boxes.every(
+    (box) => box.shape !== "image" && box.shape !== "document" && box.shape !== "terminal" && box.shape !== "teleport",
+  )
   // Swatches drawn as notes or ink only when every node selected is one.
   const swatch: "box" | "note" | "text" =
     sharedShape === "note" ? "note" : sharedShape === "text" ? "text" : "box"
@@ -5668,6 +5970,19 @@ function BoxBar({
         </>
       ) : null}
       {onOpenDocument ? <BarButton label="Open document · Enter" onClick={onOpenDocument}><RiFileTextLine className="size-4" aria-hidden="true" /></BarButton> : null}
+      {teleport ? (
+        <>
+          {teleport.linked ? (
+            <BarButton label="Teleport · Enter" onClick={teleport.onGo}>
+              <RiDoorOpenLine className="size-4" aria-hidden="true" />
+            </BarButton>
+          ) : null}
+          <BarButton label={teleport.linked ? "Change destination" : "Choose destination"} onClick={teleport.onPick}>
+            <RiCrosshair2Line className="size-4" aria-hidden="true" />
+          </BarButton>
+          <BarDivider />
+        </>
+      ) : null}
       {onEditText ? (
         <>
           <BarButton label="Edit text · Enter" onClick={onEditText}>
@@ -7223,9 +7538,12 @@ function ToolRail({
             />
           ) : null}
         </div>
+        {/* Switchboard: a teleport — a button that takes the view to another node. */}
+        <RailButton label="Teleport" shortcut="P" active={tool === "teleport"} onClick={() => onTool(tool === "teleport" ? "select" : "teleport")} drag="teleport">
+          <RiDoorOpenLine className="size-4" aria-hidden="true" />
+        </RailButton>
 
-        {/* In two columns the image tool and this one share the last row. */}
-        {fit === "columns" ? null : <RailDivider />}
+        <RailDivider />
 
         <div className={anchor}>
           <RailButton
@@ -7252,10 +7570,10 @@ function ToolRail({
 type RailFit = "full" | "compact" | "columns"
 const RailFitContext = createContext<RailFit>("full")
 // The rail's height in the first two, from the classes above, RailButton's and
-// RailDivider's — 8 tools, 9 gaps, 2 dividers, the padding — with 8px clear above
-// and below. In two columns it is 125px.
-const RAIL_FULL_HEIGHT = 8 * 32 + 9 * 4 + 2 * 5 + 8 + 16
-const RAIL_COMPACT_HEIGHT = 8 * 28 + 9 * 2 + 2 * 1 + 4 + 16
+// RailDivider's — 9 tools, 10 gaps, 2 dividers, the padding — with 8px clear above
+// and below. In two columns it is 156px.
+const RAIL_FULL_HEIGHT = 9 * 32 + 10 * 4 + 2 * 5 + 8 + 16
+const RAIL_COMPACT_HEIGHT = 9 * 28 + 10 * 2 + 2 * 1 + 4 + 16
 function railFit(paneHeight: number): RailFit {
   // Not measured yet: as it always was.
   if (!(paneHeight > 0) || paneHeight >= RAIL_FULL_HEIGHT) return "full"
@@ -7393,7 +7711,7 @@ function RailButton({
    */
   expanded?: boolean
   onClick: () => void
-  drag?: FlowBoxShape | "note" | "text" | "document"
+  drag?: FlowBoxShape | "note" | "text" | "document" | "teleport"
   /** False while something it opened is showing where the tip would go. */
   tip?: boolean
   children: React.ReactNode
