@@ -291,8 +291,8 @@ export function teleportViewport(
 export const TELEPORT_DURATION_MS = 450
 
 /**
- * Switchboard: a teleport's face — a pill of its own colour, so it never reads as a
- * step, saying where it goes. The destination's words come from React Flow's own
+ * Switchboard: a teleport's face — a white pill with a door, set apart from a step by
+ * its shape and its icon, saying where it goes. The destination's words come from React Flow's own
  * store, so renaming that node renames it here too, on either canvas.
  */
 function TeleportFace({ to }: { to?: string }) {
