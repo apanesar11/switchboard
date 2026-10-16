@@ -31,8 +31,8 @@ To check a change: `npm run check` (every source file parses, and it names any f
 `ARCHITECTURE.md` lists that is not there yet), `npm run test:config` (configuration
 and workspace discovery), `npm run test:editor`, `npm run test:databases`,
 `npm run test:publish`, and `npm run test:diagrams` for the whiteboards — their store
-and its one-time migration, the layout, ✦ Answer and Google Images — all under plain
-Node in scratch folders. `npm run check:diagrams` type-checks the whiteboard editor.
+and its one-time migration, the layout, ✦ Answer, Google Images and YouTube links —
+all under plain Node in scratch folders. `npm run check:diagrams` type-checks the whiteboard editor.
 Three checks run the built editor in a hidden Electron window, with scratch data rather
 than your `~/.switchboard`: `npm run test:whiteboards:browser` (the Whiteboards screen,
 its tabs and the terminals on a board), `npm run test:documents:browser` and
@@ -166,7 +166,8 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   Images** on the picture tool (or G): Google's own image results open in a panel beside
   the canvas, searching the selected box's words, and a picture dragged out of it — or
   right-clicked ▸ Add Image to Whiteboard — goes onto the whiteboard like a dropped file,
-  at its full size rather than the thumbnail's. Hover over a picture or document and
+  at its full size rather than the thumbnail's. Paste or drop a YouTube link and it is
+  that video, playing on the whiteboard (**Videos**, below). Hover over a picture or document and
   click the copy button in its bottom-right corner to copy its local file path for
   pasting into a terminal. Document edits are saved before the path is copied; the
   document panel's `.md file` button does the same. Tab keeps a branch symmetrical
@@ -225,6 +226,23 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   selects a teleport without going anywhere. Delete the box it goes to and it says **No
   destination yet** until you pick another (⌘Z brings both back). Arrows can still point
   at a teleport, so it works as a flowchart's off-page connector.
+
+  **Videos** are YouTube's, played in a box on the whiteboard. Paste a YouTube link (⌘V)
+  and its video lands at the pointer; drop one — or a video's picture dragged off
+  YouTube — and it lands where you let go. Type or paste a link into a box and, when you
+  finish (Enter, **Done**, or a click elsewhere), a box whose words are only that link
+  becomes its video, where the box was and keeping its arrows; ⌘Z makes it the box again
+  (and it stays a box until you change the link). A link inside a sentence stays words.
+  A link's time (`t=1m30s`) is where the video starts, a Short stands up, and a link from
+  a playlist is its one video. The video is named for its title once YouTube says what
+  that is ("YouTube video" until then). Its strip, which you drag it by, has **Open on
+  YouTube** and, while it plays, **Stop**; under it is YouTube's picture of the video.
+  Click the picture (or select the video and press Enter) to play it there; Enter again
+  or Stop puts the picture back, and so does leaving the whiteboard or going in or out of
+  full screen. Resized from its sides or bottom corners, it keeps the video's shape. ⌘C
+  copies it as its YouTube link, its start included, so it pastes as a link anywhere else
+  and as a copy back on a whiteboard. Tab after a video adds a plain box. An archived
+  whiteboard plays its videos too.
 
   **✦ Answer** leads a box's toolbar (and ⌘I or ⌘↵): write a question in a box and the
   answer comes back as a box for each part it has, hanging off it, as one undo step. Several boxes
@@ -402,7 +420,11 @@ a print-mode session, which `claude --continue` and `claude --resume` there pass
 so yours always come back first (an older Claude Code may offer it too) — or a Codex
 thread; the whiteboard's file holds only which one, never the conversation itself. A whiteboard's Google Images panel is Google's own page, in a session of
 its own, and fetches a picture you add from it from wherever that picture lives; it
-loads nothing until you open it. Database browsing connects directly to the database
+loads nothing until you open it. A board's file keeps a YouTube video as its id, where
+it starts and its title, never an address. Its picture comes from YouTube's image
+server (i.ytimg.com) whenever the board is drawn; its title is asked of YouTube once,
+when the video is made (an oEmbed request to www.youtube.com, sent without cookies); and
+YouTube's player, from www.youtube-nocookie.com, loads only when you press Play. Database browsing connects directly to the database
 URI you supply, from the main process; credentials never return to the renderer.
 Dev commands also run in local shells. Claude usage
 uses the direct request described above; local port checks use sockets and system

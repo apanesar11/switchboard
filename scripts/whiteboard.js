@@ -64,6 +64,7 @@ function editorLib() {
         'export { parseDiagramSpec } from "./validate"',
         'export { layoutDiagram } from "./layout"',
         'export { carryOverFlowLayout } from "./flow-editor"',
+        'export { VIDEO_LABEL } from "./types"',
       ].join('\n'),
       resolveDir: dir,
       loader: 'ts',
@@ -220,7 +221,10 @@ function describeNode(node) {
   if (node.shape === 'terminal') return `the pinned ${node.workspace || node.label} terminal`;
   if (node.shape === 'teleport') return `${node.id} (a teleport${node.teleportTo ? ` to ${node.teleportTo}` : ''})`;
   const label = String(node.label || '').replace(/\s+/g, ' ').trim();
-  return `${node.id}${label ? ` ("${label.length > 40 ? label.slice(0, 39) + '…' : label}")` : ''}`;
+  const quoted = label.length > 40 ? label.slice(0, 39) + '…' : label;
+  // A video's label is its title, or the words every untitled video has.
+  if (node.shape === 'video') return `${node.id} (a YouTube video${label && label !== editorLib().VIDEO_LABEL ? ` "${quoted}"` : ''})`;
+  return `${node.id}${label ? ` ("${quoted}")` : ''}`;
 }
 
 // ── commands ───────────────────────────────────────────────────────────────

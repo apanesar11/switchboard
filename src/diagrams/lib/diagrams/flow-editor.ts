@@ -31,6 +31,7 @@ import {
   TERMINAL_FONT_MIN,
   TERMINAL_HEADER,
   TERMINAL_MIN_FONT,
+  VIDEO_LABEL,
   isFlowBoxShape,
   isFlowSizedShape,
   type FlowEdgeSpec,
@@ -112,16 +113,17 @@ export function flowSpecFromCanvas(
   const kept = new Set(nodes.filter((node) => !blank.has(node.id)).map((node) => node.id))
 
   const specNodes: FlowNodeSpec[] = nodes.filter((node) => !blank.has(node.id)).map((node) => {
-    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, answeredIn, detached, workspace, font, minimized, teleportTo } =
+    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, answeredIn, detached, workspace, font, minimized, teleportTo, videoId, videoStart } =
       node.data
     // Switchboard: a pinned terminal is labelled with its workspace, as the
-    // validator labels it — and a teleport "Teleport".
+    // validator labels it — a teleport "Teleport", and a video with no title
+    // "YouTube video".
     const terminal = shape === "terminal" ? (workspace ?? label) : undefined
     const cleanLabel =
       terminal ??
       (shape === "teleport" ? TELEPORT_LABEL : undefined) ??
       cleanBoxText(label) ??
-      (shape === "note" ? "" : UNTITLED_FLOW_LABEL)
+      (shape === "note" ? "" : shape === "video" ? VIDEO_LABEL : UNTITLED_FLOW_LABEL)
     const cleanDetail = cleanBoxText(detail)
     return {
       id: node.id,
@@ -159,6 +161,12 @@ export function flowSpecFromCanvas(
       teleportTo:
         shape === "teleport" && teleportTo && teleportTo !== node.id && kept.has(teleportTo)
           ? teleportTo
+          : undefined,
+      // Switchboard: the video a video plays, and where it starts.
+      videoId: shape === "video" ? videoId : undefined,
+      videoStart:
+        shape === "video" && videoStart !== undefined && Number.isInteger(videoStart) && videoStart > 0
+          ? videoStart
           : undefined,
     }
   })
@@ -782,8 +790,9 @@ export function tidyFlowTree(
   { pinImages = false }: { pinImages?: boolean } = {},
 ): Map<string, FlowPoint> {
   const unknown = new Set(revealed)
+  // A video is placed as deliberately as a picture is, and stays put as one does.
   const pinned = pinImages
-    ? new Set(boxes.filter((box) => box.shape === "image").map((box) => box.id))
+    ? new Set(boxes.filter((box) => box.shape === "image" || box.shape === "video").map((box) => box.id))
     : new Set<string>()
   const after = tidyTrees(
     boxes,
@@ -1044,6 +1053,9 @@ export function carryOverFlowLayout(
         (teleport && old.teleportTo && next.nodes.some((other) => other.id === old.teleportTo)
           ? old.teleportTo
           : undefined),
+      // Switchboard: a video's start is not carried. Like its id, it is what the
+      // video is, not how the board was arranged: a spec that leaves it out plays
+      // from the beginning.
     }
   })
   const edges = next.edges.map((edge) => {

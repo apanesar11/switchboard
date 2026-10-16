@@ -17,6 +17,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { test, after } = require('node:test');
+const esbuild = require('esbuild');
 
 const temps = [];
 function tempDir(label) {
@@ -34,6 +35,15 @@ const wb = require('../src/main/whiteboards');
 const { scopeSelector } = require('./build-diagrams');
 // Before any test writes: requiring the module must not have touched the disk.
 const leftByRequire = fs.readdirSync(temp);
+
+// The editor's own sizes (src/diagrams/lib/diagrams/types.ts), which main's thumbnail
+// mirrors by hand — bundled with esbuild, as test-flow-layout.js bundles them.
+const typesFile = path.join(tempDir('whiteboards-types'), 'types.js');
+esbuild.buildSync({
+  entryPoints: [path.join(__dirname, '..', 'src', 'diagrams', 'lib', 'diagrams', 'types.ts')],
+  outfile: typesFile, bundle: true, format: 'cjs', platform: 'node', logLevel: 'error',
+});
+const { FLOW_VIDEO_DEFAULT_SIZE } = require(typesFile);
 
 after(() => {
   if (previousConfig === undefined) delete process.env.SWITCHBOARD_CONFIG;
@@ -379,6 +389,29 @@ test('the thumbnail fits up to 14 positioned boxes inside a 4px margin of 40×30
   };
   assert.deepEqual((await wb.create({ folderId: null, name: 'Thumb sized', spec: sized })).data.thumb,
     [[4, 4, 15, 13.1], [24, 4, 12, 11.8], [2.5, 20.3, 6, 4], [24, 21, 12, 5]]);
+
+  // A video with no size of its own is the editor's FLOW_VIDEO_DEFAULT_SIZE, a 16:9
+  // player under its bar, and one resized is the size it was given — drawn exactly as
+  // pictures of those sizes are.
+  const videos = {
+    kind: 'flow',
+    nodes: [
+      { id: 'v', label: 'YouTube video', shape: 'video', videoId: 'exampleVid1', position: { x: 0, y: 0 } },
+      { id: 's', label: 'An example talk', shape: 'video', videoId: 'exampleVid2', size: { width: 640, height: 390 }, position: { x: 600, y: 100 } },
+    ],
+    edges: [],
+  };
+  const pictures = {
+    kind: 'flow',
+    nodes: [
+      { id: 'v', label: 'Picture', shape: 'image', src: 'https://example.com/fictional.png', size: FLOW_VIDEO_DEFAULT_SIZE, position: { x: 0, y: 0 } },
+      { id: 's', label: 'Picture', shape: 'image', src: 'https://example.com/fictional.png', size: { width: 640, height: 390 }, position: { x: 600, y: 100 } },
+    ],
+    edges: [],
+  };
+  const videoThumb = (await wb.create({ folderId: null, name: 'Thumb videos', spec: videos })).data.thumb;
+  assert.deepEqual(videoThumb, [[4, 4, 12.4, 13.5], [19.5, 8.5, 16.5, 17.5]]);
+  assert.deepEqual(videoThumb, (await wb.create({ folderId: null, name: 'Thumb pictures', spec: pictures })).data.thumb);
 
   // Boxes far apart are each far under a pixel: they are still drawn 6×4, about their
   // centres, and stay inside the frame.

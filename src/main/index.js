@@ -6,7 +6,7 @@
 // the work to git.js / github.js / runner.js, then shape the result into the
 // exact payload §4 promises.  Nothing here throws across IPC.
 
-const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeTheme, net, protocol, safeStorage, shell } = require('electron');
+const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeTheme, net, protocol, safeStorage, session, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -42,6 +42,9 @@ const whiteboards = require('./whiteboards.js');
 // Google Images beside a whiteboard (§4.17): the panel's <webview>, its session, and the
 // fetch that turns a picture dragged out of it into bytes saveImage() keeps.
 const images = require('./images.js');
+// YouTube videos on a whiteboard (§4.17): the player's Referer and permissions, its popups
+// and navigations, and the title asked of YouTube.
+const videos = require('./videos.js');
 const answer = require('./answer.js');
 const { Publisher } = require('./publisher.js');
 const publisher = new Publisher({
@@ -345,15 +348,30 @@ function createWindow() {
   mainWindow.webContents.on('render-process-gone', () => { editorDirty = 0; diagramDirty = 0; });
 
   // Every http(s) link in the app — the ports on a repo row, Open on GitHub —
-  // belongs in the user's browser, never in this window.
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    openExternal(url);
+  // belongs in the user's browser, never in this window. A whiteboard's video player is
+  // the one page from the web in it, and its popups open there only as videos.js allows.
+  const popups = videos.playerPopups();
+  mainWindow.webContents.setWindowOpenHandler(details => {
+    if (popups.allow(details)) openExternal(details.url);
+    else console.error('[switchboard] refused a popup from a video player:', String(details.url || '').slice(0, 120));
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
+    // The player may set top.location once it has had a click: that goes nowhere.
+    if (videos.startedByAFrame(event, mainWindow.webContents)) {
+      event.preventDefault();
+      console.error('[switchboard] refused a navigation from a frame:', String(url || '').slice(0, 120));
+      return;
+    }
     if (url === mainWindow.webContents.getURL()) return;
     event.preventDefault();
     openExternal(url);
+  });
+  // The page's own iframes are video players, and each stays on the player.
+  mainWindow.webContents.on('will-frame-navigate', event => {
+    if (!videos.leavesThePlayer(event, mainWindow.webContents)) return;
+    event.preventDefault();
+    console.error('[switchboard] kept a video player from leaving for', String(event.url || '').slice(0, 120));
   });
 
   // The Google Images panel (§4.17) is the one <webview> this page may have: the panel's
@@ -1393,6 +1411,11 @@ handle('sb:diagrams:clipboardImage', async () => {
 // which the bundle then saves like a dropped file. images.js says what it accepts.
 handle('sb:diagrams:fetchImage', (url, referrer) => images.fetchImage(url, referrer));
 
+// A video's title, by its id — asked of YouTube's oEmbed endpoint once, when a whiteboard
+// makes the video, and answered { ok, data: { title, author } } or { ok:false, error }.
+// The id alone crosses: videos.js builds the address.
+handle('sb:diagrams:videoInfo', id => videos.videoInfo(id));
+
 // 0 or 1 — see `diagramDirty`. A count that rises during a quit takes back a
 // Discard given for the smaller one.
 handle('sb:diagrams:dirty', count => {
@@ -1766,6 +1789,10 @@ if (!app.requestSingleInstanceLock()) {
     // Before the window, so the panel's first page already goes out as Chrome would ask
     // for it, with no permission to grant and nowhere to download to.
     images.setupImagesSession();
+    // Before the window, too: a whiteboard's video player needs the Referer on its first
+    // page, and the default session's permission answers must be in place before any
+    // page asks. This owns the default session's one onBeforeSendHeaders listener.
+    videos.setupVideoEmbeds(session.defaultSession);
     // Before the window: the first answer is usually in hand by the time the renderer
     // asks, so the Grid's gauge is there on the first paint rather than a beat later.
     usage.start();

@@ -497,10 +497,14 @@ function create(element: HTMLElement, initial: Props) {
         return image ? true : editFlowText(field, action, text, writeClipboard)
       }
       if (isTextField(document.activeElement)) return false
-      if (document.activeElement?.tagName === "WEBVIEW") return false
+      // A video's player is an IFRAME that has the keyboard as Google Images' WEBVIEW does
+      // — the menu's ⌘Z, ⌘C and ⌘V pressed in it are not the canvas's.
+      if (document.activeElement?.tagName === "WEBVIEW" || document.activeElement?.tagName === "IFRAME") return false
       if (action === "copy") return editor.copy()
       if (action === "cut") return editor.cut()
-      if (action === "paste" && !image) return editor.pasteBoxes(text)
+      // Text is the boxes ⌘C copied, or else a YouTube link pasted as its video — the
+      // copy first, as a copied video's words are its link.
+      if (action === "paste" && !image) return editor.pasteBoxes(text) || editor.pasteVideo(text)
       if (action === "undo") { editor.undo(); return true }
       if (action === "redo") { editor.redo(); return true }
       if (action === "paste" && image) {

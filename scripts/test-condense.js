@@ -256,3 +256,8 @@ test('a teleport in the selection is refused, as a terminal is', () => {
   const spec = flow([node('a', 0, 0), node('b', 300, 0), node('jump', 600, 0, { label: 'Teleport', shape: 'teleport', teleportTo: 'a' })], [edge('a', 'b')]);
   assert.throws(() => inspectFlowCondenseSelection(spec, ['a', 'b', 'jump']), /Leave teleports out of the selection/);
 });
+
+test('a video in the selection is refused, as a teleport is', () => {
+  const spec = flow([node('a', 0, 0), node('b', 300, 0), node('talk', 600, 0, { label: 'An example talk', shape: 'video', videoId: 'exampleVid1' })], [edge('a', 'b'), edge('b', 'talk')]);
+  assert.throws(() => inspectFlowCondenseSelection(spec, ['a', 'b', 'talk']), /^Error: Leave videos out of the selection before condensing\.$/);
+});

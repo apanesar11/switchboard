@@ -60,6 +60,30 @@ esbuild.buildSync({
 });
 const { parseDiagramSpec } = require(validateFile);
 
+// Switchboard: the layout and the shared limits, for a video's size.
+const layoutFile = path.join(temp, 'layout.js');
+esbuild.buildSync({
+  entryPoints: [path.join(__dirname, '..', 'src', 'diagrams', 'lib', 'diagrams', 'layout.ts')],
+  outfile: layoutFile, bundle: true, format: 'cjs', platform: 'node', logLevel: 'error',
+});
+const { layoutDiagram, flowNodeSize } = require(layoutFile);
+const typesFile = path.join(temp, 'types.js');
+esbuild.buildSync({
+  entryPoints: [path.join(__dirname, '..', 'src', 'diagrams', 'lib', 'diagrams', 'types.ts')],
+  outfile: typesFile, bundle: true, format: 'cjs', platform: 'node', logLevel: 'error',
+});
+const {
+  VIDEO_LABEL,
+  VIDEO_BAR,
+  FLOW_SIZE_MAX,
+  FLOW_VIDEO_DEFAULT_SIZE,
+  FLOW_VIDEO_PORTRAIT_SIZE,
+  flowVideoDefaultSize,
+  isFlowVideoPortrait,
+  flowVideoMinWidth,
+  flowVideoSizeForWidth,
+} = require(typesFile);
+
 after(() => fs.rmSync(temp, { recursive: true, force: true }));
 
 const W = 200;
@@ -811,4 +835,169 @@ test('a question\'s path walks past a teleport, whose only word is "Teleport"', 
     { source: 'teleport', target: 'Ask', targetHandle: 'left' },
   ];
   assert.deepEqual(flowQuestionPath(nodes, edges, 'Ask').map(step => step.label), ['Start here']);
+});
+
+// ── Switchboard: a YouTube video ──
+
+// Made-up ids, 11 characters as a real one is (AGENTS.md).
+const VID = 'exampleVid1';
+const VID_2 = 'exampleVid2';
+const SHORT = 'exampleShrt';
+
+test('a video keeps its id as YouTube spells it, or reads it out of a link with the link\'s time', () => {
+  const parsed = parseDiagramSpec({ kind: 'flow', nodes: [
+    { id: 'talk', label: 'An example talk', shape: 'video', videoId: VID, videoStart: 42 },
+    { id: 'linked', shape: 'video', videoId: `https://youtu.be/${VID_2}?t=1m5s&si=example` },
+    { id: 'stated', shape: 'video', videoId: `https://youtu.be/${VID_2}?t=65`, videoStart: 7 },
+    { id: 'short', shape: 'video', videoId: `https://www.youtube.com/shorts/${SHORT}` },
+    { id: 'sized-short', shape: 'video', videoId: `https://www.youtube.com/shorts/${SHORT}`, size: { width: 400, height: 260 } },
+    { id: 'upper', label: '   ', shape: 'video', videoId: ' EXAMPLEVID1 ', src: 'https://example.com/fictional.png' },
+    { id: 'plain', label: 'A box', videoId: VID, videoStart: 42 },
+  ], edges: [] });
+  assert.equal(parsed.ok, true, parsed.error);
+  const by = new Map(parsed.value.nodes.map(n => [n.id, n]));
+  assert.deepEqual([by.get('talk').label, by.get('talk').videoId, by.get('talk').videoStart], ['An example talk', VID, 42]);
+  // A link is read down to its id and its time; it is never the label.
+  assert.deepEqual([by.get('linked').label, by.get('linked').videoId, by.get('linked').videoStart], [VIDEO_LABEL, VID_2, 65]);
+  assert.equal(by.get('stated').videoStart, 7, 'a start the spec states wins over the link\'s');
+  // A Short's link stands the video up, unless the spec sized it.
+  assert.deepEqual(by.get('short').size, FLOW_VIDEO_PORTRAIT_SIZE);
+  assert.deepEqual(by.get('sized-short').size, { width: 400, height: 260 });
+  // Case is kept, never lowered as a document's id is; a video has no picture address.
+  assert.deepEqual([by.get('upper').videoId, by.get('upper').label, by.get('upper').src], ['EXAMPLEVID1', VIDEO_LABEL, undefined]);
+  assert.deepEqual([by.get('plain').videoId, by.get('plain').videoStart], [undefined, undefined], 'only a video plays anything');
+});
+
+test('a video with no id, or one that is not a YouTube video\'s, fails the board, naming the node', () => {
+  const board = extra => parseDiagramSpec({ kind: 'flow', nodes: [{ id: 'a', label: 'A' }, { id: 'clip', shape: 'video', ...extra }], edges: [] });
+  assert.deepEqual(board({}), { ok: false, error: 'Node 2: a "video" node needs "videoId", the 11-character id of a YouTube video (or its link)' });
+  assert.deepEqual(board({ videoId: '' }), board({}));
+  assert.deepEqual(board({ videoId: 42 }), { ok: false, error: 'Node 2: "videoId" must be text' });
+  for (const videoId of ['exampleVid', 'exampleVid12', 'videoseries', `https://video.example.com/${VID}`, 'https://www.youtube.com/@ExampleChannel', `Watch https://youtu.be/${VID}`]) {
+    assert.deepEqual(board({ videoId }), { ok: false, error: 'Node 2: "videoId" must be the 11-character id of a YouTube video, or a link to one' }, videoId);
+  }
+});
+
+test('a video starts at whole seconds past 0, and anything else plays from the beginning', () => {
+  const start = videoStart => {
+    const parsed = parseDiagramSpec({ kind: 'flow', nodes: [{ id: 'v', shape: 'video', videoId: VID, videoStart }], edges: [] });
+    assert.equal(parsed.ok, true, parsed.error);
+    return parsed.value.nodes[0].videoStart;
+  };
+  assert.equal(start(90.9), 90);
+  assert.equal(start(864000), 864000);
+  for (const dropped of [0, 0.5, -5, 864001, Infinity, NaN, '90', null, true]) assert.equal(start(dropped), undefined, String(dropped));
+});
+
+test('a video is saved with its id, its start and its size, as the validator reads it back', () => {
+  const data = (extra) => ({ label: '', shape: 'rounded', tone: 'default', dashed: false, textSize: 'medium', align: 'center', bold: false, italic: false, ...extra });
+  const node = (id, extra) => ({ id, position: { x: 0, y: 0 }, data: data(extra) });
+  const spec = flowSpecFromCanvas({}, [
+    node('titled', { label: 'An example talk', shape: 'video', videoId: VID, videoStart: 42, size: { width: 640, height: 390 } }),
+    node('untitled', { shape: 'video', videoId: VID_2, videoStart: 0 }),
+    node('box', { label: 'A box', videoId: VID, videoStart: 42 }),
+  ], []);
+  const by = new Map(spec.nodes.map(n => [n.id, n]));
+  const titled = by.get('titled');
+  assert.deepEqual([titled.label, titled.shape, titled.videoId, titled.videoStart, titled.size], ['An example talk', 'video', VID, 42, { width: 640, height: 390 }]);
+  // An untitled video is saved as "YouTube video", not "Untitled".
+  assert.deepEqual([by.get('untitled').label, by.get('untitled').videoStart], [VIDEO_LABEL, undefined]);
+  assert.deepEqual([by.get('box').videoId, by.get('box').videoStart], [undefined, undefined]);
+  // What is saved is what the validator accepts, unchanged.
+  const again = parseDiagramSpec(JSON.parse(JSON.stringify(spec)));
+  assert.equal(again.ok, true, again.error);
+  assert.deepEqual(JSON.parse(JSON.stringify(again.value)), JSON.parse(JSON.stringify(spec)));
+});
+
+test('a video laid out on the canvas and read back off it is the same video — what undo restores', () => {
+  const parsed = parseDiagramSpec({ kind: 'flow', nodes: [
+    { id: 'talk', label: 'An example talk', shape: 'video', videoId: VID, videoStart: 42, position: { x: 0, y: 0 }, size: { width: 640, height: 390 } },
+    { id: 'unsized', shape: 'video', videoId: VID_2, position: { x: 0, y: 500 } },
+    { id: 'next', label: 'Then this', position: { x: 800, y: 0 } },
+  ], edges: [{ from: 'talk', to: 'next' }] });
+  assert.equal(parsed.ok, true, parsed.error);
+  const canvas = layoutDiagram(parsed.value);
+  const at = new Map(canvas.nodes.map(n => [n.id, n]));
+  assert.deepEqual([at.get('talk').width, at.get('talk').height], [640, 390]);
+  assert.deepEqual([at.get('unsized').width, at.get('unsized').height], [480, 300]);
+  const back = flowSpecFromCanvas({}, canvas.nodes, canvas.edges);
+  assert.deepEqual(JSON.parse(JSON.stringify(back.nodes)), JSON.parse(JSON.stringify(parsed.value.nodes)));
+});
+
+test('a video is drawn the size it was given, else 480×270 under its bar; its height follows its width', () => {
+  assert.deepEqual(FLOW_VIDEO_DEFAULT_SIZE, { width: 480, height: 270 + VIDEO_BAR });
+  assert.deepEqual(flowNodeSize({ shape: 'video' }), FLOW_VIDEO_DEFAULT_SIZE);
+  assert.deepEqual(flowNodeSize({ shape: 'video', size: { width: 200, height: 100 } }), { width: 200, height: 100 }, 'a size a CLI wrote is drawn as stated');
+  // A Short stands up; a video is standing up when its player is taller than wide.
+  assert.deepEqual(flowVideoDefaultSize(false), FLOW_VIDEO_DEFAULT_SIZE);
+  assert.deepEqual(flowVideoDefaultSize(true), { width: 270, height: 480 + VIDEO_BAR });
+  assert.equal(isFlowVideoPortrait(FLOW_VIDEO_DEFAULT_SIZE), false);
+  assert.equal(isFlowVideoPortrait(FLOW_VIDEO_PORTRAIT_SIZE), true);
+  assert.equal(isFlowVideoPortrait({ width: 300, height: 300 }), false, 'a 300×270 player lies down');
+  // Resized, the player stays 16:9 (or 9:16), and a run of resizes back to the start
+  // lands exactly where it began.
+  assert.deepEqual(flowVideoSizeForWidth(640, false), { width: 640, height: 360 + VIDEO_BAR });
+  assert.deepEqual(flowVideoSizeForWidth(360.4, true), { width: 360, height: 640 + VIDEO_BAR });
+  let size = FLOW_VIDEO_DEFAULT_SIZE;
+  for (const width of [481.3, 517, 733.6, 500.5, 480]) size = flowVideoSizeForWidth(width, isFlowVideoPortrait(size));
+  assert.deepEqual(size, FLOW_VIDEO_DEFAULT_SIZE);
+  // Never under YouTube's 200×200 player …
+  assert.equal(flowVideoMinWidth(false), 356);
+  assert.equal(flowVideoMinWidth(true), 200);
+  assert.deepEqual(flowVideoSizeForWidth(100, false), { width: 356, height: 200 + VIDEO_BAR });
+  assert.deepEqual(flowVideoSizeForWidth(100, true), { width: 200, height: 356 + VIDEO_BAR });
+  // … and never past what a size may be, so the board still saves.
+  const tall = flowVideoSizeForWidth(5000, true);
+  const wide = flowVideoSizeForWidth(5000, false);
+  assert.ok(tall.height <= FLOW_SIZE_MAX && tall.width === 2233, JSON.stringify(tall));
+  assert.deepEqual(wide, { width: FLOW_SIZE_MAX, height: 2250 + VIDEO_BAR });
+  const saved = parseDiagramSpec({ kind: 'flow', nodes: [
+    { id: 'tall', shape: 'video', videoId: VID, size: tall },
+    { id: 'wide', shape: 'video', videoId: VID, size: wide },
+  ], edges: [] });
+  assert.equal(saved.ok, true, saved.error);
+});
+
+test('a board rewritten from a terminal keeps a video\'s place and size, only onto a video, and never its start', () => {
+  const sized = { width: 640, height: 390 };
+  const before = { kind: 'flow', nodes: [
+    { id: 'talk', label: 'An example talk', shape: 'video', videoId: VID, videoStart: 42, position: { x: 10, y: 20 }, size: sized },
+    { id: 'was-video', label: 'An example talk', shape: 'video', videoId: VID_2, size: sized },
+    { id: 'was-image', label: 'A picture', shape: 'image', src: 'https://example.com/fictional.png', size: sized },
+  ], edges: [] };
+  const next = { kind: 'flow', nodes: [
+    { id: 'talk', label: 'An example talk', shape: 'video', videoId: VID },
+    { id: 'was-video', label: 'Now a box' },
+    { id: 'was-image', label: VIDEO_LABEL, shape: 'video', videoId: VID_2 },
+  ], edges: [] };
+  const { spec } = carryOverFlowLayout(before, next);
+  const by = new Map(spec.nodes.map(n => [n.id, n]));
+  assert.deepEqual([by.get('talk').position, by.get('talk').size, by.get('talk').videoStart], [{ x: 10, y: 20 }, sized, undefined]);
+  assert.equal(by.get('was-video').size, undefined, 'a box is not given a video\'s size');
+  assert.equal(by.get('was-image').size, undefined, 'nor a video a picture\'s');
+});
+
+test('a question\'s path walks past a video, whose title is not the question\'s, keeping the arrow\'s words', () => {
+  const node = (id, x, data = {}) => ({ id, position: { x, y: 0 }, data: { label: id, shape: 'rounded', ...data } });
+  const nodes = [node('Start here', 0), node('talk', 300, { label: 'An example talk', shape: 'video', videoId: VID }), node('Ask', 600)];
+  const edges = [
+    { source: 'Start here', target: 'talk', targetHandle: 'left' },
+    { source: 'talk', target: 'Ask', targetHandle: 'left', data: { label: 'after watching' } },
+  ];
+  const steps = flowQuestionPath(nodes, edges, 'Ask');
+  assert.deepEqual(steps.map(step => [step.label, step.arrow]), [['Start here', 'after watching']]);
+});
+
+test('folding a branch leaves a video placed beside it where it is, as it leaves a picture', () => {
+  const start = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']);
+  const b = start.boxes.find(item => item.id === 'b');
+  const video = { id: 'talk', x: b.x, y: b.y, width: 480, height: 300, shape: 'video' };
+  const showing = [...start.boxes.filter(item => item.id !== 'b'), video];
+  const edges = start.edges.filter(edge => edge.target !== 'b');
+  const folded = apply(showing, tidyFlowTree(showing, edges, ['q'], [], { pinImages: true }));
+  assert.deepEqual({ x: folded.get('talk').x, y: folded.get('talk').y }, { x: video.x, y: video.y });
+  assert.equal(folded.get('c').y - (folded.get('a').y + H), FLOW_TAB_GAP_Y, 'the branch still closes up');
+  // Unpinned, the same video would have been moved out of the branch's way.
+  const loose = apply(showing, tidyFlowTree(showing, edges, ['q']));
+  assert.notDeepEqual({ x: loose.get('talk').x, y: loose.get('talk').y }, { x: video.x, y: video.y });
 });

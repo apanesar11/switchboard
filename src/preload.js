@@ -147,6 +147,9 @@ contextBridge.exposeInMainWorld('sb', {
   // answers — and `fallback` the thumbnail to try when the full picture at `url` won't
   // come ('' when there is none).
   onDiagramsImageOffer: cb => subscribe('sb:evt:diagramsImageOffer', cb),
+  // A YouTube video's title and channel, by its 11-character id: { ok, data: { title,
+  // author } } or { ok:false, error } — asked of YouTube once, when a video is made.
+  diagramsVideoInfo: id => ipcRenderer.invoke('sb:diagrams:videoInfo', id),
 
   // ✦ Answer (§4.18) — who answers a box's question on this Mac, and the asking.
   // answerStatus: { ok, settings, providers, keysSafe }; `opts.fresh` looks for the

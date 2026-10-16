@@ -2446,14 +2446,15 @@ SB.views = SB.views || {};
 
   // ⌘A: show or hide this board's terminals (views/wbterminals.js decides what that
   // means). The xterms' own helper textareas are part of it; every other text field,
-  // menu, dialog and list keeps Select All.
+  // menu, dialog and list keeps Select All, and it is not the board's either while a page
+  // the board shows has the keyboard (Google Images' WEBVIEW, a video's IFRAME).
   function toggleTerminalShortcut() {
     var item = activeCanvas(route());
     if (!item || !item.api) return false;
     var active = document.activeElement;
     if (active && active !== document.body) {
       if (!active.closest('[data-wb-terminal]') && (active.isContentEditable ||
-          /^(INPUT|TEXTAREA|SELECT|WEBVIEW)$/.test(active.tagName) ||
+          /^(INPUT|TEXTAREA|SELECT|WEBVIEW|IFRAME)$/.test(active.tagName) ||
           active.closest('[role="dialog"], [role="menu"], [role="listbox"]'))) return false;
     }
     var layer = attachLayer(item);

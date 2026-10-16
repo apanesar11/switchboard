@@ -94,6 +94,7 @@ switchboard/
   src/renderer/views/editor.js  — Editor tab (Monaco over the workspace's repos)  [R13]
   src/main/whiteboards.js       — Whiteboards: folders, boards, documents, pictures; the migration [M10]
   src/main/images.js            — Google Images beside a whiteboard: webview, session, fetch [M12]
+  src/main/videos.js            — YouTube videos on a whiteboard: Referer, guards, title [M14]
   src/main/answer.js            — ✦ Answer: Claude Code / Codex / Claude API / OpenAI [M11]
   src/main/databases.js         — local encrypted connections and read-only browsing [M13]
   src/renderer/views/databases.js — Databases tab: connections, entities, records     [R17]
@@ -841,6 +842,125 @@ refuses one; a copy pasted with its destination goes to the pasted copy, and pas
 without it, to the same node on the same board only. An archived board's read-only
 canvas flies there too, without Back.
 
+**A video plays in its box** (added 2026-10-16, the user's ask: "I want you to make it
+possible to embed YouTube videos in the whiteboard itself. If I drop a link, it could
+just be pure text. If I just put a link in there, it should somehow be able to transform
+into an actual embedded YouTube video." — and asked when a link typed into a box should
+turn, "Automatically"). A `shape: "video"` node is a YouTube video: `videoId`, its
+11-character id kept exactly as YouTube spells it (case matters, so unlike a
+`documentId` it is never lowercased), and `videoStart`, whole seconds, optional. It has
+no `src`: `lib/diagrams/youtube.ts` builds the poster
+(`https://i.ytimg.com/vi/<id>/hqdefault.jpg`), the player
+(`https://www.youtube-nocookie.com/embed/<id>?autoplay=1&start=N&rel=0&playsinline=1`) and
+the watch page from the checked id and fixed hosts, so nothing a board file says reaches
+an `<img>` or an `<iframe>` as a URL. The validator takes the id, or a whole YouTube link
+read down to it — the link's time when the spec gives no `videoStart`, and a `/shorts/`
+link with no `size` stood up at `FLOW_VIDEO_PORTRAIT_SIZE`, the one optional field it
+fills in, since the link is all that says the video is a Short. A missing or bad one
+fails the board, as an image's `src` does (`a "video" node needs "videoId", the
+11-character id of a YouTube video (or its link)`; `"videoId" must be the 11-character id
+of a YouTube video, or a link to one`). A `videoStart` that is not a number of seconds
+above 0 and up to `VIDEO_START_MAX` (ten days) is dropped, and a fraction floored. The
+label is the video's title, or `VIDEO_LABEL` ("YouTube video") until one is known —
+never the link, so a new one's id, made from its label, is `youtube-video`. `size` is the
+whole node, its strip (`VIDEO_BAR`, 30, a pinned terminal's header) included: a video is
+one of `FLOW_SIZED_SHAPES`, made at `FLOW_VIDEO_DEFAULT_SIZE` (480×300, a 480×270
+player) or, for a Short, 270×510, and main's list thumbnail mirrors the default. A
+republish from a terminal keeps a video's position and size and not its start, which is
+what the video is, not how the board was arranged: a spec that leaves it out plays from
+the beginning.
+
+**A link becomes its video three ways**, each one undo step that selects the video and
+brings it into view. ⌘V of text that is exactly one YouTube link (`pasteVideo`) puts it
+at the pointer, or the view's middle, clear of the boxes there; it is asked after
+`pasteBoxes`, so a video ⌘C copied — its clipboard words are its watch link, with
+`&t=Ns` — pastes as the copy. A drop is read as a video before anything else it carries
+(`youTubeVideoFromDrop`: the uri-list's first address, else the plain text; Google
+Images, below). And a box, note or text becomes the video in place when typing in it is
+kept — Enter, **Done · Enter** or a click away (`finishEditing`), never Escape, Tab, ⌘↵,
+an undo, an adopt or anything else that ends an edit — and its words are then exactly one
+link, changed since editing began, with no second line. It keeps its id, so its arrows
+stay, and is its own undo step after the typing's: ⌘Z is the box with the link in it,
+not being edited. It drops the words' colours and styling and grows round the box's
+middle — makeRoom sends a crowded box away by comparing middles, and keeping the box's
+top moved the box under it above the video — centred on it, or keeping its left edge,
+its column, when it hangs off a box as Tab hangs one. What hangs off it moves right by
+its growth, keeping its gap, and `tidyFlowTree` lays its tree out again with it and
+that branch passed as `revealed`, as Attached does, so what it would land on makes
+room. "Exactly one link" (`youTubeVideoFromText`) is the whole trimmed text, in at most
+one layer of brackets or quotes, or a Markdown `[words](link)`, a sentence's punctuation
+and zero-width characters at its ends stripped, and the scheme optional; on youtube.com,
+its www., m., music. and gaming. hosts, youtube-nocookie.com or youtu.be, as
+`/watch?v=`, `youtu.be/`, `/shorts/`, `/live/`, `/embed/`, `/v/`, `/e/` or `/watch/`, and
+through up to three of YouTube's `attribution_link`, `consent.youtube.com` and Google's
+`/url` wrappers (never `/imgres`, which stays a picture). A link in a sentence, two
+links, a bare id, a channel, a search or a playlist alone stay words; a playlist's
+`list=` is left behind, the node being the one video. Its time is `t`, then `start`, then
+`time_continue` — 90, 90s, 1m30s, 1h2m3s — and `1:30` is none. Each video made then asks
+main for its title (`sb.diagramsVideoInfo`, M14) and takes it as its label when it
+comes — only while that node is still there, still that video and still `VIDEO_LABEL`,
+and with no undo step of its own, so Undo takes the video away named and Redo brings it
+back so. A failed ask is silent, and a page whose bridge lacks the method (the documents
+fixture's) gets an error value from `call()`. A video a terminal wrote is not asked
+about.
+
+**It is drawn as a poster; the player comes with a click.** `DiagramNodes.tsx VideoFace`
+is both canvases' face: a strip — YouTube's glyph, the title, **Open on YouTube** (the
+watch link with its start, to the browser) and, while it plays, **Stop**, built like a
+pinned terminal's header buttons — which drags the node and selects it on a click; under
+it the poster, YouTube's picture cropped to the player under a play button. i.ytimg.com
+answers for a picture it hasn't got with a 120×90 grey JPEG sent with HTTP 404, which
+still fires `load`, so a picture no wider than 120, or none (offline), gives a dark face
+with the title instead. A click on the poster (`onNodeClick`, so a drag never counts; the
+select tool only, and not with ⇧, ⌘ or ⌃) or Enter with the one video selected mounts the
+player: an `<iframe>` with `allow="autoplay; encrypted-media; picture-in-picture;
+fullscreen"` (no `allowfullscreen`, which Electron says `allow` overrides) and
+`referrerpolicy="strict-origin-when-cross-origin"`, in a `nodrag nopan nowheel` wrapper,
+autoplaying on that click or key. Enter again or Stop puts the poster back. Before
+Play nothing of YouTube's loads but the picture. What plays is never node data, which is
+saved, compared and undone: the editor keeps a map of node id to the video id it was
+played with (`playingVideo` and `stopVideo` on `EditorContext`; the node plays only while
+that is still its `videoId`) under the `fitKey` it was played in, and drops an entry
+whose node is deleted, undone away, folded away, no longer a video or given another id
+by an adopt — any of them coming back would load the player and start over, out loud.
+For the same reason every video is back on its poster when the board leaves the screen
+(`shown`) and when it goes in or out of full screen, in the render that changes it: the
+page takes the iframe out of the document then, and put back it would load again. The
+archived board's read-only canvas plays its own (`ReadOnlyVideo`, local state, the poster
+a `<button>`) and goes back to the poster off screen too: `DiagramCanvas` takes `shown`
+from DiagramsPage and hands it down in `VideoShownContext`; full screen remounts that
+canvas anyway. Several videos can play at once. A player is cross-origin and takes every
+press and wheel over it, so while the canvas has a gesture under way — a press on it (a
+pan, a drag-select, a node dragged or resized, an arrow drawn), or anything dragged over
+the window (`dragenter` and `dragleave` counted, reset by a drop or `dragend`) — the
+editor marks its wrapper `data-flow-gesture` (set on the element, not React's className,
+so a re-render mid-gesture cannot wipe it and a press re-renders nothing) and every
+player lets go of the pointer: a drag across a playing video keeps going, and a link
+dropped over one lands on the canvas. The read-only canvas has no such mark. With the
+hand tool out the player takes no pointer and the strip's buttons are
+disabled. A video resizes from its side lines and bottom corners only, horizontally, as a
+text does: the height follows the width (`flowVideoSizeForWidth`, `round(width × 9/16) +
+VIDEO_BAR`, or 16/9 for one standing up — a player taller than it is wide,
+`isFlowVideoPortrait`), live and on release, so the player stays 16:9 or 9:16 however
+often it is resized; never narrower than YouTube's least player of 200×200 (356 wide
+lying down, 200 standing up) nor past `FLOW_SIZE_MAX` either way (2233 wide standing up).
+A size a CLI wrote is drawn as given, YouTube letterboxing inside. Tab after a video adds
+a plain box. It takes no colour and has no text to edit. ✦ Answer's question path walks
+past it, the answers a box already has hanging off it are named without it, a video a Condense
+selection hangs off is sent as `VIDEO_LABEL` — a title is a stranger's words, never part
+of a prompt — and Condense refuses one ("Leave videos out of the selection before
+condensing."). The CLI's removal refusal names one `id (a YouTube video "Title")`.
+
+**The player has the keyboard as a WEBVIEW does.** It is an `<iframe>` in the page, not a
+`<webview>`, so main's `guestEdit` never sees it (measured: the host's `focusedFrame` is
+the page itself); with it focused, `document.activeElement` is the IFRAME, and the
+bundle's `editAction`, app.js's `webviewFocused()` and views/whiteboards.js's ⌘A
+(`toggleTerminalShortcut`) decline for it as they do for Google Images' WEBVIEW. Keys
+typed in the player never reach the canvas's window listeners (it is cross-origin), so
+Space, K and the arrows are YouTube's. The keyboard help lists "⌘ V · Paste a YouTube
+link as its video". Main's half — the Referer the player needs, its popups, navigations
+and permissions, and the title — is `main/videos.js` (M14).
+
 **Condense replaces an explored discussion.** A rectangle selection of connected text
 nodes, or sibling branches sharing an outside parent, gets **✦ Condense** in the
 floating toolbar; ⌘I dispatches to it for multiple selected nodes. The complete selected
@@ -937,10 +1057,11 @@ Undo has the other.
 | `sb.diagramsGetImagePath(src)` | `sb:diagrams:getImagePath` | `{ ok, data: path }` — a picture's file on disk, for its copy-path button; an `https:` picture an imported spec names is fetched and kept first |
 | `sb.diagramsClipboardImage()` | `sb:diagrams:clipboardImage` | `{ ok, bytes, type }` — the clipboard's PNG, for Edit ▸ Paste over the canvas |
 | `sb.diagramsFetchImage(url, referrer?)` | `sb:diagrams:fetchImage` | `{ ok, bytes, type, name }` — a picture from the Google Images panel, by its address, as PNG, JPEG or WebP; or `{ ok:false, error }`. See Google Images, below |
+| `sb.diagramsVideoInfo(id)` | `sb:diagrams:videoInfo` | `{ ok, data: { title, author } }` — a YouTube video's title and channel, plain text on one line, by its 11-character id: asked of YouTube's oEmbed endpoint once, when a whiteboard makes the video; or `{ ok:false, error }` (`That video isn't on YouTube`, `That video can't be embedded`, `Couldn't reach YouTube`, …). Only the id crosses; main builds the address. See M14 |
 | `sb.diagramsDirty(count)` | `sb:diagrams:dirty` | `{ ok }` — 0 or 1, whenever it changes; see below |
 
-The pictures, the clipboard, the Google Images fetch, the dirty count and the flush keep
-their `sb:diagrams:*` names: they are internal, and the bundle mirrors them.
+The pictures, the clipboard, the Google Images fetch, a video's title, the dirty count and
+the flush keep their `sb:diagrams:*` names: they are internal, and the bundle mirrors them.
 
 **Folders are the user's.** Any number, made, renamed and deleted on the Whiteboards
 screen (R15). A folder's name is one line of 1–60 characters, unique whatever its case,
@@ -1202,7 +1323,12 @@ editor never sees them as keystrokes. ⌘A on a board shows or hides its termina
 text field, menu, dialog or list has the keyboard (R15). For the rest `handleEdit` asks
 R15 right after the terminal, and while the canvas has the keyboard — not a box's own
 text field, which gets the document's fallback like any field — Undo and Redo are the
-editor's, and an image Paste fetches the clipboard's picture and adds it.
+editor's, an image Paste fetches the clipboard's picture and adds it, and a text Paste is
+the boxes ⌘C copied or, failing that, a YouTube link's video (`pasteBoxes(text) ||
+pasteVideo(text)`). A link pasted into a box's own text field is that field's words.
+While a video's player has the keyboard the IFRAME is the active element, and the
+bundle's `editAction`, app.js's document fallback and ⌘A decline for it as for a WEBVIEW
+(below): ⌘Z, ⌘C, ⌘V and ⌘A pressed in the player are not the canvas's.
 
 #### Google Images
 
@@ -1253,7 +1379,12 @@ that page (its `input-event`s), and one per click (`userActivation`), as Chrome 
 a `<webview>` over as `text/uri-list`, `text/html` and `text/plain`, and never as a File.
 So the canvas accepts those kinds on dragover (with a soft blue ring while one is over
 it), and on the drop takes the markup's `<img src>`, then the list's first address, then
-the plain text (`lib/diagrams/image-search.ts`). Such a drop is ALWAYS
+the plain text (`lib/diagrams/image-search.ts`). An address drop is read as a YouTube
+video first (`youTubeVideoFromDrop`: the list's first address, else the plain text),
+before the drag's files and before the markup: a YouTube link, or a thumbnail dragged
+off youtube.com — whose `<img>` on i.ytimg.com would otherwise land as a still — is that
+video at the drop, and main is never asked to fetch it as a picture. A Google Images
+result (`/imgres`) is a picture still. Such a drop is ALWAYS
 `preventDefault`-ed, picture or not: let through, the window navigates to the address,
 and main's `will-navigate` opens it in the browser. The panel's own header and footer
 take one let go short of the canvas for the same reason. One `<img>` is not taken at
@@ -1315,7 +1446,7 @@ measured, both name the guest whenever one is attached, the page's own input foc
 not, so every ⌘C on the canvas would have gone to the panel. Never while the DevTools
 have focus, and never ⌘W. Should an event arrive anyway, the renderer stands aside too:
 the bundle's `editAction` and app.js's document fallback both decline while a `WEBVIEW`
-is the active element.
+— or a video's player `IFRAME` — is the active element.
 
 **Leaving the board kills the page, so coming back makes a new one.** app.js takes the
 board's root out of `#main` while another screen shows (R15), and Electron destroys
@@ -2302,6 +2433,16 @@ URLs, the byte sniff, the name, the Referer, a page's user activation, the menu 
 load no Electron, so `scripts/test-images.js` (`npm run test:diagrams`) runs them under
 plain node; what needs Electron requires it inside the function, and that test hands
 `fetchImage` and `attachGuest` a stand-in. Nothing throws across IPC.
+
+### M14 `videos.js`
+YouTube videos on a whiteboard, main's half (§4.17): `setupVideoEmbeds(session)` (the
+Referer on the player's embed request — without it YouTube answers a file:// page with
+Error 153 — and the permission handlers), `playerPopups()` (the gate on popups from the
+player), `startedByAFrame(event, wc)` and `leavesThePlayer(event, wc)` (the navigation
+guards `index.js` calls) and `videoInfo(id)` (the oEmbed title). The id rule mirrors
+`lib/diagrams/youtube.ts`, since main cannot require TypeScript; the pure helpers load no
+Electron, so `scripts/test-videos.js` (`npm run test:diagrams`) runs them under plain node
+and checks the two id rules agree. Nothing throws across IPC.
 
 ---
 

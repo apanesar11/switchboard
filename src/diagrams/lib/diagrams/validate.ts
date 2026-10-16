@@ -34,10 +34,13 @@ import {
   FLOW_TEXT_ALIGNS,
   FLOW_TEXT_SIZES,
   FLOW_TONES,
+  FLOW_VIDEO_PORTRAIT_SIZE,
   FLOW_WORKSPACE_ID_MAX_LENGTH,
   TELEPORT_LABEL,
   TERMINAL_FONT_MAX,
   TERMINAL_FONT_MIN,
+  VIDEO_LABEL,
+  VIDEO_START_MAX,
   isFlowSizedShape,
   type DiagramKind,
   type DiagramSpec,
@@ -53,6 +56,7 @@ import {
   type FlowTone,
 } from "./types"
 import { parseFlowRichText } from "./rich-text"
+import { isYouTubeVideoId, youTubeVideoFromText, type YouTubeVideo } from "./youtube"
 
 export type ValidationResult =
   | { ok: true; value: string }
@@ -316,6 +320,33 @@ function imageSrc(raw: unknown, where: string): string {
   return value
 }
 
+// Switchboard: the YouTube video a "video" node plays. Its id is kept exactly as
+// given — case matters, so unlike a documentId it is never lowercased — and a whole
+// link to the video is read down to its id, with the link's time and whether it is a
+// Short. A video is nothing without one, as a terminal is nothing without its workspace.
+function video(raw: unknown, where: string): YouTubeVideo {
+  if (raw === undefined || raw === null || raw === "") {
+    fail(where, 'a "video" node needs "videoId", the 11-character id of a YouTube video (or its link)')
+  }
+  if (typeof raw !== "string") fail(where, '"videoId" must be text')
+  const value = raw.trim()
+  if (isYouTubeVideoId(value)) return { videoId: value }
+  const linked = youTubeVideoFromText(value)
+  if (linked === null) {
+    fail(where, '"videoId" must be the 11-character id of a YouTube video, or a link to one')
+  }
+  return linked
+}
+
+// Switchboard: where a video starts, in whole seconds. Dropped rather than refused, as
+// a terminal's type size is clamped: anything but a number of seconds past 0 and up to
+// VIDEO_START_MAX means "from the beginning".
+function videoStart(raw: unknown): number | undefined {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined
+  const seconds = Math.floor(raw)
+  return seconds > 0 && seconds <= VIDEO_START_MAX ? seconds : undefined
+}
+
 // A flow with no nodes is allowed: it is what a brand-new diagram is before
 // anything has been put on it, and what is left after deleting every box to
 // start over.
@@ -334,13 +365,18 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
     byKey.set(key, id)
 
     const shape = optionalEnum<FlowShape>(entry.shape, FLOW_SHAPES, where, "shape")
+    // Switchboard: the video a video plays, from its id or its link.
+    const linked = shape === "video" ? video(entry.videoId, where) : undefined
     // Switchboard: a terminal is labelled with its workspace's id, whatever it says.
     const workspace = shape === "terminal" ? terminalWorkspace(entry.workspace, where) : undefined
-    // Switchboard: and a teleport always says "Teleport".
+    // Switchboard: and a teleport always says "Teleport", and a video with no title
+    // says "YouTube video" — never its link.
     const label = workspace !== undefined
       ? workspace
       : shape === "teleport"
       ? TELEPORT_LABEL
+      : shape === "video"
+      ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? VIDEO_LABEL)
       : shape === "note"
       ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? "")
       : text(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText)
@@ -387,14 +423,20 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       src: shape === "image" ? imageSrc(entry.src, where) : undefined,
       documentId: shape === "document" ? documentId(entry.documentId, where) : undefined,
       // Switchboard: a box's outline is left out when it is the default one, and a
-      // box keeps its size too.
-      size: isFlowSizedShape(shape ?? DEFAULT_FLOW_SHAPE) ? optionalSize(entry.size, where) : undefined,
+      // box keeps its size too. A video given as a Short's link with no size of its
+      // own stands up: the link is all that says it is one.
+      size: isFlowSizedShape(shape ?? DEFAULT_FLOW_SHAPE)
+        ? (optionalSize(entry.size, where) ?? (linked?.short ? { ...FLOW_VIDEO_PORTRAIT_SIZE } : undefined))
+        : undefined,
       // Switchboard: a pinned terminal's workspace, type size and folded state.
       workspace,
       font: shape === "terminal" ? terminalFont(entry.font) : undefined,
       minimized: shape === "terminal" && entry.minimized === true ? true : undefined,
       // Switchboard: a teleport's destination, resolved once every id is known (below).
       teleportTo: shape === "teleport" && typeof entry.teleportTo === "string" ? entry.teleportTo : undefined,
+      // Switchboard: a video's id, and where it starts — as stated, else the link's time.
+      videoId: linked?.videoId,
+      videoStart: linked ? (videoStart(entry.videoStart) ?? linked.start) : undefined,
     }
   })
 

@@ -1,7 +1,8 @@
 'use strict';
 
 // Actual Chromium editing, in an isolated hidden Electron window. This fixture
-// never loads Switchboard's main process, user configuration, or diagram files.
+// never loads Switchboard's main process, user configuration, or diagram files, and
+// answers every https request itself.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');

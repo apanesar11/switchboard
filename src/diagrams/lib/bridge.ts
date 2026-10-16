@@ -176,6 +176,13 @@ export type FetchedImage =
   | { ok: false; error: string }
 
 /**
+ * A YouTube video's title and its channel's name, as YouTube's oEmbed endpoint gives
+ * them: plain text on one line. Asked by the video's id once, when a video is made, to
+ * label it.
+ */
+export type VideoInfo = Result<{ title: string; author: string }>
+
+/**
  * "Add Image to Whiteboard", picked in the right-click menu of a picture in the Google
  * Images panel. `guestId` is the panel page's webContents id, which the panel
  * compares with its own <webview>'s, and `referrer` the page the picture was on. On
@@ -258,6 +265,7 @@ type Bridge = {
   onAnswerStatus(cb: (status: AnswerStatus) => void): () => void
   diagramsFetchImage(url: string, referrer?: string): Promise<FetchedImage>
   onDiagramsImageOffer(cb: (offer: ImageOffer) => void): () => void
+  diagramsVideoInfo(videoId: string): Promise<VideoInfo>
   openExternal(url: string): Promise<{ ok: true } | { ok: false; error: string }>
 }
 

@@ -98,8 +98,8 @@ const THUMB_STRETCH = 2;
 
 // What the editor draws a node at, in flow units — lib/diagrams/layout.ts flowNodeSize
 // and the constants beside it, which this mirrors for the preview only. A box is 200
-// wide and as tall as its text until someone resizes it; a box, a note, a text and an
-// image keep the size someone gave them in `size`. Main has no fonts to measure with, so a label's lines are counted
+// wide and as tall as its text until someone resizes it; a box, a note, a text, an
+// image and a video keep the size someone gave them in `size`. Main has no fonts to measure with, so a label's lines are counted
 // at an average glyph width: exact for the usual one-line box, and close enough for the
 // rest at a twentieth of the size.
 const FLOW_BOX_WIDTH = 200;
@@ -113,6 +113,8 @@ const FLOW_NOTE_PAD = 14;
 const FLOW_IMAGE_SIZE = { width: 240, height: 180 };
 const FLOW_DOCUMENT_SIZE = { width: 240, height: 76 };
 const FLOW_TELEPORT_SIZE = { width: 200, height: 56 };
+// A video's player at 16:9 under its 30-high bar — types.ts FLOW_VIDEO_DEFAULT_SIZE.
+const FLOW_VIDEO_SIZE = { width: 480, height: 300 };
 const FLOW_TEXT_MAX_WIDTH = 320;
 const FLOW_TEXT_MIN_WIDTH = 40;
 const FLOW_TEXT_PAD_X = 4;
@@ -631,6 +633,7 @@ function flowNodeSize(node) {
   if (shape === 'image') return size ? { width: size.width, height: size.height } : FLOW_IMAGE_SIZE;
   if (shape === 'document') return FLOW_DOCUMENT_SIZE;
   if (shape === 'teleport') return FLOW_TELEPORT_SIZE;
+  if (shape === 'video') return size ? { width: size.width, height: size.height } : FLOW_VIDEO_SIZE;
 
   const label = typeof node.label === 'string' ? node.label : '';
   const detail = typeof node.detail === 'string' ? node.detail : '';

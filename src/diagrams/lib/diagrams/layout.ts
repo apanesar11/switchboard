@@ -22,6 +22,7 @@ import {
   FLOW_TELEPORT_SIZE,
   FLOW_TERMINAL_DEFAULT_SIZE,
   FLOW_TERMINAL_FLOOR,
+  FLOW_VIDEO_DEFAULT_SIZE,
   TERMINAL_HEADER,
   type DiagramSpec,
   type FlowNodeSpec,
@@ -236,6 +237,9 @@ export type FlowBoxNodeData = {
   minimized?: boolean
   /** Switchboard: the node a teleport takes you to — see FlowNodeSpec.teleportTo. */
   teleportTo?: string
+  /** Switchboard: the YouTube video a video plays, and where it starts. */
+  videoId?: string
+  videoStart?: number
 }
 
 /** What a flow edge carries, so the editor can read an edge back into a spec. */
@@ -434,6 +438,10 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
   if (shape === "document") return { width: 240, height: 76 }
   // Switchboard: a teleport is always the one size, whatever it links to.
   if (shape === "teleport") return FLOW_TELEPORT_SIZE
+  // Switchboard: a video is the size it was given, its bar included — the editor's
+  // resize handles keep its player 16:9 (or 9:16), and one a CLI wrote is drawn as
+  // stated, the player letterboxing inside.
+  if (shape === "video") return node.size ?? FLOW_VIDEO_DEFAULT_SIZE
   // Switchboard: a pinned terminal is the size it was given — pinned at a high zoom,
   // that can be less than its resize handles allow, so only the floor of a header
   // and a sliver of body binds here — and folded, only its header, in place.
@@ -712,6 +720,8 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
       font: node.font,
       minimized: node.minimized === true ? true : undefined,
       teleportTo: node.teleportTo,
+      videoId: node.videoId,
+      videoStart: node.videoStart,
     } satisfies FlowBoxNodeData,
     draggable: false,
     selectable: false,

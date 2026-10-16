@@ -1105,6 +1105,7 @@ export function DiagramsPage({
                 spec={board.spec}
                 diagramName={board.name}
                 resetKey={`${board.id}:${fullscreen}`}
+                shown={active}
               />
             )}
           </div>

@@ -144,6 +144,51 @@ test('update refuses to drop nodes unless told to, and never writes an invalid s
   assert.deepEqual(boardFile(boardId).spec.nodes.map(n => n.id), ['start']);
 });
 
+test('a video is checked and kept like any node, its id read out of a link, and named when it would go', () => {
+  // Made-up ids, 11 characters as a real one is (AGENTS.md).
+  const VIDEOS = {
+    kind: 'flow',
+    nodes: [
+      { id: 'intro', label: 'Watch the intro first' },
+      { id: 'talk', label: 'An example talk', shape: 'video', videoId: 'exampleVid1' },
+      { id: 'clip', shape: 'video', videoId: 'https://youtu.be/exampleVid2?t=1m5s&si=example' },
+    ],
+    edges: [{ from: 'intro', to: 'talk' }, { from: 'talk', to: 'clip' }],
+  };
+  const ok = run(['check', '-'], { input: json(VIDEOS) });
+  assert.equal(ok.code, 0, ok.err);
+  assert.match(ok.out, /^Valid: 3 nodes, 2 arrows, laid out \d+×\d+\./);
+  const notYouTube = { ...VIDEOS, nodes: [...VIDEOS.nodes.slice(0, 2), { id: 'clip', shape: 'video', videoId: 'https://video.example.com/exampleVid2' }] };
+  const bad = run(['check', '-'], { input: json(notYouTube) });
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /Node 3: "videoId" must be the 11-character id of a YouTube video, or a link to one/);
+
+  const made = run(['create', '-', '--name', 'Example videos', '--workspace', 'none'], { input: json(VIDEOS) });
+  assert.equal(made.code, 0, made.err);
+  const id = /id ([0-9a-f-]{36})/.exec(made.out)[1];
+  const file = () => path.join(temp, 'whiteboards', 'boards', id + '.json');
+  const stored = boardFile(id).spec.nodes.find(n => n.id === 'clip');
+  assert.deepEqual([stored.label, stored.videoId, stored.videoStart], ['YouTube video', 'exampleVid2', 65]);
+
+  // Arranged in the editor, then rewritten without positions: the video keeps its place
+  // and its size.
+  const arranged = boardFile(id);
+  arranged.spec.nodes = arranged.spec.nodes.map((node, i) => ({ ...node, position: { x: 40 + i * 600, y: 40 } }));
+  arranged.spec.nodes[1].size = { width: 640, height: 390 };
+  fs.writeFileSync(file(), JSON.stringify(arranged));
+  const updated = run(['update', id, '-'], { input: json({ ...VIDEOS, nodes: VIDEOS.nodes.map(n => n.id === 'talk' ? { ...n, label: 'An example talk, part one' } : n) }) });
+  assert.equal(updated.code, 0, updated.err);
+  const talk = boardFile(id).spec.nodes.find(n => n.id === 'talk');
+  assert.deepEqual([talk.label, talk.videoId, talk.position, talk.size], ['An example talk, part one', 'exampleVid1', { x: 640, y: 40 }, { width: 640, height: 390 }]);
+
+  // Dropping them is refused, each named as the video it is — a title, when it has one.
+  const before = fs.readFileSync(file(), 'utf8');
+  const refused = run(['update', id, '-'], { input: json({ kind: 'flow', nodes: [VIDEOS.nodes[0]], edges: [] }) });
+  assert.equal(refused.code, 1);
+  assert.match(refused.err, /would remove 2 of "Example videos"'s nodes: talk \(a YouTube video "An example talk, part one"\), clip \(a YouTube video\)\./);
+  assert.equal(fs.readFileSync(file(), 'utf8'), before);
+});
+
 test('new-document stores Markdown a document box can show', async () => {
   const made = run(['new-document', '-'], { input: '# Example brief\n\nWhy the card is charged first.\n' });
   assert.equal(made.code, 0, made.err);

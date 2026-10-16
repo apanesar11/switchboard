@@ -1,10 +1,14 @@
 'use strict';
 
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, protocol } = require('electron');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 app.setPath('userData', path.join(__dirname, 'profile'));
 app.whenReady().then(async () => {
+  // Every https request is answered here with a 404, and recorded: nothing reaches the
+  // network (a YouTube video's poster is asked of i.ytimg.com).
+  const asked = [];
+  protocol.handle('https', request => { asked.push(request.url); return new Response('Not in this fixture', { status: 404 }); });
   const window = new BrowserWindow({ show: false, width: 1200, height: 800, webPreferences: { offscreen: true, backgroundThrottling: false } });
   const run = async code => {
     try { return await window.webContents.executeJavaScript(code, true); }
@@ -356,11 +360,31 @@ app.whenReady().then(async () => {
     await tab(true);
     assert.equal(await run('document.querySelector(".react-flow__node.selected").dataset.id'), 'priority-child', 'ordinary Shift+Tab still selects the canvas parent');
     assert.equal(await run('document.querySelector("[data-flow-text]")'), null, 'canvas Shift+Tab finishes text editing');
+    // A YouTube link pasted while a label is edited is the label's words; the box is its
+    // video once the edit ends, and one Undo is the box with the link in it again. (No
+    // bridge here to ask the title of: it stays "YouTube video".)
+    await run(`window.mount({ kind: 'flow', nodes: [{ id: 'link-box', label: 'Watch this', position: { x: 20, y: 100 } }], edges: [] })`); await tick();
+    await edit('link-box');
+    await run('window.editText("selectAll"); window.editText("paste", "https://youtu.be/exampleVid1?t=90")'); await tick();
+    let linked = await node('link-box');
+    assert.deepEqual([linked.shape, linked.label], [undefined, 'https://youtu.be/exampleVid1?t=90'], 'a link pasted into a label is its words');
+    assert.equal(await run('document.activeElement.closest("[data-flow-text=label]") !== null'), true, 'the label is still being edited');
+    assert.equal(await run('document.querySelector(".flow-video")'), null);
+    await click('Done · Enter');
+    linked = await node('link-box');
+    assert.deepEqual({ shape: linked.shape, videoId: linked.videoId, videoStart: linked.videoStart, label: linked.label },
+      { shape: 'video', videoId: 'exampleVid1', videoStart: 90, label: 'YouTube video' }, 'the edit ended, the box is the video');
+    assert.equal(await run('document.querySelector("[data-flow-text]")'), null);
+    assert.notEqual(await run('document.querySelector("[data-id=link-box] .flow-video")'), null);
+    await run('window.editor.current.undo()'); await tick();
+    linked = await node('link-box');
+    assert.deepEqual([linked.shape, linked.videoId, linked.label], [undefined, undefined, 'https://youtu.be/exampleVid1?t=90']);
+    assert.deepEqual([...new Set(asked)], ['https://i.ytimg.com/vi/exampleVid1/hqdefault.jpg'], 'only the poster was asked for');
     await run('window.mount(window.foldSnapshot)'); await tick();
     if (process.env.SWITCHBOARD_RICH_TEXT_SCREENSHOT) {
       require('node:fs').writeFileSync(process.env.SWITCHBOARD_RICH_TEXT_SCREENSHOT, (await window.webContents.capturePage()).toPNG());
     }
-    console.log('PASS — Chromium: rich text, nested lists, Tab precedence, collapsed-node counts, expand/undo/redo, save/reload, and native Edit menu actions');
+    console.log('PASS — Chromium: rich text, nested lists, Tab precedence, collapsed-node counts, expand/undo/redo, save/reload, native Edit menu actions, and a YouTube link pasted into a label kept as words until the edit ends');
     app.exit(0);
   } catch (error) {
     console.error(error);

@@ -1906,6 +1906,7 @@ window.SB = window.SB || {};
     // A whiteboard's Google Images panel is a <webview>, and main runs the Edit menu
     // on its page itself (§4.17). One that arrives here anyway must not fall back onto
     // this document: Select All would select the whole window behind Google's page.
+    // Nor with a whiteboard video's player focused, an <iframe> main never edits in.
     if (webviewFocused() && e.action !== 'close') return;
     try {
       // NOT document.execCommand('copy'): Chromium refuses it without a user gesture,
@@ -1961,9 +1962,10 @@ window.SB = window.SB || {};
     return !!el && el.isContentEditable === true;
   }
 
+  // A page in the window — a <webview>, or a whiteboard video's player <iframe>.
   function webviewFocused() {
     var el = document.activeElement;
-    return !!el && el.tagName === 'WEBVIEW';
+    return !!el && (el.tagName === 'WEBVIEW' || el.tagName === 'IFRAME');
   }
 
   function handleLinks(wsId, links) {

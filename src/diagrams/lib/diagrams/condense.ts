@@ -73,6 +73,10 @@ export function inspectFlowCondenseSelection(
   if (selected.some((node) => node.shape === "teleport")) {
     throw new Error("Leave teleports out of the selection before condensing.")
   }
+  // Switchboard: nor a video, whose only words are its title.
+  if (selected.some((node) => node.shape === "video")) {
+    throw new Error("Leave videos out of the selection before condensing.")
+  }
   if (selected.some((node) => !(node.label.trim() || node.detail?.trim()))) {
     throw new Error("Every selected node needs text before it can be condensed.")
   }

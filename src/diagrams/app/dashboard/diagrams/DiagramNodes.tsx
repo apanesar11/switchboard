@@ -15,11 +15,26 @@
 // editor draws its own, FlowEditor.tsx TerminalNode). A teleport draws here for
 // both canvases, naming where it goes; a click on it takes the view there — on the
 // read-only canvas through FlowBoxNode below, in the editor through its onNodeClick.
+// A YouTube video's face (VideoFace) is drawn here for both canvases too: its poster
+// until it is played, then the player. The read-only canvas plays it itself; the
+// editor's VideoNode (FlowEditor.tsx) keeps what is playing in the editor's state.
 
-import { useLayoutEffect, useRef, useState } from "react"
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { Handle, Position, getViewportForBounds, useReactFlow, useStore, useStoreApi, type NodeProps, type Viewport } from "@xyflow/react"
-import { RiDoorOpenLine, RiImageLine, RiSparkling2Fill, RiFileTextLine, RiTerminalBoxLine } from "@remixicon/react"
-import { cx } from "@/lib/utils"
+import {
+  RiDoorOpenLine,
+  RiExternalLinkLine,
+  RiImageLine,
+  RiPlayFill,
+  RiSparkling2Fill,
+  RiStopFill,
+  RiFileTextLine,
+  RiTerminalBoxLine,
+  RiYoutubeFill,
+} from "@remixicon/react"
+import { toast } from "@/components/Toast"
+import { call } from "@/lib/bridge"
+import { cx, focusRing } from "@/lib/utils"
 import {
   FLOW_TEXT_METRICS,
   flowLabelWeight,
@@ -30,6 +45,8 @@ import {
   FLOW_SIDES,
   TELEPORT_LABEL,
   TERMINAL_HEADER,
+  VIDEO_BAR,
+  VIDEO_LABEL,
   isFlowBoxShape,
   type FlowBoxShape,
   type FlowSide,
@@ -39,6 +56,7 @@ import {
 } from "@/lib/diagrams/types"
 import { plainTextParagraphs, richTextHtml } from "@/lib/diagrams/rich-text"
 import { flowCheckbox } from "@/lib/diagrams/rich-text-dom"
+import { isYouTubeVideoId, youTubeEmbedUrl, youTubeThumbnailUrl, youTubeWatchUrl } from "@/lib/diagrams/youtube"
 import { DiagramFileCopy } from "./DiagramFileCopy"
 
 // Every box is sized from its text; in the browser, measure that text for
@@ -271,7 +289,15 @@ export function teleportDestinationName(box: FlowBoxNodeData | undefined): strin
   if (box.shape === "teleport") return TELEPORT_LABEL
   const words = box.label.replace(/\s+/g, " ").trim()
   if (words) return words
-  return box.shape === "image" ? "Image" : box.shape === "note" ? "Note" : box.shape === "text" ? "Text" : "Untitled"
+  return box.shape === "image"
+    ? "Image"
+    : box.shape === "video"
+      ? "Video"
+      : box.shape === "note"
+        ? "Note"
+        : box.shape === "text"
+          ? "Text"
+          : "Untitled"
 }
 
 /**
@@ -313,6 +339,182 @@ function TeleportFace({ to }: { to?: string }) {
         <small>{name !== null ? `to ${name}` : "No destination yet"}</small>
       </span>
     </div>
+  )
+}
+
+/**
+ * Switchboard: whether the board the read-only canvas draws is on screen — off it, a
+ * video there goes back to its poster (ReadOnlyVideo). DiagramCanvas provides it.
+ */
+export const VideoShownContext = createContext(true)
+
+/**
+ * Switchboard: a YouTube video's face, on either canvas. A strip across the top, which
+ * the node is dragged by, with YouTube's glyph, the video's title, Open on YouTube and,
+ * while it plays, Stop; under it the video's poster with a play button, or once it is
+ * played, the player.
+ *
+ * Nothing of YouTube's but the poster's picture loads before Play. The player's iframe
+ * is put on the page only by a click (or the editor's Enter), the gesture its autoplay
+ * plays on. `onPlay` is the read-only canvas's own: the poster is a button there. The
+ * editor plays from its onNodeClick instead, so a drag that starts on the poster moves
+ * the node rather than playing it. Both addresses are built from the checked id and
+ * fixed hosts (lib/diagrams/youtube.ts), so nothing a board file says reaches the <img>
+ * or the <iframe> as a URL.
+ */
+export function VideoFace({
+  videoId,
+  videoStart,
+  label,
+  playing,
+  interactive = true,
+  onPlay,
+  onStop,
+}: {
+  videoId?: string
+  videoStart?: number
+  label: string
+  playing: boolean
+  /** False while the editor's hand tool is out: the player takes no pointer then. */
+  interactive?: boolean
+  onPlay?: () => void
+  onStop: () => void
+}) {
+  const id = videoId !== undefined && isYouTubeVideoId(videoId) ? videoId : null
+  const name = label.replace(/\s+/g, " ").trim() || VIDEO_LABEL
+  const live = playing && id !== null
+  async function openOnYouTube() {
+    if (id === null) return
+    const result = await call("openExternal", youTubeWatchUrl({ videoId: id, start: videoStart }))
+    if (!result.ok) toast({ title: "Couldn't open your browser", description: result.error, variant: "error" })
+  }
+  // A button in the strip: never a drag, nor a click on the node beneath it — as a
+  // pinned terminal's header's are.
+  const action = (what: string, run: () => void, icon: React.ReactNode) => (
+    <button
+      type="button"
+      aria-label={what}
+      title={what}
+      disabled={!interactive}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation()
+        run()
+      }}
+      onDoubleClick={(event) => event.stopPropagation()}
+      className={cx("nodrag nopan flow-video-btn", focusRing)}
+    >
+      {icon}
+    </button>
+  )
+
+  return (
+    <div className="flow-video" data-playing={live} role="group" aria-label={name}>
+      <div className="flow-video-head" style={{ height: VIDEO_BAR }}>
+        <RiYoutubeFill className="flow-video-glyph" aria-hidden="true" />
+        <b title={name}>{name}</b>
+        <span className="flow-video-actions">
+          {id !== null
+            ? action("Open on YouTube", () => void openOnYouTube(), <RiExternalLinkLine className="size-3.5" aria-hidden="true" />)
+            : null}
+          {live ? action("Stop", onStop, <RiStopFill className="size-3.5" aria-hidden="true" />) : null}
+        </span>
+      </div>
+      <div className="flow-video-body">
+        {live ? (
+          // Every press and wheel over the player is the player's — not a drag of the
+          // node, nor a pan of the canvas. The editor takes the pointer back from it
+          // while a gesture of its own is under way (styles.css, [data-flow-gesture]).
+          <div className={cx("flow-video-player nodrag nopan nowheel", !interactive && "flow-video-still")}>
+            <iframe
+              className="flow-video-frame"
+              src={youTubeEmbedUrl({ videoId: id, start: videoStart })}
+              title={name}
+              // Full screen in allow= alone: Electron warns that it takes precedence
+              // over an allowfullscreen attribute.
+              allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+              referrerPolicy="strict-origin-when-cross-origin"
+            />
+          </div>
+        ) : (
+          <VideoPoster videoId={id} label={name} onPlay={onPlay} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Switchboard: a video's poster — YouTube's own picture of it, cropped to the player,
+ * under a play button. YouTube answers for a picture it hasn't got with a grey stand-in
+ * 120 pixels wide (HTTP 404, but a JPEG that loads), so a picture no wider than that,
+ * or none at all (offline), gives a dark face with the video's title on it instead.
+ */
+function VideoPoster({ videoId, label, onPlay }: { videoId: string | null; label: string; onPlay?: () => void }) {
+  const [missing, setMissing] = useState<string | null>(null)
+  const picture = videoId !== null && missing !== videoId ? videoId : null
+  const face = (
+    <>
+      {picture !== null ? (
+        // eslint-disable-next-line @next/next/no-img-element -- YouTube's picture of the video, sized by the node rather than by next/image
+        <img
+          src={youTubeThumbnailUrl(picture)}
+          alt=""
+          draggable={false}
+          onLoad={(event) => {
+            if (event.currentTarget.naturalWidth <= 120) setMissing(picture)
+          }}
+          onError={() => setMissing(picture)}
+        />
+      ) : null}
+      <span className="flow-video-play" aria-hidden="true">
+        <RiPlayFill className="size-7" />
+      </span>
+      {picture === null ? <span className="flow-video-name">{label}</span> : null}
+    </>
+  )
+  return onPlay ? (
+    <button
+      type="button"
+      className={cx("flow-video-poster", focusRing)}
+      data-pictured={picture !== null}
+      aria-label={`Play ${label}`}
+      title={`Play ${label}`}
+      onClick={(event) => {
+        event.stopPropagation()
+        onPlay()
+      }}
+    >
+      {face}
+    </button>
+  ) : (
+    <div className="flow-video-poster" data-pictured={picture !== null} title={`Play ${label}`}>
+      {face}
+    </div>
+  )
+}
+
+/**
+ * Switchboard: a video on the read-only canvas, which plays it there and then. Off
+ * screen it goes back to its poster: the page takes the player's iframe out with the
+ * board, and put back it would load again and start over, out loud. (Full screen
+ * remounts that canvas — DiagramsPage's resetKey — which does the same.)
+ */
+function ReadOnlyVideo({ videoId, videoStart, label }: Pick<FlowBoxNodeData, "videoId" | "videoStart" | "label">) {
+  const shown = useContext(VideoShownContext)
+  const [playing, setPlaying] = useState(false)
+  useEffect(() => {
+    if (!shown) setPlaying(false)
+  }, [shown])
+  return (
+    <VideoFace
+      videoId={videoId}
+      videoStart={videoStart}
+      label={label}
+      playing={playing && shown}
+      onPlay={() => setPlaying(true)}
+      onStop={() => setPlaying(false)}
+    />
   )
 }
 
@@ -388,6 +590,17 @@ export function FlowBox({
     return (
       <div className={cx("relative size-full", className)} onClick={onTeleport}>
         <TeleportFace to={box.teleportTo} />
+        {children}
+      </div>
+    )
+  }
+
+  // Switchboard: a YouTube video, played where it is. This is the read-only canvas's;
+  // the editor draws its own (FlowEditor.tsx VideoNode), whose playing is the editor's.
+  if (shape === "video") {
+    return (
+      <div className={cx("relative size-full", className)}>
+        <ReadOnlyVideo videoId={box.videoId} videoStart={box.videoStart} label={label} />
         {children}
       </div>
     )

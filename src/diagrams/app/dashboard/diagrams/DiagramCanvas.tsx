@@ -30,7 +30,7 @@ import { useFlowDocuments } from "./useFlowDocuments"
 import { DiagramFileCopyContext } from "./DiagramFileCopy"
 import { cx } from "@/lib/utils"
 import type { DiagramSpec } from "@/lib/diagrams/types"
-import { diagramNodeTypes } from "./DiagramNodes"
+import { VideoShownContext, diagramNodeTypes } from "./DiagramNodes"
 import { FLOW_EDGE_THEME } from "./DiagramEdges"
 
 // React Flow's own stylesheet. `style.css` (rather than `base.css`) because the
@@ -59,9 +59,14 @@ type Props = {
    */
   resetKey: string
   diagramName?: string
+  /**
+   * Switchboard: whether the board is on screen. A video played here goes back to its
+   * poster when it isn't (DiagramNodes.tsx ReadOnlyVideo).
+   */
+  shown?: boolean
 }
 
-export function DiagramCanvas({ spec, resetKey, diagramName }: Props) {
+export function DiagramCanvas({ spec, resetKey, diagramName, shown = true }: Props) {
   const layout = useMemo(() => layoutDiagram(spec), [spec])
   const [document, setDocument] = useState<FlowBoxNodeData | null>(null)
   const [view, setView] = useState<DocumentView>("floating")
@@ -69,6 +74,7 @@ export function DiagramCanvas({ spec, resetKey, diagramName }: Props) {
 
   return (
     <DiagramFileCopyContext.Provider value={documents.getPath}>
+    <VideoShownContext.Provider value={shown}>
     <div className={cx("relative flex size-full min-w-0 bg-gray-50 dark:bg-gray-900", FLOW_EDGE_THEME)}>
       <div className="h-full min-w-0 flex-1">
       <ReactFlow
@@ -146,6 +152,7 @@ export function DiagramCanvas({ spec, resetKey, diagramName }: Props) {
       </div>
       {document?.documentId ? <DocumentPanel key={document.documentId} title={document.label} diagramName={diagramName} buffer={documents.active} view={view} onView={setView} readOnly onRename={() => {}} onEdit={() => {}} onSave={() => {}} onCopyPath={() => documents.getPath(document.documentId!)} onResolve={() => {}} onRetry={() => void documents.retry(document.documentId!, true)} onClose={() => setDocument(null)} /> : null}
     </div>
+    </VideoShownContext.Provider>
     </DiagramFileCopyContext.Provider>
   )
 }

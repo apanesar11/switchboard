@@ -53,6 +53,15 @@
 // it asks for its destination at once: the next node clicked is where it goes (Change
 // destination asks again). A click on it selects where it landed and offers Back,
 // which puts the view where it was; Enter does the same from the keyboard.
+// Switchboard: a YouTube video ("video") plays in its own node, under a strip that
+// drags it. A click on its poster, or Enter, puts the player there; its strip's Stop,
+// Enter again, the board leaving the screen or going in or out of full screen put the
+// poster back. What is playing is the editor's (EditorContext), never the node's data.
+// While a gesture of the canvas's own is under way — a press on it, or anything
+// dragged over the window — no player takes the pointer from it. A YouTube link
+// pasted (⌘V) or dropped on the canvas is the video; so is a box whose words are
+// only a link once typing in it ends — Enter, or a click away — and ⌘Z makes it the
+// box again. A video made is named for its title once YouTube says what that is.
 // Switchboard: a workspace's terminal can be pinned to the board as a node of its
 // own ("terminal"). The node is only a frame — header, buttons, a dark body — and
 // the host lays the live terminal over its body itself, from the geometry this
@@ -238,7 +247,13 @@ import {
   TERMINAL_HEADER,
   TERMINAL_MIN_FONT,
   TELEPORT_LABEL,
+  FLOW_VIDEO_DEFAULT_SIZE,
+  VIDEO_LABEL,
+  flowVideoDefaultSize,
+  flowVideoMinWidth,
+  flowVideoSizeForWidth,
   isFlowBoxShape,
+  isFlowVideoPortrait,
   type ClientRect,
   type TerminalSlot,
   type FlowBoxShape,
@@ -290,6 +305,14 @@ import type {
 import { call, writeClipboard } from "@/lib/bridge"
 // Switchboard: Google Images beside the canvas, and pictures dragged out of it.
 import { imageUrlsFromDrop, isUrlDrag } from "@/lib/diagrams/image-search"
+// Switchboard: a YouTube link pasted, dropped or typed, read as the video it links to;
+// and a video's address on YouTube, for ⌘C.
+import {
+  youTubeVideoFromDrop,
+  youTubeVideoFromText,
+  youTubeWatchUrl,
+  type YouTubeVideo,
+} from "@/lib/diagrams/youtube"
 import { FIT_VIEW_OPTIONS } from "./DiagramCanvas"
 import { ImageSearchPanel, type ImageSearchAsk } from "./ImageSearchPanel"
 import { DocumentPanel, type DocumentView } from "./DocumentPanel"
@@ -307,6 +330,7 @@ import {
   TerminalDot,
   TEXT_TONE_STYLES,
   TONE_STYLES,
+  VideoFace,
   WorkspaceTag,
 } from "./DiagramNodes"
 import { PickerGlyph, WorkspacePicker, workspaceDir, workspaceGone } from "./WorkspacePicker"
@@ -441,6 +465,9 @@ const TOOL_KEYS: Record<string, Tool | "image" | "images"> = {
   g: "images",
   p: "teleport",
 }
+
+/** Switchboard: no video playing. */
+const NO_VIDEOS: ReadonlyMap<string, string> = new Map()
 
 /** Switchboard: how many places Back can step back through. */
 const TELEPORT_BACK_LIMIT = 20
@@ -715,13 +742,24 @@ function isText(box: FlowBoxNodeData): boolean {
 /** Whether a node has text you can edit directly on the canvas. */
 function hasText(box: FlowBoxNodeData): boolean {
   // Switchboard: nor has a pinned terminal — its label is only its workspace — nor a
-  // teleport, which always says "Teleport".
-  return box.shape !== "image" && box.shape !== "document" && box.shape !== "terminal" && box.shape !== "teleport"
+  // teleport, which always says "Teleport", nor a video, whose label is its title.
+  return (
+    box.shape !== "image" &&
+    box.shape !== "document" &&
+    box.shape !== "terminal" &&
+    box.shape !== "teleport" &&
+    box.shape !== "video"
+  )
 }
 
 /** Switchboard: whether `node` is a teleport. */
 function isTeleport(node: Node): boolean {
   return (node.data as FlowBoxNodeData).shape === "teleport"
+}
+
+/** Switchboard: whether `node` is a YouTube video. */
+function isVideo(node: Node): boolean {
+  return (node.data as FlowBoxNodeData).shape === "video"
 }
 
 /** Switchboard: whether `node` is a pinned terminal. */
@@ -846,6 +884,9 @@ let flowCopy: FlowCopy | null = null
 
 /** A box's words as the clipboard gets them: its label, and its second line under it. */
 function clipboardWords(box: FlowBoxNodeData): string {
+  // Switchboard: a video's are its address on YouTube, so pasted anywhere else it is a
+  // link to it (and pasted back here, the copy check knows it).
+  if (box.shape === "video" && box.videoId) return youTubeWatchUrl({ videoId: box.videoId, start: box.videoStart })
   const label =
     normalizeFlowText(box.label) ||
     (box.shape === "image" ? "Image" : box.shape === "note" ? "Note" : UNTITLED_FLOW_LABEL)
@@ -945,6 +986,13 @@ type EditorContextValue = {
   startEditing: (id: string) => void
   /** Stops editing `id` — and nothing else, if another box has taken over. */
   stopEditing: (id: string) => void
+  /**
+   * Switchboard: stopEditing for Enter, Done and a click away — the ways typing in a
+   * box is kept — and a box whose words are then only a YouTube link, changed since
+   * editing began, becomes the video it links to. Never Escape, which puts the words
+   * back, nor anything else that ends an edit (an undo, Tab, another box taking over).
+   */
+  finishEditing: (id: string) => void
   updateNode: (id: string, patch: Partial<FlowBoxNodeData>, typing?: boolean) => void
   /** Asks for `id`'s second line to take focus once it is on screen. */
   requestDetailFocus: (id: string) => void
@@ -979,6 +1027,13 @@ type EditorContextValue = {
   pickingId: string | null
   /** Switchboard: a teleport's Change destination. */
   pickDestination: (id: string) => void
+  /**
+   * Switchboard: the video the node `id` is playing — the id it was played with — or
+   * undefined while it shows its poster. A click on the poster plays it (onNodeClick).
+   */
+  playingVideo: (id: string) => string | undefined
+  /** Switchboard: a video's Stop: its poster again. */
+  stopVideo: (id: string) => void
 }
 
 // How the boxes and arrows reach the editor's state. A context rather than
@@ -1037,6 +1092,7 @@ function terminalGone(wsId: string, choices: WorkspaceChoices | null, fresh: Fre
 // back, and Shift+Enter starts a new line. Enter continues a bullet list (the
 // second line itself is added from the text toolbar). In lists, Tab and
 // Shift+Tab change indentation; otherwise the canvas handles them.
+// Switchboard: text kept that is only a YouTube link is the video (finishEditing).
 function TextEditor({
   id,
   box,
@@ -1070,7 +1126,7 @@ function TextEditor({
     const newLine = event.shiftKey && !command
     if (event.key === "Enter" && !answerKey && !newLine) {
       event.preventDefault()
-      editor.stopEditing(id)
+      editor.finishEditing(id)
     } else if (event.key === "Escape") {
       event.preventDefault()
       // Keeps Escape from also leaving full screen.
@@ -1100,7 +1156,7 @@ function TextEditor({
       onBlur={(event) => {
         const next = event.relatedTarget
         if (next instanceof globalThis.Node && containerRef.current?.contains(next)) return
-        editor.stopEditing(id)
+        editor.finishEditing(id)
       }}
     >
       <RichTextField
@@ -1233,13 +1289,12 @@ function Resizer({
 
 // Switchboard: a pinned terminal is a node of its own kind — a different component,
 // so a node that changes kind across an undo is mounted afresh rather than handed
-// the other's hooks.
+// the other's hooks. So is a video.
 function EditableFlowNode(props: NodeProps) {
-  return (props.data as FlowBoxNodeData).shape === "terminal" ? (
-    <TerminalNode id={props.id} box={props.data as FlowBoxNodeData} selected={Boolean(props.selected)} />
-  ) : (
-    <EditableBoxNode {...props} />
-  )
+  const box = props.data as FlowBoxNodeData
+  if (box.shape === "terminal") return <TerminalNode id={props.id} box={box} selected={Boolean(props.selected)} />
+  if (box.shape === "video") return <VideoNode id={props.id} box={box} selected={Boolean(props.selected)} />
+  return <EditableBoxNode {...props} />
 }
 
 /**
@@ -1470,6 +1525,111 @@ function TerminalResizer({ id, size, editor }: { id: string; size: FlowSize | un
   )
 }
 
+/**
+ * Switchboard: a YouTube video on the board — its face (DiagramNodes.tsx VideoFace)
+ * inside the editor's outline, dots and fold badge. Whether it is playing is the
+ * editor's, never the node's: a click on its poster (onNodeClick) or Enter plays it,
+ * and its strip's Stop puts the poster back.
+ */
+function VideoNode({ id, box, selected }: { id: string; box: FlowBoxNodeData; selected: boolean }) {
+  const editor = useContext(EditorContext)
+  const connecting = useConnection((connection) => connection.inProgress)
+  const selectionRect = useStore((state) => state.nodesSelectionActive)
+  const interactive = editor?.interactive ?? true
+  const playing = box.videoId !== undefined && editor?.playingVideo(id) === box.videoId
+  const resizable = editor !== null && selected && editor.soleNodeId === id && !selectionRect && !connecting
+
+  return (
+    <div className={cx("relative size-full", interactive && "group")}>
+      <VideoFace
+        videoId={box.videoId}
+        videoStart={box.videoStart}
+        label={box.label}
+        playing={playing}
+        interactive={interactive}
+        onStop={() => editor?.stopVideo(id)}
+      />
+      {resizable ? <VideoResizer id={id} size={box.size} editor={editor} /> : null}
+      <div
+        aria-hidden="true"
+        className={cx(
+          "pointer-events-none absolute -inset-1 rounded-[13px] border-2 transition-opacity",
+          selected ? "border-brand opacity-100" : "border-brand/40 opacity-0 group-hover:opacity-100",
+        )}
+      />
+      {editor !== null && (editor.folds.get(id)?.arrows ?? 0) > 0 ? (
+        <FoldButton
+          fold={editor.folds.get(id)!}
+          label={box.label}
+          disabled={!interactive}
+          onClick={() => editor.expandFold(id)}
+        />
+      ) : null}
+      {FLOW_SIDES.map((side) => (
+        <Handle
+          key={side}
+          id={side}
+          type="source"
+          position={FLOW_SIDE_POSITIONS[side]}
+          style={HANDLE_STYLE}
+          className={cx(
+            "transition-opacity",
+            selected || connecting ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+          )}
+        />
+      ))}
+    </div>
+  )
+}
+
+/**
+ * Switchboard: a video's resize handles — its sides and its bottom corners, as a
+ * text's are (the middle of each short side is an arrow's dot, and React Flow moves a
+ * node dragged by a top control up and down with the pointer). Only ever wider or
+ * narrower: the height follows the width, so the player under the strip stays 16:9 —
+ * 9:16 standing up — however many times it is resized (flowVideoSizeForWidth), and
+ * never narrower than the least player YouTube allows either way up.
+ */
+function VideoResizer({ id, size, editor }: { id: string; size: FlowSize | undefined; editor: EditorContextValue }) {
+  const { startResize, resize } = editor
+  // Standing up or lying down, as it is drawn now — which no resize changes.
+  const portrait = isFlowVideoPortrait(size ?? FLOW_VIDEO_DEFAULT_SIZE)
+  const handles = useMemo(
+    () => ({
+      onResizeStart: () => startResize(),
+      onResize: (_: unknown, next: FlowSize) => resize(id, flowVideoSizeForWidth(next.width, portrait), false),
+      onResizeEnd: (_: unknown, next: FlowSize) => resize(id, flowVideoSizeForWidth(next.width, portrait), true),
+    }),
+    [id, portrait, startResize, resize],
+  )
+  const controls = [
+    ["left", ResizeControlVariant.Line],
+    ["right", ResizeControlVariant.Line],
+    ["bottom-left", ResizeControlVariant.Handle],
+    ["bottom-right", ResizeControlVariant.Handle],
+  ] as const
+  return (
+    <>
+      {controls.map(([position, variant]) => (
+        <NodeResizeControl
+          key={position}
+          position={position}
+          variant={variant}
+          resizeDirection="horizontal"
+          minWidth={flowVideoMinWidth(portrait)}
+          maxWidth={flowVideoSizeForWidth(FLOW_SIZE_MAX, portrait).width}
+          className={
+            variant === ResizeControlVariant.Line
+              ? "!border-brand after:absolute after:-inset-1 after:content-['']"
+              : "!size-2.5 !rounded-[3px] !border-[1.5px] !border-brand !bg-white"
+          }
+          {...handles}
+        />
+      ))}
+    </>
+  )
+}
+
 function EditableBoxNode({ id, data, selected }: NodeProps) {
   const box = data as FlowBoxNodeData
   const editor = useContext(EditorContext)
@@ -1640,6 +1800,12 @@ export type FlowEditorHandle = {
   copy: () => boolean
   cut: () => boolean
   pasteBoxes: (text: string) => boolean
+  /**
+   * Switchboard: Edit ▸ Paste of text that is one YouTube link, as the video it links
+   * to — false for any other text. Asked after pasteBoxes, so a video ⌘C copied (its
+   * words are its link) pastes as the copy.
+   */
+  pasteVideo: (text: string) => boolean
   /** Switchboard: the diagram as the canvas now holds it — what Rename writes. */
   currentSpec: () => FlowSpec
   /**
@@ -1829,6 +1995,20 @@ function FlowEditorCanvas({
   const [picking, setPicking] = useState<string | null>(null)
   const [teleportBack, setTeleportBack] = useState<{ viewport: Viewport; from: string }[]>([])
   const [arrival, setArrival] = useState<{ id: string; serial: number } | null>(null)
+  // Switchboard: the videos playing, by node, each with the video it was played with —
+  // the editor's to know, never the nodes' data, which is saved, compared and undone.
+  // Every one is back to its poster once the board leaves the screen or goes in or out
+  // of full screen (`over`, the fitKey they were played under): the page takes the
+  // players' iframes out of the document then, and put back, each would load again
+  // and start over, out loud.
+  const [videos, setVideos] = useState<{ over: string; playing: ReadonlyMap<string, string> }>(() => ({
+    over: fitKey,
+    playing: NO_VIDEOS,
+  }))
+  const playingVideos = shown && videos.over === fitKey ? videos.playing : NO_VIDEOS
+  useEffect(() => {
+    setVideos((now) => (now.over === fitKey && now.playing.size === 0 ? now : { over: fitKey, playing: NO_VIDEOS }))
+  }, [shown, fitKey])
 
   // ✦ Answer. Switchboard: any number at once, one per box — `askings` are
   // the answers being waited for, oldest first (the box that asked, and what
@@ -1981,6 +2161,7 @@ function FlowEditorCanvas({
       copy: () => shortcutsRef.current.copy(),
       cut: () => shortcutsRef.current.cut(),
       pasteBoxes: (text: string) => shortcutsRef.current.pasteBoxes(text),
+      pasteVideo: (text: string) => shortcutsRef.current.pasteVideo(text),
       currentSpec: () => JSON.parse(latestRef.current) as FlowSpec,
       adopt: (spec: FlowSpec) => shortcutsRef.current.adopt(spec),
       pinTerminal: (wsId: string, rect: ClientRect, body?: ClientRect | null) =>
@@ -2247,6 +2428,9 @@ function FlowEditorCanvas({
 
   // Mirrors editingId for the callbacks below, which must not go stale.
   const editingRef = useRef<string | null>(null)
+  // Switchboard: the label of the box being edited as editing began — what
+  // finishEditing tells words typed since by.
+  const editedFromRef = useRef("")
   // Where Tab moved the boxes around a new free text, by the new text's id —
   // put back if that text is left blank and removed, so the branch it would
   // have joined is centred as it was.
@@ -2270,6 +2454,9 @@ function FlowEditorCanvas({
     if (onlyIf !== undefined && current !== onlyIf) return
     if (current === next) return
     editingRef.current = next
+    // Switchboard: see editedFromRef.
+    const started = nodesRef.current.find((node) => node.id === next)?.data as FlowBoxNodeData | undefined
+    editedFromRef.current = started?.label ?? ""
     setEditingId(next)
     if (next !== null) settleSelection()
     if (current === null) return
@@ -2638,7 +2825,8 @@ function FlowEditorCanvas({
         // Switchboard: a pinned terminal's size is written only once it is let go —
         // its slot reports the committed size, and the host sizes the shell to it then.
         if (box.shape === "terminal") return node
-        return box.shape === "text"
+        // Switchboard: and a video's height follows its width as a text's follows its lines.
+        return box.shape === "text" || box.shape === "video"
           ? { ...node, data: box, height: drawn.height }
           : { ...node, data: box }
       }),
@@ -3054,9 +3242,14 @@ function FlowEditorCanvas({
     // there is no picture to repeat. A note keeps its size; a text runs as
     // wide as its own words. Switchboard: a box resized by hand keeps its size too.
     // Switchboard: after a pinned terminal too — there is no second shell to add.
-    // Switchboard: and after a teleport, which is a way across the board, not a step.
+    // Switchboard: and after a teleport, which is a way across the board, not a step,
+    // and after a video, as after a picture.
     const box: FlowBoxNodeData =
-      from.shape === "image" || from.shape === "document" || from.shape === "terminal" || from.shape === "teleport"
+      from.shape === "image" ||
+      from.shape === "document" ||
+      from.shape === "terminal" ||
+      from.shape === "teleport" ||
+      from.shape === "video"
         ? plainBox({ label: "", shape: "rounded", tone: "default" })
         : {
             ...from,
@@ -3334,6 +3527,208 @@ function FlowEditorCanvas({
     return () => clearTimeout(timer)
   }, [arrival])
 
+  // ─── Switchboard: videos ───
+
+  // A click on a video's poster, or Enter on it: the player, in its place. (The click
+  // is the gesture the player's autoplay plays on.)
+  function playVideo(id: string) {
+    const node = nodesRef.current.find((candidate) => candidate.id === id)
+    const videoId = node && isVideo(node) ? (node.data as FlowBoxNodeData).videoId : undefined
+    if (!videoId || !shown) return
+    setVideos((now) => ({
+      over: fitKey,
+      playing: new Map([...(now.over === fitKey ? now.playing : []), [id, videoId]]),
+    }))
+  }
+
+  // Its strip's Stop, or Enter again: its poster.
+  const stopVideo = useCallback((id: string) => {
+    setVideos((now) => {
+      if (!now.playing.has(id)) return now
+      const playing = new Map(now.playing)
+      playing.delete(id)
+      return { ...now, playing }
+    })
+  }, [])
+
+  // A player takes every press and wheel over it, and what is dragged over it lands in
+  // YouTube's page. So while the canvas has a gesture under way — a press on it (a pan,
+  // a drag-select, a node dragged or resized, an arrow drawn), or anything dragged over
+  // the window — its wrapper is marked data-flow-gesture and every player lets go of the
+  // pointer (styles.css): a drag that crosses one keeps going, and a link dropped over
+  // one lands on the canvas. A mark on the element rather than state, so a press
+  // re-renders nothing. Drags are counted, as `dropping` counts them, because dragenter
+  // and dragleave fire for every element crossed.
+  useEffect(() => {
+    const wrapper = wrapperRef.current
+    if (!wrapper) return
+    let pressed = false
+    let dragged = 0
+    const mark = () => wrapper.toggleAttribute("data-flow-gesture", pressed || dragged > 0)
+    // A press means no drag is on its way, whatever the count missed.
+    const press = () => { pressed = true; dragged = 0; mark() }
+    const release = () => { if (pressed) { pressed = false; mark() } }
+    const enter = () => { dragged += 1; mark() }
+    const leave = () => { if (dragged > 0) { dragged -= 1; mark() } }
+    const over = () => { if (dragged > 0) { dragged = 0; mark() } }
+    wrapper.addEventListener("pointerdown", press, true)
+    window.addEventListener("pointerup", release, true)
+    window.addEventListener("pointercancel", release, true)
+    window.addEventListener("dragenter", enter, true)
+    window.addEventListener("dragleave", leave, true)
+    window.addEventListener("drop", over, true)
+    window.addEventListener("dragend", over, true)
+    return () => {
+      wrapper.removeEventListener("pointerdown", press, true)
+      window.removeEventListener("pointerup", release, true)
+      window.removeEventListener("pointercancel", release, true)
+      window.removeEventListener("dragenter", enter, true)
+      window.removeEventListener("dragleave", leave, true)
+      window.removeEventListener("drop", over, true)
+      window.removeEventListener("dragend", over, true)
+      wrapper.removeAttribute("data-flow-gesture")
+    }
+  }, [])
+
+  // A video at `at` — where it was pasted or dropped — clear of what is there,
+  // selected and in view, as one undo step. Then its title.
+  function placeVideo(video: YouTubeVideo, at: { x: number; y: number }) {
+    record()
+    lastRecordAt.current = 0
+    const box: FlowBoxNodeData = {
+      ...plainBox({ label: VIDEO_LABEL, shape: "video", tone: "default" }),
+      videoId: video.videoId,
+      videoStart: video.start,
+      size: flowVideoDefaultSize(video.short === true),
+    }
+    const { width, height } = boxSize(box)
+    const position = clearOfBoxes({ x: snap(at.x - width / 2), y: snap(at.y - height / 2), width, height }, nodesRef.current.map(rectOf))
+    const inserted = insertBox(box, position)
+    reveal(inserted.rect)
+    void nameVideo(inserted.id, video.videoId)
+  }
+
+  // ⌘V of text that is one YouTube link, and not a copy of boxes (pasteBoxes is
+  // asked first): the video, centred where pasted boxes would be.
+  function pasteVideo(text: string): boolean {
+    const video = youTubeVideoFromText(text)
+    if (!video) return false
+    placeVideo(video, pasteSpot())
+    return true
+  }
+
+  // See EditorContextValue.finishEditing. The words are judged as they were typed,
+  // before changeEditing tidies them; a stop that ends nothing — another box has
+  // taken over — turns nothing into a video either.
+  function finishEditing(id: string) {
+    const node = editingRef.current === id ? nodesRef.current.find((candidate) => candidate.id === id) : undefined
+    const box = node?.data as FlowBoxNodeData | undefined
+    const video =
+      box && hasText(box) && !box.detail?.trim() && !sameWords(box.label, editedFromRef.current)
+        ? youTubeVideoFromText(box.label)
+        : null
+    changeEditing(null, id)
+    if (video) videoInPlace(id, video)
+  }
+
+  // For the nodes, through the context: one function for the editor's whole life.
+  const finishRef = useRef(finishEditing)
+  useEffect(() => {
+    finishRef.current = finishEditing
+  })
+  const finishEditingStable = useCallback((id: string) => finishRef.current(id), [])
+
+  // A box left as only a link, as the video it links to, in its place: the same node,
+  // so its arrows stay, and an undo step of its own after the typing's — ⌘Z is the
+  // box again, the link in it. Its words go, and the colours and type they were drawn
+  // in. It grows round the box's middle, as a box does when its words wrap, so what
+  // was above the box is above it and what was below, below — centred on the box, or,
+  // hanging off a box as Tab hangs one, in its column — and what hangs off it is kept
+  // as far to its right. Then its tree is laid out again round it, and what it would
+  // land on makes room, as Attached lays a box out in its branch.
+  function videoInPlace(id: string, video: YouTubeVideo) {
+    const node = nodesRef.current.find((candidate) => candidate.id === id)
+    if (!node) return
+    record()
+    lastRecordAt.current = 0
+    const before = node.data as FlowBoxNodeData
+    const box: FlowBoxNodeData = {
+      ...plainBox({ label: VIDEO_LABEL, shape: "video", tone: "default" }),
+      videoId: video.videoId,
+      videoStart: video.start,
+      size: flowVideoDefaultSize(video.short === true),
+      detached: before.detached,
+    }
+    const { width, height } = boxSize(box)
+    const was = rectOf(node)
+    const edges = edgesRef.current
+    const hanging =
+      !before.detached &&
+      edges.some((edge) => edge.target === id && edge.sourceHandle === "right" && edge.targetHandle === "left")
+    const position = {
+      x: hanging ? was.x : Math.round(was.x + (was.width - width) / 2),
+      y: Math.round(was.y + (was.height - height) / 2),
+    }
+    const shown = showing(nodesRef.current, edges)
+    const below = flowBranches(shown.boxes, shown.edges, [id]).get(id) ?? []
+    const dx = position.x + width - (was.x + was.width)
+    const moves = new Map([[id, position]])
+    for (const candidate of nodesRef.current) {
+      if (dx !== 0 && below.includes(candidate.id)) {
+        moves.set(candidate.id, { x: candidate.position.x + dx, y: candidate.position.y })
+      }
+    }
+    const laid = nodesRef.current.map((candidate) => {
+      const to = moves.get(candidate.id)
+      if (candidate.id === id) return { ...candidate, data: box, width, height, position }
+      return to ? { ...candidate, position: to } : candidate
+    })
+    // Where it and what hangs off it were says nothing of what they may crowd now:
+    // tidyFlowTree's `revealed`, so all of it keeps clear of what is round it.
+    const after = showing(laid, edges)
+    for (const [moved, to] of tidyFlowTree(after.boxes, after.edges, [id], [id, ...below])) moves.set(moved, to)
+    for (const pending of tabMovesRef.current.values()) {
+      for (const moved of moves.keys()) pending.delete(moved)
+    }
+    const apply = (current: Node[]) =>
+      carryFolded(
+        current,
+        current.map((candidate) => {
+          const to = moves.get(candidate.id)
+          if (candidate.id === id) return { ...candidate, data: box, width, height, position: to ?? position, selected: true }
+          const settled = to ? { ...candidate, position: to } : candidate
+          return settled.selected ? { ...settled, selected: false } : settled
+        }),
+        edges,
+      )
+    nodesRef.current = apply(nodesRef.current)
+    setNodes(apply)
+    setEdges(deselected)
+    settleSelection()
+    reveal({ ...(moves.get(id) ?? position), width, height })
+    void nameVideo(id, video.videoId)
+  }
+
+  // A video just made, named for its title once YouTube says what that is — in the
+  // undo step that made it, not one of its own: Undo takes the video away named, and
+  // Redo brings it back so. Only one still there, still that video and still unnamed;
+  // and nothing on a page whose bridge can't ask (the documents fixture's), which
+  // call() answers with an error, as it does when YouTube can't be reached.
+  async function nameVideo(id: string, videoId: string) {
+    const info = await call("diagramsVideoInfo", videoId)
+    if (!alive.current || !info.ok) return
+    const title = normalizeFlowText(info.data.title)
+    if (!title) return
+    const unnamed = (node: Node) => {
+      const box = node.data as FlowBoxNodeData
+      return node.id === id && box.shape === "video" && box.videoId === videoId && box.label === VIDEO_LABEL
+    }
+    const apply = (current: Node[]) =>
+      current.map((node) => (unnamed(node) ? withBox(node, { ...(node.data as FlowBoxNodeData), label: title }) : node))
+    nodesRef.current = apply(nodesRef.current)
+    setNodes(apply)
+  }
+
   function duplicate(node: Node, documentCopied = false) {
     const original = node.data as FlowBoxNodeData
     // Switchboard: one terminal per workspace on a board — a pinned one has no copy.
@@ -3382,6 +3777,16 @@ function FlowEditorCanvas({
   // Where the pointer last was over the canvas, in the window: where ⌘V puts
   // what was copied.
   const pointerRef = useRef<{ x: number; y: number } | null>(null)
+
+  // Where ⌘V puts things, on the canvas: under the pointer, or the middle of the
+  // view before the pointer has been over the canvas.
+  function pasteSpot(): { x: number; y: number } {
+    const bounds = wrapperRef.current?.getBoundingClientRect()
+    return screenToFlowPosition(
+      pointerRef.current ??
+        (bounds ? { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } : { x: 0, y: 0 }),
+    )
+  }
 
   // ⌘C: the boxes selected, and the arrows between them, kept for ⌘V — and
   // their words, top to bottom, on the clipboard for pasting anywhere else.
@@ -3434,11 +3839,7 @@ function FlowEditorCanvas({
   function pasteBoxes(text: string, prepared?: FlowCopy, position?: { x: number; y: number }): boolean {
     const copy = prepared ?? flowCopy
     if (!copy || !sameClipboard(text, copy.text)) return false
-    const bounds = wrapperRef.current?.getBoundingClientRect()
-    const pointer = pointerRef.current
-    const spot = position ?? screenToFlowPosition(
-      pointer ?? (bounds ? { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } : { x: 0, y: 0 }),
-    )
+    const spot = position ?? pasteSpot()
     if (copy.documents) {
       void (async () => {
         try {
@@ -3568,11 +3969,12 @@ function FlowEditorCanvas({
     const canvasNodes = nodesRef.current
     const canvasEdges = edgesRef.current
     // Named to the model so it doesn't repeat what is already there. Switchboard: a
-    // pinned terminal hanging off it says nothing.
+    // pinned terminal hanging off it says nothing, nor does a video, whose title is a
+    // stranger's words and never part of what is asked.
     const existing = canvasEdges
       .filter((edge) => edge.source === node.id && edge.sourceHandle === "right")
       .map((edge) => canvasNodes.find((other) => other.id === edge.target))
-      .filter((other) => other !== undefined && !isTerminal(other))
+      .filter((other) => other !== undefined && !isTerminal(other) && !isVideo(other))
       .map((other) => (other?.data as FlowBoxNodeData | undefined)?.label.trim() ?? "")
       .filter((label) => label.length > 0)
       .slice(0, FLOW_AI_MAX_EXISTING)
@@ -3743,7 +4145,11 @@ function FlowEditorCanvas({
           edges: selection.edges,
           parents: selection.incoming.flatMap((edge) => {
             const parent = parentNodes.get(edge.from)
-            return parent ? [{ id: parent.id, label: parent.label, detail: parent.detail, arrow: edge.label }] : []
+            if (!parent) return []
+            // Switchboard: a video the discussion hangs off is sent as what it is, never
+            // its title — a stranger's words are no part of the prompt.
+            if (parent.shape === "video") return [{ id: parent.id, label: VIDEO_LABEL, arrow: edge.label }]
+            return [{ id: parent.id, label: parent.label, detail: parent.detail, arrow: edge.label }]
           }),
           title: diagramName ?? metaRef.current.title,
         },
@@ -4020,6 +4426,24 @@ function FlowEditorCanvas({
   }, [fold, edges, nodes])
   const folds = useMemo(() => new Map(JSON.parse(foldsJson) as [string, FoldBadge][]), [foldsJson])
 
+  // Switchboard: a video deleted, undone, folded away or given another video to play
+  // stops — none of them comes back playing, which would start it over, out loud.
+  useEffect(() => {
+    if (videos.playing.size === 0) return
+    const kept = new Map(
+      [...videos.playing].filter(([id, videoId]) => {
+        const node = nodes.find((candidate) => candidate.id === id)
+        return (
+          node !== undefined &&
+          isVideo(node) &&
+          (node.data as FlowBoxNodeData).videoId === videoId &&
+          !fold.hidden.has(id)
+        )
+      }),
+    )
+    if (kept.size !== videos.playing.size) setVideos({ over: videos.over, playing: kept })
+  }, [nodes, fold, videos])
+
   // One node click closes every direct branch, or reopens them all. Fold flags
   // remain on the edges so older diagrams (including partial folds) load as
   // they were. The whole action is one undo step and one layout pass.
@@ -4222,6 +4646,21 @@ function FlowEditorCanvas({
 
   function onDrop(event: React.DragEvent) {
     const at = screenToFlowPosition({ x: event.clientX, y: event.clientY })
+    // Switchboard: a YouTube link is the video, at the drop — read before any file or
+    // picture the drag carries, so a thumbnail dragged off YouTube is the video it
+    // links to rather than a still of it, and main is never asked to fetch a video's
+    // page as a picture.
+    const video = isAddressDrag(event)
+      ? youTubeVideoFromDrop({
+          uriList: event.dataTransfer.getData("text/uri-list"),
+          plain: event.dataTransfer.getData("text/plain"),
+        })
+      : null
+    if (video) {
+      event.preventDefault()
+      placeVideo(video, at)
+      return
+    }
     const files = [...event.dataTransfer.files]
     if (files.length > 0) {
       event.preventDefault()
@@ -4653,6 +5092,12 @@ function FlowEditorCanvas({
       if ((soleNode.data as FlowBoxNodeData).shape === "document") { openDocument(soleNode); return true }
       // Switchboard: Enter on a teleport goes where it goes.
       if (isTeleport(soleNode)) { teleport(soleNode); return true }
+      // Switchboard: on a video, it plays — or, while it plays, stops.
+      if (isVideo(soleNode)) {
+        if (playingVideos.has(soleNode.id)) stopVideo(soleNode.id)
+        else playVideo(soleNode.id)
+        return true
+      }
       if (!hasText(soleNode.data as FlowBoxNodeData)) return false
       changeEditing(soleNode.id)
       return true
@@ -4681,6 +5126,7 @@ function FlowEditorCanvas({
     copy: () => boolean
     cut: () => boolean
     pasteBoxes: (text: string) => boolean
+    pasteVideo: (text: string) => boolean
     adopt: (spec: FlowSpec) => void
     cancelPicking: () => boolean
   }>({
@@ -4701,6 +5147,7 @@ function FlowEditorCanvas({
     copy: () => false,
     cut: () => false,
     pasteBoxes: () => false,
+    pasteVideo: () => false,
     cancelPicking: () => false,
   })
   useEffect(() => {
@@ -4743,6 +5190,7 @@ function FlowEditorCanvas({
         return true
       },
       pasteBoxes,
+      pasteVideo,
       // ⌘↵ or ⌘I: ✦ Answer for the box selected — or the one being typed in, which
       // it finishes first.
       answer: () => {
@@ -5047,6 +5495,7 @@ function FlowEditorCanvas({
       editingId,
       startEditing: (id) => changeEditing(id),
       stopEditing: (id) => changeEditing(null, id),
+      finishEditing: finishEditingStable,
       updateNode,
       requestDetailFocus,
       takeDetailFocus,
@@ -5063,10 +5512,13 @@ function FlowEditorCanvas({
       expandFold,
       pickingId: picking,
       pickDestination: pickDestinationStable,
+      playingVideo: (id) => playingVideos.get(id),
+      stopVideo,
     }),
     [
       editingId,
       changeEditing,
+      finishEditingStable,
       updateNode,
       requestDetailFocus,
       takeDetailFocus,
@@ -5083,6 +5535,8 @@ function FlowEditorCanvas({
       expandFold,
       picking,
       pickDestinationStable,
+      playingVideos,
+      stopVideo,
     ],
   )
 
@@ -5200,6 +5654,16 @@ function FlowEditorCanvas({
               if (tool !== "select" || event.shiftKey || event.metaKey || event.ctrlKey) return
               const clicked = nodesRef.current.find((candidate) => candidate.id === node.id)
               if (clicked && isTeleport(clicked)) teleport(clicked)
+              // Switchboard: and one on a video's poster plays it — not one on its strip,
+              // which only selects it. (A drag ends in no click.)
+              else if (
+                clicked &&
+                isVideo(clicked) &&
+                event.target instanceof Element &&
+                event.target.closest(".flow-video-poster")
+              ) {
+                playVideo(clicked.id)
+              }
             }}
             onPaneClick={onPaneClick}
             onEdgeDoubleClick={() => {
@@ -5284,7 +5748,8 @@ function FlowEditorCanvas({
                   onToggleDetail={() =>
                     toggleDetail(editingNode.id, editingNode.data as FlowBoxNodeData)
                   }
-                  onDone={() => changeEditing(null)}
+                  // Switchboard: as Enter, so a box left as only a YouTube link is its video.
+                  onDone={() => finishEditing(editingNode.id)}
                 />
               ) : (
                 <BoxBar
@@ -5998,9 +6463,14 @@ function BoxBar({
   const dashed = shared(boxes, "dashed")
   const allBoxes = boxes.every((box) => isFlowBoxShape(box.shape))
   // Switchboard: nor a pinned terminal, which is the terminal's colours, nor a
-  // teleport, which is a teleport's.
+  // teleport, which is a teleport's, nor a video, which is YouTube's.
   const colourable = boxes.every(
-    (box) => box.shape !== "image" && box.shape !== "document" && box.shape !== "terminal" && box.shape !== "teleport",
+    (box) =>
+      box.shape !== "image" &&
+      box.shape !== "document" &&
+      box.shape !== "terminal" &&
+      box.shape !== "teleport" &&
+      box.shape !== "video",
   )
   // Swatches drawn as notes or ink only when every node selected is one.
   const swatch: "box" | "note" | "text" =
@@ -7820,6 +8290,8 @@ const SHORTCUTS: [string, string][] = [
   ["⌘ I", "Answer or condense with AI"],
   ["⌘ D", "Duplicate"],
   ["⌘ C  ⌘ V", "Copy, paste at the pointer"],
+  // Switchboard: and a link to a YouTube video is the video.
+  ["⌘ V", "Paste a YouTube link as its video"],
   ["⌘ Z", "Undo"],
   ["⌫", "Delete"],
   ["Space", "Hold and drag to pan"],

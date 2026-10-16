@@ -5,7 +5,9 @@
 // own main process. Its IPC is stubbed except for the whiteboard store, which is the
 // REAL src/main/whiteboards.js rooted beside a temporary SWITCHBOARD_CONFIG. Every
 // workspace, folder and board is fictional; no local config, Claude account, tmux
-// session or ~/.switchboard is read or written.
+// session or ~/.switchboard is read or written. Every https request the page makes is
+// answered here (a video's poster and player from fixtures, anything else a 404), so
+// nothing reaches the network.
 //
 // Covers: the Whiteboards rail screen and its home list; a box resized from its corner
 // (kept in the board file, opened again at its size, copied by Tab) and holding words
@@ -13,8 +15,18 @@
 // it is open, drawn at once, not written back, and put back by Undo; a teleport placed
 // from the rail and given its destination by a click, a click on one flying the view to
 // its destination and Back, Escape while it waits, and its destination deleted and
-// undone; opening a board, in a tab of the strip (the library pinned first, no
-// breadcrumb or status line, a bar of full screen and Actions);
+// undone; a YouTube video — its poster with no player before Play, a link pasted (⌘V)
+// as its video at the pointer and named for the title main gives, Undo of it, words
+// that are not a link pasted to no effect, a video copied and pasted as the copy, a
+// thumbnail dropped as its video and never fetched as a picture, a box typed as a link
+// turned into the video by Enter and back by one Undo, a link inside a sentence left as
+// words, a click on the poster playing youtube-nocookie's player from its start, a drag
+// by its strip (the player letting go of the pointer), the Edit menu declined while the
+// player has the keyboard, Open on YouTube and Stop, Enter playing and stopping it, a
+// resize keeping 16:9, Tab adding a plain box, and the poster again after the board
+// leaves the screen and after full screen, with nothing asked of the network but the
+// poster and the player; opening a board, in a tab of the strip (the library pinned
+// first, no breadcrumb or status line, a bar of full screen and Actions);
 // Actions ▸
 // Open terminal… floating the workspace's own shell (the Terminal tab's xterm, its
 // scrollback, one shell); a second workspace's panel from the tray's + (a toggle: a
@@ -85,7 +97,7 @@ if (!process.versions.electron) {
     process.exitCode = 1;
   });
 } else {
-  const { app, BrowserWindow, ipcMain, Menu } = require('electron');
+  const { app, BrowserWindow, ipcMain, Menu, nativeImage, protocol } = require('electron');
   const temp = process.argv[2];
   app.setPath('userData', path.join(temp, 'profile'));
   const whiteboards = require('../src/main/whiteboards');
@@ -177,11 +189,46 @@ if (!process.versions.electron) {
     migrate: 'migrate',
   })) handle('wb:' + name, (...args) => whiteboards[method](...args));
   handle('diagrams:getImagePath', src => whiteboards.getImagePath(src));
+  // A video's title, as main asks YouTube for it: a fictional one, at once. And the
+  // pictures and links the bundle hands main, recorded — a YouTube link or thumbnail
+  // dropped on a board is its video, never a picture to fetch.
+  const videoInfoAsked = [];
+  const imagesFetched = [];
+  const opened = [];
+  handle('diagrams:videoInfo', id => { videoInfoAsked.push(id); return { ok: true, data: { title: 'Example title for ' + id, author: 'Example channel' } }; });
+  handle('diagrams:fetchImage', url => { imagesFetched.push(url); return { ok: false, error: 'Example: no pictures here' }; });
+  handle('open', url => { opened.push(url); return { ok: true }; });
+  // Every https request the page makes, answered here and recorded: a video's poster
+  // (YouTube's image server) and its player (youtube-nocookie.com) from fixtures, and
+  // anything else a 404 — nothing reaches the network.
+  const httpsAsked = [];
+  const httpsStrays = [];
+  const PLAYER_PAGE = '<!doctype html><meta charset="utf-8"><title>Example player</title><body style="margin:0;background:#111;color:#eee;font:14px sans-serif">Example player</body>';
   whiteboards.onChange(change => { if (window && !window.isDestroyed()) window.webContents.send('sb:evt:wbChanged', change); });
   shells.on('data', (id, chunk) => window?.webContents.send('sb:evt:term', id, chunk));
   shells.on('state', state => window?.webContents.send('sb:evt:termState', state));
 
   app.whenReady().then(async () => {
+    // A poster as YouTube's hqdefault.jpg is one: 480×360, a 16:9 picture letterboxed in
+    // black — wider than the 120px grey stand-in it sends for a picture it hasn't got.
+    const pixels = Buffer.alloc(480 * 360 * 4);
+    for (let i = 0; i < pixels.length; i += 4) {
+      const row = Math.floor(i / 4 / 480);
+      pixels.set(row >= 45 && row < 315 ? [200, 120, 60, 255] : [0, 0, 0, 255], i);
+    }
+    const poster = nativeImage.createFromBitmap(pixels, { width: 480, height: 360 }).toJPEG(80);
+    protocol.handle('https', request => {
+      const url = new URL(request.url);
+      httpsAsked.push(request.url);
+      if (url.hostname === 'i.ytimg.com' && /^\/vi\/[\w-]{11}\/hqdefault\.jpg$/.test(url.pathname)) {
+        return new Response(poster, { headers: { 'content-type': 'image/jpeg' } });
+      }
+      if (url.hostname === 'www.youtube-nocookie.com' && url.pathname.startsWith('/embed/')) {
+        return new Response(PLAYER_PAGE, { headers: { 'content-type': 'text/html; charset=utf-8' } });
+      }
+      httpsStrays.push(request.url);
+      return new Response('Not in this test', { status: 404 });
+    });
     window = new BrowserWindow({ show: false, width: 1440, height: 960,
       webPreferences: { preload: path.join(repo, 'src/preload.js'), offscreen: true, backgroundThrottling: false } });
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Edit', submenu: [
@@ -451,7 +498,8 @@ if (!process.versions.electron) {
       await check('an open board draws what a terminal wrote to it', async () => {
         await until(`!!document.querySelector(${q(fromTerminal)})`);
         assert.equal(await run(`document.querySelector(${q(fromTerminal)}).textContent`), 'Added from a terminal');
-        assert.equal(await run(`!!document.querySelector(${q(sizedSlab + ' .react-flow__edge[aria-label="Edge from grow to from-terminal"]')})`), true);
+        // Its arrow is drawn once React Flow has measured the box: a frame or more after it.
+        await until(`!!document.querySelector(${q(sizedSlab + ' .react-flow__edge[aria-label="Edge from grow to from-terminal"]')})`);
         // The resized box kept its size through the CLI's write.
         assert.equal((await nodeSize(growNode)).width, resized.width);
       });
@@ -566,6 +614,350 @@ if (!process.versions.electron) {
         await until(`!!document.querySelector(${q(teleNode('far'))})`);
         assert.equal(await run(`document.querySelector(${q(teleNode('jump'))}).textContent`), 'Teleportto Far away step');
         assert.equal(boardFile(tele.data.id).spec.nodes.find(n => n.id === 'jump').teleportTo, 'far');
+      });
+      await run('SB.go({view:"whiteboards",folder:"all"})');
+      await until(`SB.state.route.view === "whiteboards" && !!document.querySelector(${q('#main .wbrow[data-wb-board="' + boardId + '"]')})`);
+
+      mark('a YouTube video: its poster, pasted, copied, dropped, typed; played, dragged, resized; Tab, Enter, off screen');
+      // A board of its own: a video already on it (played from 42s), a box to type a link
+      // into, one to write a link inside a sentence, and one far off, so the view fitted
+      // to the board leaves its middle empty for what is pasted and dropped there.
+      const errorsBeforeVideo = errors.length;
+      const vid = await whiteboards.create({ folderId: null, name: 'Video flow', workspace: wsId, spec: { kind: 'flow', nodes: [
+        { id: 'talk', label: 'Example talk', shape: 'video', videoId: 'exampleVid1', videoStart: 42, position: { x: 340, y: 60 } },
+        { id: 'link', label: 'Paste the link here', position: { x: 60, y: 520 } },
+        { id: 'prose', label: 'Some words', position: { x: 60, y: 860 } },
+        { id: 'later', label: 'Later step', position: { x: 1500, y: 900 } },
+      ], edges: [] } });
+      assert.equal(vid.ok, true, vid.error);
+      const vidSlab = `.dgslab[data-wb-board="${vid.data.id}"]`;
+      const vidNode = id => `${vidSlab} .react-flow__node[data-id="${id}"]`;
+      const videoCount = n => `document.querySelectorAll(${q(vidSlab + ' .flow-video')}).length === ${n}`;
+      const otherVideo = () => run(`Array.from(document.querySelectorAll(${q(vidSlab + ' .react-flow__node')})).filter(n => n.dataset.id !== 'talk' && n.querySelector('.flow-video')).map(n => n.dataset.id)[0]`);
+      const players = () => run(`Array.from(document.querySelectorAll(${q(vidSlab + ' iframe')})).map(f => f.getAttribute('src'))`);
+      const vidSpec = async () => {
+        await run(`${apiOf(vid.data.id)}.flush()`);
+        await whiteboards.settle();
+        return boardFile(vid.data.id).spec;
+      };
+      // A node where React Flow draws it, in canvas units; and a canvas point in the window.
+      const placed = id => run(`(() => { const n = document.querySelector(${q(vidNode(id))}); if (!n) return null; const m = /translate\\(([-\\d.]+)px, *([-\\d.]+)px\\)/.exec(n.style.transform); return { x: +m[1], y: +m[2], width: n.offsetWidth, height: n.offsetHeight }; })()`);
+      const vidView = () => run(`(() => { const box = document.querySelector(${q(vidSlab + ' .react-flow')}).getBoundingClientRect(); const m = /translate\\(([-\\d.]+)px, *([-\\d.]+)px\\) scale\\(([\\d.]+)\\)/.exec(document.querySelector(${q(vidSlab + ' .react-flow__viewport')}).style.transform); return { left: box.left + +m[1], top: box.top + +m[2], zoom: +m[3] }; })()`);
+      const onScreen = async point => {
+        const v = await vidView();
+        return { x: Math.round(v.left + point.x * v.zoom), y: Math.round(v.top + point.y * v.zoom) };
+      };
+      // Centred on `at` but for the snap to the canvas's grid.
+      const centredOn = (box, at) => Math.abs(box.x + box.width / 2 - at.x) <= 20 && Math.abs(box.y + box.height / 2 - at.y) <= 20;
+      const keyIn = keyCode => {
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode });
+        window.webContents.sendInputEvent({ type: 'keyUp', keyCode });
+      };
+      const soon = async (ready, what) => {
+        for (let i = 0; i < 100; i++) { if (await ready()) return; await sleep(20); }
+        throw new Error('Timed out waiting for ' + what);
+      };
+      // A box's words replaced as ⌘V in its field replaces them; the edit goes on.
+      const typeInto = async (id, text) => {
+        await run(`document.querySelector(${q(vidNode(id))}).dispatchEvent(new MouseEvent("dblclick", {bubbles:true}))`);
+        await until('document.activeElement.isContentEditable');
+        await run('getSelection().selectAllChildren(document.activeElement)');
+        await run(`(() => { const data = new DataTransfer(); data.setData('text/plain', ${q(text)}); document.activeElement.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true })); })()`);
+        await until(`document.activeElement.textContent === ${q(text)}`);
+      };
+      const editingHere = `!!document.querySelector(${q(vidSlab + ' [data-flow-text][contenteditable]')})`;
+      const askedBefore = httpsAsked.length;
+      await run(`SB.go({view:'whiteboard',board:${q(vid.data.id)}})`);
+      await until(`!!document.querySelector(${q(vidNode('talk') + ' .flow-video')})`);
+      await settled(vidSlab);
+      await check('a video shows its poster, and no player', async () => {
+        const img = vidNode('talk') + ' .flow-video-poster img';
+        await until(`document.querySelector(${q(img)})?.naturalWidth === 480`);
+        assert.equal(await run(`document.querySelector(${q(img)}).getAttribute('src')`), 'https://i.ytimg.com/vi/exampleVid1/hqdefault.jpg');
+        assert.equal(await run(`document.querySelector(${q(vidNode('talk') + ' .flow-video-poster')}).dataset.pictured`), 'true');
+        assert.equal(await run(`document.querySelector(${q(vidNode('talk') + ' .flow-video-head b')}).textContent`), 'Example talk');
+        assert.deepEqual(await players(), []);
+        // Nothing of YouTube's but the poster's picture before Play.
+        assert.deepEqual([...new Set(httpsAsked.slice(askedBefore))], ['https://i.ytimg.com/vi/exampleVid1/hqdefault.jpg']);
+      });
+      await capture('video-poster');
+
+      // ⌘V of a youtu.be link with the pointer in the board's empty middle (a press there
+      // first): the video there, from 1m5s, named for its title; Undo takes it away.
+      const middle = { x: 1100, y: 600 };
+      const pasteAt = await onScreen(middle);
+      await press(pasteAt.x, pasteAt.y);
+      edit('paste', 'https://youtu.be/exampleVid2?t=1m5s&si=x');
+      await check('⌘V of a YouTube link adds its video at the pointer, named for its title', async () => {
+        await until(videoCount(2));
+        const id = await otherVideo();
+        assert.equal(id, 'youtube-video');
+        const box = await placed(id);
+        assert.ok(centredOn(box, middle), JSON.stringify({ box, middle }));
+        assert.deepEqual([box.width, box.height], [480, 300]);
+        assert.equal(await run(`document.querySelector(${q(vidNode(id))}).classList.contains('selected')`), true);
+        await until(`document.querySelector(${q(vidNode(id) + ' .flow-video-head b')})?.textContent === 'Example title for exampleVid2'`);
+        const saved = (await vidSpec()).nodes.find(n => n.id === id);
+        assert.deepEqual({ shape: saved.shape, videoId: saved.videoId, videoStart: saved.videoStart, label: saved.label },
+          { shape: 'video', videoId: 'exampleVid2', videoStart: 65, label: 'Example title for exampleVid2' });
+        assert.deepEqual(videoInfoAsked, ['exampleVid2']);
+      });
+      await capture('video-pasted');
+      await check('Undo takes the pasted video away', async () => {
+        edit('undo');
+        await until(videoCount(1));
+        assert.equal((await vidSpec()).nodes.some(n => n.videoId === 'exampleVid2'), false);
+      });
+      await check('⌘V of words that are not one YouTube link adds nothing', async () => {
+        const nodes = await run(`document.querySelectorAll(${q(vidSlab + ' .react-flow__node')}).length`);
+        edit('paste', 'not a link');
+        edit('paste', 'watch https://youtu.be/exampleVid2 later');
+        await frames(); await sleep(200);
+        assert.equal(await run(`document.querySelectorAll(${q(vidSlab + ' .react-flow__node')}).length`), nodes);
+        assert.deepEqual(videoInfoAsked, ['exampleVid2']);
+      });
+
+      // ⌘C of a video: its watch link on the clipboard. ⌘V of that back on the board is the
+      // copy (its title and start), not a new video asked about again.
+      await pressOn(vidNode('talk') + ' .flow-video-head b');
+      clipboard = '';
+      edit('copy');
+      await check('⌘C of a video copies its link, and ⌘V pastes the copy', async () => {
+        await soon(() => clipboard !== '', 'the copy');
+        assert.equal(clipboard, 'https://www.youtube.com/watch?v=exampleVid1&t=42s');
+        const at = await onScreen(middle);
+        window.webContents.sendInputEvent({ type: 'mouseMove', x: at.x, y: at.y });
+        await frames();
+        edit('paste', clipboard);
+        await until(videoCount(2));
+        const copies = (await vidSpec()).nodes.filter(n => n.shape === 'video');
+        assert.deepEqual(copies.map(n => [n.videoId, n.videoStart, n.label]), [['exampleVid1', 42, 'Example talk'], ['exampleVid1', 42, 'Example talk']]);
+        await frames(); await sleep(100);
+        assert.deepEqual(videoInfoAsked, ['exampleVid2'], 'a copy is not asked about');
+        edit('undo');
+        await until(videoCount(1));
+      });
+
+      // What a thumbnail dragged off YouTube carries: its link (after a comment line), the
+      // markup with its <img> on i.ytimg.com, and the link again as text.
+      const dropAt = { x: 1100, y: 200 };
+      await check('a YouTube thumbnail dropped on the board is its video, never a picture', async () => {
+        const at = await onScreen(dropAt);
+        await run(`(() => {
+          const data = new DataTransfer();
+          data.setData('text/uri-list', '# dragged from YouTube\\nhttps://www.youtube.com/watch?v=exampleVid2&list=exampleList&t=2m');
+          data.setData('text/html', '<a href="https://www.youtube.com/watch?v=exampleVid2"><img src="https://i.ytimg.com/vi/exampleVid2/hqdefault.jpg"></a>');
+          data.setData('text/plain', 'https://www.youtube.com/watch?v=exampleVid2&list=exampleList&t=2m');
+          const pane = document.querySelector(${q(vidSlab + ' .react-flow__pane')});
+          for (const type of ['dragenter', 'dragover', 'drop']) pane.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, clientX: ${at.x}, clientY: ${at.y}, dataTransfer: data }));
+        })()`);
+        await until(videoCount(2));
+        const id = await otherVideo();
+        const box = await placed(id);
+        assert.ok(centredOn(box, dropAt), JSON.stringify({ box, dropAt }));
+        const spec = await vidSpec();
+        const saved = spec.nodes.find(n => n.id === id);
+        assert.deepEqual([saved.shape, saved.videoId, saved.videoStart], ['video', 'exampleVid2', 120]);
+        assert.equal(spec.nodes.some(n => n.shape === 'image'), false);
+        assert.deepEqual(imagesFetched, [], 'main was never asked for a picture');
+        // The drop ended the drag: the players have the pointer back.
+        assert.equal(await run(`!!document.querySelector(${q(vidSlab + ' [data-flow-gesture]')})`), false);
+        edit('undo');
+        await until(videoCount(1));
+      });
+
+      // A box typed as only a watch link is the video once the edit ends — the same node,
+      // in one undo step of its own; a link inside a sentence stays words.
+      await typeInto('link', 'https://www.youtube.com/watch?v=exampleVid2');
+      await check('a box typed as a YouTube link stays words while it is edited', async () => {
+        assert.equal(await run(`!!document.querySelector(${q(vidNode('link') + ' .flow-video')})`), false);
+      });
+      keyIn('Enter');
+      await check('Enter turns a box typed as a YouTube link into that video', async () => {
+        await until(`!!document.querySelector(${q(vidNode('link') + ' .flow-video')})`);
+        assert.equal(await run(editingHere), false);
+        await until(`document.querySelector(${q(vidNode('link') + ' .flow-video-head b')})?.textContent === 'Example title for exampleVid2'`);
+        const saved = (await vidSpec()).nodes.find(n => n.id === 'link');
+        assert.deepEqual({ shape: saved.shape, videoId: saved.videoId, videoStart: saved.videoStart, label: saved.label, size: saved.size },
+          { shape: 'video', videoId: 'exampleVid2', videoStart: undefined, label: 'Example title for exampleVid2', size: { width: 480, height: 300 } });
+      });
+      await settled(vidSlab);
+      await capture('video-typed');
+      await check('one Undo puts back the box with the link in it', async () => {
+        edit('undo');
+        await until(`!document.querySelector(${q(vidNode('link') + ' .flow-video')})`);
+        assert.equal(await run(`document.querySelector(${q(vidNode('link'))}).textContent`), 'https://www.youtube.com/watch?v=exampleVid2');
+        assert.equal(await run(editingHere), false);
+        const saved = (await vidSpec()).nodes.find(n => n.id === 'link');
+        assert.deepEqual([saved.shape, saved.label], [undefined, 'https://www.youtube.com/watch?v=exampleVid2']);
+      });
+      await settled(vidSlab);
+      await typeInto('prose', 'Watch https://youtu.be/exampleVid1 before the review');
+      keyIn('Enter');
+      await check('a link inside a sentence stays words', async () => {
+        await until(`!${editingHere}`);
+        await frames(); await sleep(100);
+        assert.equal(await run(`!!document.querySelector(${q(vidNode('prose') + ' .flow-video')})`), false);
+        const saved = (await vidSpec()).nodes.find(n => n.id === 'prose');
+        assert.deepEqual([saved.shape, saved.label], [undefined, 'Watch https://youtu.be/exampleVid1 before the review']);
+      });
+
+      // Played: a click on the poster puts youtube-nocookie's player in its place, from 42s.
+      await pressOn(vidNode('talk') + ' .flow-video-poster');
+      await check('a click on the poster plays the video in its box, from its start', async () => {
+        await until(`document.querySelectorAll(${q(vidSlab + ' iframe')}).length === 1`);
+        const [src] = await players();
+        assert.ok(src.startsWith('https://www.youtube-nocookie.com/embed/exampleVid1?'), src);
+        assert.equal(new URL(src).searchParams.get('start'), '42');
+        await soon(() => httpsAsked.includes(src), 'the player to load');
+        assert.equal(await run(`!!document.querySelector(${q(vidNode('talk') + ' [aria-label="Stop"]')})`), true);
+      });
+      await sleep(200);
+      await capture('video-playing');
+      await check('a playing video is dragged by its strip, the player letting go of the pointer meanwhile', async () => {
+        const from = await placed('talk');
+        const { zoom } = await vidView();
+        const head = await rect(vidNode('talk') + ' .flow-video-head b');
+        const hx = Math.round(head.left + 10), hy = Math.round(head.top + head.height / 2);
+        window.webContents.sendInputEvent({ type: 'mouseMove', x: hx, y: hy });
+        window.webContents.sendInputEvent({ type: 'mouseDown', x: hx, y: hy, button: 'left', clickCount: 1 });
+        // A frame between moves, as a hand gives them: moves sent together arrive as one,
+        // and React Flow's drag starts on its first move and follows only the next.
+        for (let i = 1; i <= 10; i++) {
+          window.webContents.sendInputEvent({ type: 'mouseMove', x: hx + 12 * i, y: hy + 6 * i, button: 'left' });
+          await frames();
+        }
+        assert.equal(await run(`getComputedStyle(document.querySelector(${q(vidSlab + ' iframe')})).pointerEvents`), 'none');
+        window.webContents.sendInputEvent({ type: 'mouseUp', x: hx + 120, y: hy + 60, button: 'left', clickCount: 1 });
+        await frames();
+        assert.equal(await run(`getComputedStyle(document.querySelector(${q(vidSlab + ' iframe')})).pointerEvents`), 'auto');
+        const to = await placed('talk');
+        assert.ok(Math.abs(to.x - from.x - 120 / zoom) <= 20 && Math.abs(to.y - from.y - 60 / zoom) <= 20, JSON.stringify({ from, to, zoom }));
+        assert.deepEqual((await vidSpec()).nodes.find(n => n.id === 'talk').position, { x: to.x, y: to.y });
+        assert.equal((await players()).length, 1, 'still playing');
+      });
+      // The player is an <iframe> main never edits in: focused, the Edit menu's ⌘C, ⌘V, ⌘Z
+      // and ⌘A are not the canvas's (the video, selected by its drag, is not copied).
+      await check('with the player focused, the Edit menu leaves the board alone', async () => {
+        await run(`document.querySelector(${q(vidSlab + ' iframe')}).focus()`);
+        await until(`document.activeElement?.tagName === 'IFRAME'`);
+        const nodes = await run(`document.querySelectorAll(${q(vidSlab + ' .react-flow__node')}).length`);
+        const before = JSON.stringify(await vidSpec());
+        clipboard = '';
+        // Nor does the menu fall back onto the window behind it (app.js's last resort,
+        // document.execCommand: a Select All of the whole window). This window never has
+        // focus, so the command would select nothing to see: its call is what tells.
+        await run('window.__commands = []; document.execCommand = (own => function (command, ...rest) { window.__commands.push(command); return own.call(this, command, ...rest); })(document.execCommand); undefined');
+        for (const action of ['copy', 'undo', 'selectAll']) edit(action);
+        edit('paste', 'https://youtu.be/exampleVid2');
+        await frames(); await sleep(300);
+        assert.deepEqual(await run('window.__commands'), []);
+        await run('delete document.execCommand; undefined');
+        assert.equal(clipboard, '');
+        assert.equal(await run(`document.querySelectorAll(${q(vidSlab + ' .react-flow__node')}).length`), nodes);
+        assert.equal(JSON.stringify(await vidSpec()), before);
+        assert.equal(await run(`${apiOf(vid.data.id)}.editAction('paste', false, 'https://youtu.be/exampleVid2')`), false);
+        // ⌘A is not the board's Show or hide terminals either.
+        assert.equal(await run('SB.views.whiteboards.toggleTerminalShortcut()'), false);
+        assert.equal(await run('document.activeElement.tagName'), 'IFRAME');
+        await run(`document.querySelector(${q(vidSlab + ' iframe')}).blur()`);
+      });
+      await check('Open on YouTube hands main its watch link, and Stop puts the poster back', async () => {
+        await pressOn(vidNode('talk') + ' [aria-label="Open on YouTube"]');
+        await soon(() => opened.length > 0, 'the link');
+        assert.deepEqual(opened, ['https://www.youtube.com/watch?v=exampleVid1&t=42s']);
+        assert.equal((await players()).length, 1);
+        await pressOn(vidNode('talk') + ' [aria-label="Stop"]');
+        await until(`document.querySelectorAll(${q(vidSlab + ' iframe')}).length === 0`);
+        assert.equal(await run(`!!document.querySelector(${q(vidNode('talk') + ' .flow-video-poster')})`), true);
+      });
+      await pressOn(vidNode('talk') + ' .flow-video-head b');
+      await check('Enter plays the selected video, and Enter again stops it', async () => {
+        assert.deepEqual(await players(), []);
+        keyIn('Enter');
+        await until(`document.querySelectorAll(${q(vidSlab + ' iframe')}).length === 1`);
+        keyIn('Enter');
+        await until(`document.querySelectorAll(${q(vidSlab + ' iframe')}).length === 0`);
+      });
+      await check('a video resized from its corner keeps its player 16:9 under the strip', async () => {
+        const grip = vidNode('talk') + ' .react-flow__resize-control.handle.bottom.right';
+        await until(`!!document.querySelector(${q(grip)})`);
+        const { zoom } = await vidView();
+        const before = await placed('talk');
+        const corner = await rect(grip);
+        const cx = Math.round(corner.left + corner.width / 2), cy = Math.round(corner.top + corner.height / 2);
+        window.webContents.sendInputEvent({ type: 'mouseMove', x: cx, y: cy });
+        window.webContents.sendInputEvent({ type: 'mouseDown', x: cx, y: cy, button: 'left', clickCount: 1 });
+        for (let i = 1; i <= 10; i++) window.webContents.sendInputEvent({ type: 'mouseMove', x: cx + 12 * i, y: cy + 3 * i, button: 'left' });
+        await frames();
+        window.webContents.sendInputEvent({ type: 'mouseUp', x: cx + 120, y: cy + 30, button: 'left', clickCount: 1 });
+        await frames();
+        const { size } = (await vidSpec()).nodes.find(n => n.id === 'talk');
+        // Within the canvas's 10px grid, which the corner snaps to.
+        assert.ok(Math.abs(size.width - (before.width + 120 / zoom)) <= 10, JSON.stringify({ before, size, zoom }));
+        assert.equal(size.height, Math.round(size.width * 9 / 16) + 30);
+        const drawn = await placed('talk');
+        assert.deepEqual({ width: drawn.width, height: drawn.height }, size);
+      });
+      await capture('video-resized');
+      await check('Tab after a video adds a plain box beside it', async () => {
+        const nodes = await run(`document.querySelectorAll(${q(vidSlab + ' .react-flow__node')}).length`);
+        keyIn('Tab');
+        await until(`document.querySelectorAll(${q(vidSlab + ' .react-flow__node')}).length === ${nodes + 1}`);
+        await until('document.activeElement.isContentEditable');
+        const child = await run(`Array.from(document.querySelectorAll(${q(vidSlab + ' .react-flow__node')})).find(n => n.contains(document.activeElement)).dataset.id`);
+        assert.equal(await run(`!!document.querySelector(${q(vidNode(child) + ' .flow-video')})`), false);
+        assert.equal((await placed(child)).width, 200);
+        for (const ch of 'Next step') window.webContents.sendInputEvent({ type: 'char', keyCode: ch });
+        await until(`document.activeElement.textContent === 'Next step'`);
+        keyIn('Enter');
+        await until(`!${editingHere}`);
+        // Settled at its height first, as the box with 600+ characters above is: a save in
+        // the frames it grows in can make Chromium log a "ResizeObserver loop" warning.
+        await frames(); await sleep(300);
+        const spec = await vidSpec();
+        const saved = spec.nodes.find(n => n.id === child);
+        assert.deepEqual([saved.shape, saved.label, saved.size], [undefined, 'Next step', undefined]);
+        assert.ok(spec.edges.some(e => e.from === 'talk' && e.to === child), JSON.stringify(spec.edges));
+      });
+      await settled(vidSlab);
+
+      // Off screen a video is its poster again: the page takes the player out with the
+      // board, and put back it would load again and play out loud from the start.
+      await pressOn(vidNode('talk') + ' .flow-video-poster');
+      await until(`document.querySelectorAll(${q(vidSlab + ' iframe')}).length === 1`);
+      await check('a video playing when its board leaves the screen is its poster when it comes back', async () => {
+        const loads = httpsAsked.filter(url => url.startsWith('https://www.youtube-nocookie.com/')).length;
+        await run('SB.go({view:"whiteboards",folder:"all"})');
+        await until('SB.state.route.view === "whiteboards"');
+        await run(`SB.go({view:'whiteboard',board:${q(vid.data.id)}})`);
+        await until(`!!document.querySelector(${q('#main ' + vidNode('talk') + ' .flow-video-poster')})`);
+        await frames(); await sleep(200);
+        assert.deepEqual(await players(), []);
+        assert.equal(httpsAsked.filter(url => url.startsWith('https://www.youtube-nocookie.com/')).length, loads, 'the player never loaded again');
+      });
+      await settled(vidSlab);
+      await check('full screen, in and out, puts the poster back', async () => {
+        await pressOn(vidNode('talk') + ' .flow-video-poster');
+        await until(`document.querySelectorAll(${q(vidSlab + ' iframe')}).length === 1`);
+        await run(`document.querySelector(${q(vidSlab + ' [aria-label="Full screen"]')}).click()`);
+        await until(`!!document.querySelector(${q('body > .dgslab.full[data-wb-board="' + vid.data.id + '"]')})`);
+        await frames();
+        assert.deepEqual(await players(), []);
+        await settled(vidSlab);
+        await pressOn(vidNode('talk') + ' .flow-video-poster');
+        await until(`document.querySelectorAll(${q(vidSlab + ' iframe')}).length === 1`);
+        await run(`document.querySelector(${q(vidSlab + ' [aria-label="Exit full screen"]')}).click()`);
+        await until('!document.querySelector("body > .dgslab.full")');
+        await frames();
+        assert.deepEqual(await players(), []);
+      });
+      await settled(vidSlab);
+      await check('the video stage asked nothing of the network but posters and the player, and logged no errors', async () => {
+        assert.deepEqual(httpsStrays, []);
+        const asked = [...new Set(httpsAsked.slice(askedBefore))];
+        assert.deepEqual(asked.filter(url => !/^https:\/\/i\.ytimg\.com\/vi\/exampleVid[12]\/hqdefault\.jpg$/.test(url) && !url.startsWith('https://www.youtube-nocookie.com/embed/exampleVid1?')), [], JSON.stringify(asked));
+        assert.deepEqual(errors.slice(errorsBeforeVideo), []);
       });
       await run('SB.go({view:"whiteboards",folder:"all"})');
       await until(`SB.state.route.view === "whiteboards" && !!document.querySelector(${q('#main .wbrow[data-wb-board="' + boardId + '"]')})`);
@@ -1461,8 +1853,11 @@ if (!process.versions.electron) {
         await until('!document.querySelector(".gauge")');
         assert.deepEqual(errors.slice(errorsBeforeGauge), []);
       });
+      await check('nothing along the way asked the network for more than a poster or a player', async () => {
+        assert.deepEqual(httpsStrays, []);
+      });
 
-      console.log('PASS — Whiteboards: rail screen and home, a box resized from its corner and holding 600+ characters, a board the CLI writes to while open, a teleport (placed, given its destination, clicked, Back, Escape, Enter, its destination deleted and undone), open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid squares without whiteboards (old ones open Terminal), exit and retry, ✦ Answer\'s Conversation row (New conversation from the keyboard, a workspace changed and back, a CLI on its own), ✦ Answer\'s Details (Low, Medium, High; High sent to main, asked with, and drawn wide), the rail back from the Grid to the open board, the Claude gauge (on the strip, caught up after a poll off screen, under full screen, in the home header, gone with the sign-in), tabs (+ and its search, ⌃Tab, ⌘W, a middle click, a reload, all closed)' +
+      console.log('PASS — Whiteboards: rail screen and home, a box resized from its corner and holding 600+ characters, a board the CLI writes to while open, a teleport (placed, given its destination, clicked, Back, Escape, Enter, its destination deleted and undone), a YouTube video (its poster, ⌘V of a link, its title, Undo, ⌘C/⌘V, a thumbnail dropped, a box typed as a link and Undo, a link in a sentence, Play, a drag by its strip, the Edit menu with the player focused, Open on YouTube, Stop, Enter, a resize at 16:9, Tab, off screen and full screen), open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid squares without whiteboards (old ones open Terminal), exit and retry, ✦ Answer\'s Conversation row (New conversation from the keyboard, a workspace changed and back, a CLI on its own), ✦ Answer\'s Details (Low, Medium, High; High sent to main, asked with, and drawn wide), the rail back from the Grid to the open board, the Claude gauge (on the strip, caught up after a poll off screen, under full screen, in the home header, gone with the sign-in), tabs (+ and its search, ⌃Tab, ⌘W, a middle click, a reload, all closed)' +
         (known.length ? ` (${known.length} known bug${known.length === 1 ? '' : 's'}: ${known.join('; ')})` : ''));
     } catch (error) {
       await capture('failure').catch(() => {});

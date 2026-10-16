@@ -51,6 +51,8 @@ export type DiagramSpec = FlowSpec
 // asked of an author, and no answer, condense or copy ever writes one.
 // Switchboard: and a "teleport" — a button that, clicked, takes the view to
 // another node on the same board (`teleportTo`). Its label is always "Teleport".
+// Switchboard: and a "video" — a YouTube video that plays in its box (it needs
+// `videoId`). Its label is the video's title, or "YouTube video" until one is known.
 export const FLOW_SHAPES = [
   "box",
   "rounded",
@@ -62,6 +64,7 @@ export const FLOW_SHAPES = [
   "document",
   "terminal",
   "teleport",
+  "video",
 ] as const
 
 export type FlowShape = (typeof FLOW_SHAPES)[number]
@@ -79,10 +82,10 @@ export function isFlowBoxShape(shape: FlowShape): shape is FlowBoxShape {
 
 /**
  * The shapes sized by hand in the editor, which keep that size in `size`.
- * Switchboard: a pinned terminal is sized by hand too, and so is a box — one
- * never resized is as wide as every other box and as tall as its text.
+ * Switchboard: a pinned terminal and a video are sized by hand too, and so is a
+ * box — one never resized is as wide as every other box and as tall as its text.
  */
-export const FLOW_SIZED_SHAPES = [...FLOW_BOX_SHAPES, "note", "text", "image", "terminal"] as const
+export const FLOW_SIZED_SHAPES = [...FLOW_BOX_SHAPES, "note", "text", "image", "terminal", "video"] as const
 
 export function isFlowSizedShape(shape: FlowShape): boolean {
   return (FLOW_SIZED_SHAPES as readonly FlowShape[]).includes(shape)
@@ -199,8 +202,8 @@ export type FlowNodeSpec = {
    * for those shapes. A note grows past it to fit its text, and a text uses
    * only the width — its height always follows its lines. Absent means the
    * default size (a note, an image) or as wide as the words (a text).
-   * Switchboard: a terminal's outer size, header included. And a box's, which
-   * grows past it to fit its text as a note does; absent, a box is
+   * Switchboard: a terminal's outer size, header included, and a video's. And a
+   * box's, which grows past it to fit its text as a note does; absent, a box is
    * FLOW_NODE_WIDTH wide and as tall as its text.
    */
   size?: FlowSize
@@ -224,6 +227,19 @@ export type FlowNodeSpec = {
    * destination yet and a click asks for one.
    */
   teleportTo?: string
+  /**
+   * Switchboard: the YouTube video a "video" node plays — its 11-character id,
+   * spelt exactly as YouTube spells it (case matters). Required on a video, and
+   * only kept on one; an author may give the video's whole link instead, which
+   * the validator reads down to the id. The poster and the player are built from
+   * it, so a video has no `src`.
+   */
+  videoId?: string
+  /**
+   * Switchboard: where a video starts playing, in whole seconds. Only kept on a
+   * video; absent means from the beginning.
+   */
+  videoStart?: number
 }
 
 export type FlowEdgeSpec = {
@@ -347,6 +363,60 @@ export const FLOW_TERMINAL_FLOOR: FlowSize = { width: 96, height: TERMINAL_HEADE
 /** Switchboard: what a teleport always says, and the size it is drawn at. */
 export const TELEPORT_LABEL = "Teleport"
 export const FLOW_TELEPORT_SIZE: FlowSize = { width: 200, height: 56 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Switchboard: YouTube videos
+// ─────────────────────────────────────────────────────────────────────
+
+/** What a video is labelled until its title is known, and when none can be. */
+export const VIDEO_LABEL = "YouTube video"
+/** Ten days, in seconds — past any live stream's length; a later start is junk. */
+export const VIDEO_START_MAX = 864_000
+/**
+ * The strip across a video's top that drags it, its title in it — as tall as a
+ * pinned terminal's header. A video's `size` includes it.
+ */
+export const VIDEO_BAR = 30
+/**
+ * A video made with no size of its own: a 480×270 player (16:9, the least YouTube
+ * recommends for one) under the bar — and a Short's, standing up (9:16).
+ * Mirrored in src/main/whiteboards.js for the list's thumbnail.
+ */
+export const FLOW_VIDEO_DEFAULT_SIZE: FlowSize = { width: 480, height: 270 + VIDEO_BAR }
+export const FLOW_VIDEO_PORTRAIT_SIZE: FlowSize = { width: 270, height: 480 + VIDEO_BAR }
+/**
+ * The least width a video's resize handles take it to. YouTube wants a player at
+ * least 200×200: 356×200 at 16:9, 200×356 at 9:16.
+ */
+export const FLOW_VIDEO_MIN_WIDTH = 356
+export const FLOW_VIDEO_PORTRAIT_MIN_WIDTH = 200
+
+/** The size a new video is made at: a Short's standing up, any other lying down. */
+export function flowVideoDefaultSize(short: boolean): FlowSize {
+  return short ? FLOW_VIDEO_PORTRAIT_SIZE : FLOW_VIDEO_DEFAULT_SIZE
+}
+
+/** Whether a video of this size stands up: its player taller than it is wide. */
+export function isFlowVideoPortrait(size: FlowSize): boolean {
+  return size.height - VIDEO_BAR > size.width
+}
+
+/** The least width a video's resize handles take it to, standing up or lying down. */
+export function flowVideoMinWidth(portrait: boolean): number {
+  return portrait ? FLOW_VIDEO_PORTRAIT_MIN_WIDTH : FLOW_VIDEO_MIN_WIDTH
+}
+
+/**
+ * A video resized to `width`: its height follows, so the player under the bar stays
+ * 16:9 — 9:16 standing up — however many times it is resized, as a text's height
+ * follows its lines. Held between the least width and the most a size may be.
+ */
+export function flowVideoSizeForWidth(width: number, portrait: boolean): FlowSize {
+  const ratio = portrait ? 16 / 9 : 9 / 16
+  const most = Math.min(FLOW_SIZE_MAX, Math.floor((FLOW_SIZE_MAX - VIDEO_BAR) / ratio))
+  const across = Math.min(most, Math.max(flowVideoMinWidth(portrait), Math.round(width)))
+  return { width: across, height: Math.round(across * ratio) + VIDEO_BAR }
+}
 
 /** A rectangle on screen, in client (window) pixels. */
 export type ClientRect = { left: number; top: number; width: number; height: number }

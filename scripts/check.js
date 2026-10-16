@@ -32,6 +32,7 @@ const EXPECTED = [
   'src/main/editor.js',
   'src/main/whiteboards.js',
   'src/main/images.js',
+  'src/main/videos.js',
   'src/main/answer.js',
   'src/main/databases.js',
   'src/preload.js',
