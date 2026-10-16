@@ -1326,7 +1326,8 @@ function handleWb(channel, fn) {
 }
 
 // Every write's { reason, boardId?, folderId? }, for the screens that show the store:
-// the home list, an open board's switcher and breadcrumb.
+// the home list, and an open board's tab strip and + picker (app.js stales and redraws
+// them on it). An open board learns of its own writes from the editor.
 whiteboards.onChange(change => send('sb:evt:wbChanged', change));
 
 handleWb('sb:wb:list', () => whiteboards.list());

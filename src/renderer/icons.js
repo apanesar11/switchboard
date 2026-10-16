@@ -134,8 +134,8 @@ window.SB = window.SB || {};
   // A picker's chosen row. 13x13 at 1.9, as the mock-up draws it.
   var check = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3L13 4.5"/></svg>';
 
-  // The two directions `chev` and `chevD` do not cover: the quick switcher's previous
-  // step, and a minimized terminal's restore. Same 11x11 at 1.8 as their siblings.
+  // The two directions `chev` and `chevD` do not cover: the whiteboard + picker's way back
+  // out of a folder (views/whiteboards.js), and a minimized terminal's restore. Same 11x11 at 1.8 as their siblings.
   var chevL = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5L5.5 8l4.5 4.5"/></svg>';
   var chevU = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 10l4.5-4.5L12.5 10"/></svg>';
 

@@ -30,14 +30,16 @@ type Props = {
   boardId: string
   active: boolean
   onOpenSettings(): void
-  /** The quick switcher, ← / →, New whiteboard and Duplicate: the host changes the route. */
+  /** Duplicate: the host opens the copy in a tab of its own, which changes the route. */
   onOpenBoard(id: string): void
   /** After Delete, and Back on a board that no longer exists or couldn't be read. */
   onClosed(folderId: string | null): void
-  /** After the load and every write — the header's breadcrumb and status line. */
+  /** After the load and every write — the name and folder on the board's tab. */
   onBoardChange(board: WhiteboardSummary | null, folder: WhiteboardFolder | null): void
   onDirty(count: number): void
   onFullscreenChange?(open: boolean): void
+  /** How many ✦ Answers are on their way, for the dot on the board's tab. */
+  onAnswering?(count: number): void
   /** The host terminal layer's list for this board, pushed as it changes. */
   terminals: { wsId: string; open: boolean; minimized: boolean; pinned: boolean }[]
   workspaceStatus: WorkspaceStatus
@@ -76,6 +78,7 @@ type Callbacks = {
   onBoardChange: (board: WhiteboardSummary | null, folder: WhiteboardFolder | null) => void
   onDirtyChange: (dirty: boolean) => void
   onFullscreenChange: (open: boolean) => void
+  onAnsweringChange: (count: number) => void
   onOpenTerminal: (wsId: string) => void
   onToggleTerminals: () => void
   onTerminalSlots: (slots: TerminalSlot[]) => void
@@ -88,6 +91,12 @@ type Instance = {
   props: Props
   editor: FlowEditorHandle | null
   fullscreen: FullscreenHandle | null
+  /**
+   * enterFullscreen() asked before the page had registered its handle — a canvas the
+   * host made in the same pass (a tab shown for the first time, or again after the LRU
+   * let it go): taken as the handle arrives.
+   */
+  wantFullscreen: boolean
   portal: HTMLElement
   /** The board as the page last reported it — the handle's board(). */
   board: WhiteboardSummary | null
@@ -131,6 +140,7 @@ function callbacksFor(instance: Instance): Callbacks {
     },
     onDirtyChange: (dirty) => relay("onDirty")(dirty ? 1 : 0),
     onFullscreenChange: relay("onFullscreenChange"),
+    onAnsweringChange: relay("onAnswering"),
     onOpenTerminal: relay("onOpenTerminal"),
     onToggleTerminals: relay("onToggleTerminals"),
     onTerminalSlots: relay("onTerminalSlots"),
@@ -327,6 +337,7 @@ function render(instance: Instance) {
         onFullscreen={instance.onFullscreen}
         onFullscreenChange={callbacks.onFullscreenChange}
         onDirtyChange={callbacks.onDirtyChange}
+        onAnsweringChange={callbacks.onAnsweringChange}
       />
       {current.active ? createPortal(<Toaster />, instance.portal) : null}
       {instance.picker ? createPortal(<PickerLayer instance={instance} />, instance.portal) : null}
@@ -356,6 +367,7 @@ function create(element: HTMLElement, initial: Props) {
     props: initial,
     editor: null,
     fullscreen: null,
+    wantFullscreen: false,
     portal,
     board: null,
     picker: null,
@@ -363,7 +375,13 @@ function create(element: HTMLElement, initial: Props) {
     dead: false,
     callbacks: null as unknown as Callbacks,
     onEditor: (editor) => { instance.editor = editor },
-    onFullscreen: (handle) => { instance.fullscreen = handle },
+    onFullscreen: (handle) => {
+      instance.fullscreen = handle
+      if (handle && instance.wantFullscreen) {
+        instance.wantFullscreen = false
+        if (instance.props.active) handle.enter()
+      }
+    },
   }
   instance.callbacks = callbacksFor(instance)
   instances.add(instance)
@@ -378,6 +396,7 @@ function create(element: HTMLElement, initial: Props) {
     update(next: Partial<Props>) {
       if (instance.destroying) return
       instance.props = { ...instance.props, ...next }
+      if (next.active === false) instance.wantFullscreen = false
       // A picker the host asked for belongs to the board on screen. Once the host says
       // this board no longer is — the route moved on — it closes unanswered; left open
       // it would float over the next screen and open a terminal on a board nobody can see.
@@ -396,6 +415,7 @@ function create(element: HTMLElement, initial: Props) {
       // The picker goes at once, not after the write: nothing may be picked for a
       // board that is going away.
       finishPick(instance, null)
+      instance.wantFullscreen = false
       instance.destroying = flush().then(() => {
         instance.dead = true
         try {
@@ -496,7 +516,17 @@ function create(element: HTMLElement, initial: Props) {
       return instance.props.active && !!instance.fullscreen?.isFullscreen()
     },
     leaveFullscreen() {
+      instance.wantFullscreen = false
       instance.fullscreen?.leave()
+    },
+    /**
+     * Full screen again, for a board the user left that way: on screen only, and once
+     * the board is drawn when it is still loading.
+     */
+    enterFullscreen() {
+      if (!instance.props.active || instance.destroying) return
+      if (instance.fullscreen) instance.fullscreen.enter()
+      else instance.wantFullscreen = true
     },
     contains(element: globalThis.Node | null): boolean {
       return !!element && (app.contains(element) || portal.contains(element))

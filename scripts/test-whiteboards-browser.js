@@ -13,7 +13,8 @@
 // it is open, drawn at once, not written back, and put back by Undo; a teleport placed
 // from the rail and given its destination by a click, a click on one flying the view to
 // its destination and Back, Escape while it waits, and its destination deleted and
-// undone; opening a board;
+// undone; opening a board, in a tab of the strip (the library pinned first, no
+// breadcrumb or status line, a bar of full screen and Actions);
 // Actions ▸
 // Open terminal… floating the workspace's own shell (the Terminal tab's xterm, its
 // scrollback, one shell); a second workspace's panel from the tray's + (a toggle: a
@@ -35,7 +36,10 @@
 // back leaving nothing to continue, a CLI that answers on its own); ✦ Answer's Details
 // (Low, Medium, High where Subtext and Read the boxes before it were, a pick sent to
 // main, an answer at High asked with its level and the boxes before it and drawn 360
-// wide, and Undo of it); and no renderer errors along the way.
+// wide, and Undo of it); the rail's Whiteboards row coming back from the Grid to the
+// board left open; the tabs — + and its search, ⌃Tab round the library, ⌘W, a middle
+// click, the open set and the board on screen after a reload, and ⌘W on the library
+// left to the window; and no renderer errors along the way.
 //
 // SWITCHBOARD_WHITEBOARD_CAPTURE=<dir> saves screenshots of each stage there;
 // SWITCHBOARD_WHITEBOARD_DEBUG=1 prints each stage and the renderer's errors as they come.
@@ -107,6 +111,8 @@ if (!process.versions.electron) {
   };
   const opens = [];
   const closes = [];
+  // File ▸ Close that no whiteboard tab took: the window's, recorded, never honoured.
+  let windowCloses = 0;
   const resizes = [];
   const workspace = id => ({ id, dir: dirs[id], project: 'example', section: 'example', repos: [], processes: [] });
   const handle = (channel, callback) => ipcMain.handle('sb:' + channel, (_event, ...args) => callback(...args));
@@ -145,6 +151,7 @@ if (!process.versions.electron) {
     resets.push([boardId, provider]);
     return answer.resetConversation(boardId, provider, { conversations: conversationStore });
   });
+  handle('ui:closeWindow', () => { windowCloses++; return { ok: true }; });
   handle('diagrams:dirty', () => ({}));
   handle('diagrams:flushed', () => ({}));
   handle('clipboard:write', text => { clipboard = text; return { ok: true }; });
@@ -564,10 +571,22 @@ if (!process.versions.electron) {
       await run(`document.querySelector(${q('#main .wbrow[data-wb-board="' + boardId + '"]')}).click()`);
       await until(`SB.state.route.view === "whiteboard" && SB.state.route.board === ${q(boardId)} && !!document.querySelector(${q(canvas + ' [data-id=start]')})`);
       await until('!!document.querySelector("[data-whiteboard-actions]")');
-      await check('board header and bar', async () => {
-        await until('document.querySelector("#main .wbbhd")?.textContent.includes("Example folder")');
-        const crumb = await run('document.querySelector("#main .wbbhd").textContent');
-        assert.ok(crumb.includes('Whiteboards') && crumb.includes('Example folder') && crumb.includes('Example flow'), crumb);
+      await check('tab strip and bar', async () => {
+        // The board's tab is the one on screen, its folder under its name; the library
+        // is the pinned first tab, and every board opened so far has a tab.
+        await until('document.querySelector("#main .wbstrip .wbtab.on")?.textContent.includes("Example folder")');
+        assert.equal(await run('document.querySelector("#main .wbstrip .wbtab.on .nm").textContent'), 'Example flow');
+        const tabs = await run('Array.from(document.querySelectorAll("#main .wbstrip .wbtab .nm")).map(e => e.textContent)');
+        assert.equal(tabs[0], 'Whiteboards', JSON.stringify(tabs));
+        for (const name of ['Sized flow', 'Teleport flow', 'Example flow']) assert.ok(tabs.includes(name), JSON.stringify(tabs));
+        // No breadcrumb, title or status line above the board.
+        assert.equal(await run('!!document.querySelector("#main .wbbhd, #main .crumb, #main h1")'), false);
+        assert.equal(await run('/Saved locally/.test(document.querySelector("#main").textContent)'), false);
+        // The bar is full screen and Actions: no switcher, arrows or New whiteboard.
+        assert.equal(await run(`!!document.querySelector(${q(canvas + ' [aria-label="Full screen"]')})`), true);
+        assert.equal(await run(`!!document.querySelector(${q(canvas + ' [data-whiteboard-actions]')})`), true);
+        assert.equal(await run('!!document.querySelector(\'[aria-label^="Switch whiteboard"], [aria-label^="Previous whiteboard"], [aria-label^="Next whiteboard"]\')'), false);
+        assert.equal(await run(`Array.from(document.querySelectorAll(${q(canvas + ' button')})).some(b => /New whiteboard/.test(b.textContent))`), false);
         // The old "AI terminal" button is gone from the bar.
         assert.equal(await run('!!document.querySelector("[data-diagram-terminal-toggle], [aria-label=\\"Toggle AI terminal\\"]")'), false);
       });
@@ -637,7 +656,6 @@ if (!process.versions.electron) {
         assert.equal(await run(`document.querySelector(${q(panel(wsId))}).classList.contains("front")`), false);
       });
       assert.deepEqual(await run('Array.from(document.querySelectorAll(".wbtray .wbchip")).map(c => c.getAttribute("aria-label"))'), [wsId, otherId]);
-      await until('document.querySelector("#main .wbbhd .sub").textContent.endsWith("· 2 terminals")');
       const otherStarted = shells.state(otherId).startedAt;
       // Tile: side by side along the right edge, under the bar, above the tray.
       await check('Tile lays the open panels side by side', async () => {
@@ -1053,6 +1071,14 @@ if (!process.versions.electron) {
       assert.deepEqual(opens.filter(id => id === wsId), [wsId], 'Grid and board share one shell');
       assert.equal(shells.state(wsId).startedAt, startedAt);
 
+      mark("the rail's Whiteboards row: back to the board left for the Terminal tab and the Grid");
+      await check('back from the Grid to the board left open', async () => {
+        await run('Array.from(document.querySelectorAll("#side .it.top")).find(b => b.textContent.trim() === "Whiteboards").click()');
+        await until(`SB.state.route.view === "whiteboard" && SB.state.route.board === ${q(boardId)}`);
+        await until(`!!document.querySelector(${q('#main ' + canvas + ' [data-id=start]')})`);
+        assert.equal(await run('document.querySelector("#main .wbstrip .wbtab.on .nm").textContent'), 'Example flow');
+      });
+
       mark('exit and retry inside a panel');
       await run(`SB.go({view:'whiteboard',board:${q(boardId)}})`);
       await until(`!!document.querySelector(${q('#main ' + canvas + ' [data-id=start]')})`);
@@ -1284,7 +1310,88 @@ if (!process.versions.electron) {
         assert.doesNotMatch(await run(`document.querySelector(${q(canvas + ' .react-flow__background circle')})?.getAttribute('r') || ''`), /NaN/);
       });
 
-      console.log('PASS — Whiteboards: rail screen and home, a box resized from its corner and holding 600+ characters, a board the CLI writes to while open, a teleport (placed, given its destination, clicked, Back, Escape, Enter, its destination deleted and undone), open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid squares without whiteboards (old ones open Terminal), exit and retry, ✦ Answer\'s Conversation row (New conversation from the keyboard, a workspace changed and back, a CLI on its own), ✦ Answer\'s Details (Low, Medium, High; High sent to main, asked with, and drawn wide)' +
+      mark('tabs: + and its search, ⌃Tab, ⌘W, a middle click, a reload, and every tab closed');
+      const errorsBeforeTabs = errors.length;
+      const tabIds = () => run('Array.from(document.querySelectorAll("#main .wbtl .wbtab")).map(t => t.getAttribute("data-wb-tab"))');
+      const keyPress = (keyCode, modifiers = []) => {
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers });
+        window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers });
+      };
+      await check('whiteboard tabs', async () => {
+        // + : a search over every board; Enter opens the one picked in a new tab, at the end.
+        await pressOn('#main .wbadd');
+        await until('!!document.querySelector(".wbpop.wbfind .wbfq")');
+        assert.equal(await run('document.activeElement === document.querySelector(".wbfind .wbfq")'), true);
+        await run(`(() => { const i = document.querySelector('.wbfind .wbfq'); i.value = 'second'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await until('document.querySelector(".wbfind .wbfr.hi .nm")?.textContent === "Second flow"');
+        keyPress('Enter');
+        await until(`SB.state.route.view === "whiteboard" && SB.state.route.board === ${q(second.data.id)}`);
+        await until('!document.querySelector(".wbpop")');
+        const ids = await tabIds();
+        assert.equal(ids[ids.length - 1], second.data.id, JSON.stringify(ids));
+        // A board made somewhere else — a terminal, another window — is in an open + at
+        // once: the board screen is redrawn for it, and the picker as the list comes in.
+        await pressOn('#main .wbadd');
+        await until('!!document.querySelector(".wbpop.wbfind")');
+        const elsewhere = await whiteboards.create({ folderId: null, name: 'Made elsewhere', workspace: wsId, spec: { kind: 'flow', nodes: [], edges: [] } });
+        assert.equal(elsewhere.ok, true, elsewhere.error);
+        await until('Array.from(document.querySelectorAll(".wbfind .wbfr .nm")).some(e => e.textContent === "Made elsewhere")');
+        keyPress('Escape');
+        await until('!document.querySelector(".wbpop")');
+        assert.equal(await run('SB.state.route.view'), 'whiteboard');
+        // ⌃Tab goes round every tab, the library among them: from the last board, the
+        // library; from the library, the first board.
+        keyPress('Tab', ['control']);
+        await until('SB.state.route.view === "whiteboards"');
+        assert.equal(await run('document.querySelector("#main .wbstrip .wbtab.on").classList.contains("wblib")'), true);
+        keyPress('Tab', ['control']);
+        await until(`SB.state.route.board === ${q(ids[0])}`);
+        // ⌘W: the tab on screen closes and the one to its right comes up; not the window.
+        edit('close');
+        await until(`SB.state.route.board === ${q(ids[1])}`);
+        assert.equal((await tabIds()).includes(ids[0]), false);
+        assert.equal(windowCloses, 0);
+        // A middle click closes the tab under it, not the one on screen.
+        const last = await rect(`#main .wbtl .wbtab[data-wb-tab="${second.data.id}"]`);
+        const mx = Math.round(last.left + last.width / 2), my = Math.round(last.top + last.height / 2);
+        window.webContents.sendInputEvent({ type: 'mouseMove', x: mx, y: my });
+        window.webContents.sendInputEvent({ type: 'mouseDown', x: mx, y: my, button: 'middle', clickCount: 1 });
+        window.webContents.sendInputEvent({ type: 'mouseUp', x: mx, y: my, button: 'middle', clickCount: 1 });
+        await until(`!Array.from(document.querySelectorAll("#main .wbtl .wbtab")).some(t => t.getAttribute("data-wb-tab") === ${q(second.data.id)})`);
+        assert.equal(await run('SB.state.route.board'), ids[1]);
+        // A reload (the window opened again) brings the tabs back, in their order, and
+        // the board that was on screen.
+        const before = await tabIds();
+        await window.loadFile(path.join(repo, 'src/renderer/index.html'));
+        await until('SB.state.booted && SB.state.workspaces.length === 2');
+        await until(`SB.state.route.view === "whiteboard" && SB.state.route.board === ${q(ids[1])}`);
+        await until('document.querySelectorAll("#main .wbtl .wbtab").length > 0');
+        assert.deepEqual(await tabIds(), before);
+        // ⌃Tab from a full-screen board carries full screen to the next one, even one
+        // whose canvas the reload has not made yet.
+        await until(`!!document.querySelector(${q('#main .dgslab[data-wb-board="' + before[0] + '"] [aria-label="Full screen"]')})`);
+        await click('Full screen');
+        await until('!!document.querySelector(\'[aria-label="Exit full screen"]\')');
+        keyPress('Tab', ['control']);
+        await until(`SB.state.route.board === ${q(before[1])}`);
+        await until(`!!document.querySelector(${q('body > .dgslab.full[data-wb-board="' + before[1] + '"]')})`);
+        assert.equal(await run('document.querySelectorAll("body > .dgslab.full").length'), 1);
+        await click('Exit full screen');
+        await until('!document.querySelector(\'[aria-label="Exit full screen"]\')');
+        // Every tab closed: the library, the strip gone with them — and ⌘W there is the window's.
+        for (let i = 0; i < before.length; i++) {
+          edit('close');
+          await until(`document.querySelectorAll("#main .wbtl .wbtab").length === ${before.length - i - 1}`);
+        }
+        await until('SB.state.route.view === "whiteboards" && !document.querySelector("#main .wbstrip")');
+        assert.equal(windowCloses, 0);
+        edit('close');
+        for (let i = 0; i < 50 && windowCloses === 0; i++) await sleep(20);
+        assert.equal(windowCloses, 1);
+        assert.deepEqual(errors.slice(errorsBeforeTabs), []);
+      });
+
+      console.log('PASS — Whiteboards: rail screen and home, a box resized from its corner and holding 600+ characters, a board the CLI writes to while open, a teleport (placed, given its destination, clicked, Back, Escape, Enter, its destination deleted and undone), open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid squares without whiteboards (old ones open Terminal), exit and retry, ✦ Answer\'s Conversation row (New conversation from the keyboard, a workspace changed and back, a CLI on its own), ✦ Answer\'s Details (Low, Medium, High; High sent to main, asked with, and drawn wide), the rail back from the Grid to the open board, tabs (+ and its search, ⌃Tab, ⌘W, a middle click, a reload, all closed)' +
         (known.length ? ` (${known.length} known bug${known.length === 1 ? '' : 's'}: ${known.join('; ')})` : ''));
     } catch (error) {
       await capture('failure').catch(() => {});

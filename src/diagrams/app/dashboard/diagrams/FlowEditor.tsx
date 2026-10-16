@@ -1727,6 +1727,11 @@ type Props = {
    * or a quit instead, and needs to know there is something to save.
    */
   onDirtyChange?: (dirty: boolean) => void
+  /**
+   * Switchboard: how many ✦ Answers are on their way — told as it changes, and 0 as
+   * the editor goes — so the host's tab for this board can say one is still drawing.
+   */
+  onAnsweringChange?: (count: number) => void
   ref?: React.Ref<FlowEditorHandle>
 }
 
@@ -1758,6 +1763,7 @@ function FlowEditorCanvas({
   onTerminalFloat,
   onTerminalRemoved,
   onDirtyChange,
+  onAnsweringChange,
   editorRef,
 }: Omit<Props, "ref"> & { editorRef?: React.Ref<FlowEditorHandle> }) {
   const { screenToFlowPosition, deleteElements, getViewport, setViewport, setCenter, getNodesBounds } =
@@ -1843,6 +1849,16 @@ function FlowEditorCanvas({
   const [steps, setSteps] = useState<Record<number, AnswerStep[]>>({})
   const [answerNote, setAnswerNote] = useState<AnswerNote | null>(null)
   const [failure, setFailure] = useState<AnswerFailure | null>(null)
+  // Switchboard: the host hears how many are on their way, and 0 once the editor goes
+  // (which cancels them, below).
+  const onAnsweringRef = useRef(onAnsweringChange)
+  useEffect(() => {
+    onAnsweringRef.current = onAnsweringChange
+  })
+  useEffect(() => {
+    onAnsweringRef.current?.(askings.length)
+  }, [askings.length])
+  useEffect(() => () => onAnsweringRef.current?.(0), [])
   // Leaving the diagram cancels every answer still on its way — upstream too.
   useEffect(() => {
     const running = askRef.current
@@ -2633,12 +2649,22 @@ function FlowEditorCanvas({
     }
   }, [record])
 
+  // Switchboard: what reveal() was asked to show while the board was off screen —
+  // an answer landing on a board whose tab isn't the one shown. A parked pane has no
+  // size to pan by (and a view worked out against none is NaN), so it waits for the
+  // board to be back: shown again, or the pane given a size again.
+  const revealLater = useRef<FlowRect | null>(null)
+
   // Pans just far enough that `rect` sits clear of the canvas's own chrome —
   // a box Tab added off the edge of the view is a box you'd be typing into
   // blind. Switchboard: says whether it had to.
   function reveal(rect: FlowRect): boolean {
     const bounds = wrapperRef.current?.getBoundingClientRect()
     if (!bounds) return false
+    if (bounds.width === 0 || bounds.height === 0) {
+      revealLater.current = rect
+      return false
+    }
     const { x, y, zoom } = getViewport()
     const left = rect.x * zoom + x
     const right = (rect.x + rect.width) * zoom + x
@@ -4828,8 +4854,8 @@ function FlowEditorCanvas({
     }
 
     // The arrows and Escape listen in the capture phase, ahead of the page's
-    // own keys — ←/→ step between diagrams and Escape leaves full screen —
-    // so that while something is selected, the canvas has them first.
+    // own keys — Escape leaves full screen — so that while something is
+    // selected, the canvas has them first.
     function onSelectionKey(event: KeyboardEvent) {
       if (event.metaKey || event.ctrlKey || event.altKey) return
       if (isTextField(event.target) || !onCanvas(event.target)) return
@@ -4959,6 +4985,30 @@ function FlowEditorCanvas({
     },
     [paneOnScreen, store, getNodesBounds, getViewport, setViewport],
   )
+  useEffect(() => {
+    const pane = wrapperRef.current
+    let frame = 0
+    const retry = () => {
+      if (!revealLater.current) return
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        const rect = revealLater.current
+        const bounds = wrapperRef.current?.getBoundingClientRect()
+        if (!rect || !bounds || bounds.width === 0 || bounds.height === 0) return
+        revealLater.current = null
+        reveal(rect)
+      })
+    }
+    const back = new ResizeObserver(retry)
+    if (pane) back.observe(pane)
+    if (shown) retry()
+    return () => {
+      back.disconnect()
+      cancelAnimationFrame(frame)
+    }
+    // reveal reads the view and the pane when it runs; `shown` is what brings it back.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shown])
   const fittedFor = useRef(fitKey)
   useEffect(() => {
     if (fittedFor.current === fitKey) return

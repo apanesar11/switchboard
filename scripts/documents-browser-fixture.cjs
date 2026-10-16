@@ -276,8 +276,9 @@ app.whenReady().then(async () => {
     const target = await board('Copied flow', { kind: 'flow', nodes: [], edges: [] });
     await run(`window.diagram.update({ boardId: ${JSON.stringify(target.data.id)} })`);
     await until('!document.querySelector("[data-id=brief]") && !!document.querySelector(".react-flow")');
-    // Wait for the new diagram's editor, rather than the previous loading frame.
-    await until('document.querySelector(".sbdg-app").textContent.includes("Copied flow")');
+    // Wait for the new diagram's editor, rather than the previous loading frame: the
+    // page reports a board once it is drawn (the host names its tab from it).
+    await until(`window.board && window.board.id === ${JSON.stringify(target.data.id)}`);
     assert.equal(await run(`window.diagram.editAction("paste", false, ${JSON.stringify(copiedWords)})`), true);
     await until('document.querySelectorAll(".react-flow__node").length === 1');
     await run('window.diagram.flush()');

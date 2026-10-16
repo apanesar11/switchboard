@@ -5,14 +5,14 @@
 // differs:
 //
 //   * A board, not a product's list. The page shows exactly `boardId` and never picks
-//     another on its own: the quick switcher, ← / →, New whiteboard and Duplicate ask
-//     the host to open a board (`onOpenBoard`), which changes the route, and the host
-//     keeps one canvas per board (views/whiteboards.js). Boards are files on this Mac
-//     (lib/diagrams/actions.ts), in folders the user makes, not rows.
-//   * No page header. Switchboard's header (Whiteboards › folder › board, and a status
-//     line) sits above and is fed by `onBoardChange` after the load and every write, so
-//     the bar over the canvas holds only the switcher, New whiteboard, full screen and
-//     Actions.
+//     another on its own: Duplicate asks the host to open the copy (`onOpenBoard`), which
+//     changes the route, and the host keeps one canvas per board (views/whiteboards.js).
+//     Boards are files on this Mac (lib/diagrams/actions.ts), in folders the user makes,
+//     not rows.
+//   * No page header and no switcher. Switchboard's tab strip sits above — every board
+//     open at once, the library first, + to open another — and names each tab from
+//     `onBoardChange`, reported after the load and every write. The bar over the canvas
+//     holds only full screen and Actions.
 //   * Full screen covers the window, below the macOS traffic lights — its bar is a
 //     window drag region with room left for them, as the Editor's full screen is.
 //   * Actions ▸ Open terminal…, Show or hide terminals, Rename, Move to folder…,
@@ -24,24 +24,16 @@
 //     keeps it), but may not answer keys meant for a terminal or another canvas. The
 //     editor hears it too (`shown`) so its Google Images panel stops accepting input
 //     when inactive.
+//   * `onAnsweringChange`: how many ✦ Answers the editor is waiting for, so the host's
+//     tab can say one is still drawing while another board is on screen.
 //
 // The canvas IS the editor (FlowEditor.tsx), and changes save as you go — the spec
 // only. Rename writes the name only, so neither can carry an old copy of the other
 // over a newer one written somewhere else.
-//
-// The switcher (DiagramPicker) lists the boards of THIS board's folder, active ones
-// first and archived ones under an "Archived" heading at the bottom. It is flanked by
-// ← / → arrows that step to the board either side in exactly that order, on the bare
-// arrow keys: a board is one canvas, so there is no second list for them to belong to.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import * as PopoverPrimitives from "@radix-ui/react-popover"
-import {
-  RiArrowLeftSLine,
-  RiArrowRightSLine,
-  RiErrorWarningLine,
-  RiFullscreenExitLine,
-} from "@remixicon/react"
+import { RiErrorWarningLine, RiFullscreenExitLine } from "@remixicon/react"
 import {
   archiveWhiteboard,
   duplicateWhiteboard,
@@ -56,8 +48,7 @@ import {
   unarchiveWhiteboard,
   type OpenedWhiteboard,
 } from "@/lib/diagrams/actions"
-import type { DiagramSummary, FlowSpec, TerminalSlot } from "@/lib/diagrams/types"
-import { diagramNavigation, searchDiagrams } from "@/lib/diagrams/search"
+import type { FlowSpec, TerminalSlot } from "@/lib/diagrams/types"
 import {
   listen,
   type WhiteboardFolder,
@@ -86,74 +77,10 @@ import {
 } from "@/components/Dropdown"
 import { toast } from "@/components/Toast"
 import { DiagramCanvas } from "./DiagramCanvas"
-import { DiagramPicker } from "./DiagramPicker"
 import { DeleteDiagramDialog } from "./DeleteDiagramDialog"
 import { FlowEditor, type FlowEditorHandle } from "./FlowEditor"
-import { NewFlowDiagramDialog } from "./NewFlowDiagramDialog"
 import { RenameDiagramDialog } from "./RenameDiagramDialog"
 import { WorkspacePicker } from "./WorkspacePicker"
-import { useArrowKeys } from "../mockups/useArrowKeys"
-
-// Short relative label. Only ever rendered after the fetch resolves.
-function formatRelative(iso: string): string {
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return "—"
-  const seconds = Math.round((Date.now() - then) / 1000)
-  if (seconds < 60) return "just now"
-  const minutes = Math.round(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.round(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.round(hours / 24)
-  if (days < 7) return `${days}d ago`
-  return new Date(then).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  })
-}
-
-// One of the two arrows flanking the switcher. Styled as a sibling of its trigger
-// rather than as a bare icon, so the three read as one control.
-//
-// `target` is the board this arrow lands on — null at the ends of the list, which
-// is what disables the button. Naming it (and flagging an archived one) means
-// stepping off the end of the active boards and into the Archived section is
-// something you can see coming.
-function DiagramStepButton({
-  direction,
-  target,
-  onSelect,
-}: {
-  direction: "prev" | "next"
-  target: DiagramSummary | null
-  onSelect: (id: string) => void
-}) {
-  const Icon = direction === "prev" ? RiArrowLeftSLine : RiArrowRightSLine
-  const what = `${direction === "prev" ? "Previous" : "Next"} whiteboard`
-  const label = target
-    ? `${what} — ${target.name}${target.archivedAt !== null ? " (archived)" : ""}`
-    : what
-  return (
-    <button
-      type="button"
-      disabled={target === null}
-      onClick={() => {
-        if (target) onSelect(target.id)
-      }}
-      aria-label={label}
-      title={`${label} · ${direction === "prev" ? "←" : "→"}`}
-      className={cx(
-        "flex size-[30px] shrink-0 items-center justify-center rounded-lg border transition-colors",
-        "border-black/[.13] bg-white text-gray-500 hover:bg-[#f5f5f7] hover:text-gray-900",
-        "dark:border-white/15 dark:bg-gray-950 dark:text-gray-400 dark:hover:bg-gray-900 dark:hover:text-gray-50",
-        "disabled:pointer-events-none disabled:opacity-40",
-        focusRing,
-      )}
-    >
-      <Icon className="size-[18px]" aria-hidden="true" />
-    </button>
-  )
-}
 
 // The bar's quiet buttons, drawn the way Switchboard draws its own (styles.css .btn
 // and .ib): 30px, 8px corners, a hairline edge.
@@ -181,11 +108,11 @@ export type DiagramsPageProps = {
   /** False while off screen. */
   active: boolean
   onOpenSettings?: () => void
-  /** Open another board — the switcher, ← / →, New whiteboard and Duplicate. */
+  /** Open another board: Duplicate's copy. The host gives it a tab of its own. */
   onOpenBoard: (id: string) => void
   /** Leave the board for `folderId`'s list: Delete, or Back. */
   onClosed: (folderId: string | null) => void
-  /** The board and its folder after the load and after every write, for the header. */
+  /** The board and its folder after the load and after every write, for its tab. */
   onBoardChange: (board: WhiteboardSummary | null, folder: WhiteboardFolder | null) => void
   /** The rail's dot and branch for each workspace — pinned terminals and pickers. */
   workspaceStatus: WorkspaceStatus
@@ -208,9 +135,13 @@ export type DiagramsPageProps = {
   /** The board's full-screen controls, for the host's Esc. */
   onFullscreen?: (handle: FullscreenHandle | null) => void
   onFullscreenChange?: (open: boolean) => void
+  /** How many ✦ Answers the editor is waiting for — 0 once none are. */
+  onAnsweringChange?: (count: number) => void
 }
 
-export type FullscreenHandle = { isFullscreen: () => boolean; leave: () => void }
+// `enter`: the host puts a board back the way it was left — full screen — when the
+// user comes back to it. A board not yet drawn goes full screen once it is.
+export type FullscreenHandle = { isFullscreen: () => boolean; leave: () => void; enter: () => void }
 
 // The board as this page last saw it, tagged with the id it belongs to — so one
 // board's name never paints over another's drawing if the host swaps `boardId`.
@@ -243,18 +174,18 @@ export function DiagramsPage({
   onDirtyChange,
   onFullscreen,
   onFullscreenChange,
+  onAnsweringChange,
 }: DiagramsPageProps) {
   const portal = usePortalContainer()
   const [loaded, setLoaded] = useState<Loaded | null>(null)
   const current = loaded !== null && loaded.boardId === boardId ? loaded : null
   const board = current?.status === "ready" ? current.board : null
 
-  // Every folder and board, for the switcher, the folder's name and Move to folder…
-  // It comes after the board and is refetched when main says something changed.
+  // Every folder and board, for the folder's name and Move to folder… It comes after
+  // the board and is refetched when main says something changed.
   const [index, setIndex] = useState<WhiteboardsIndex | null>(null)
   const [listFailed, setListFailed] = useState(false)
   const [workspaceChoices, setWorkspaceChoices] = useState<WorkspaceChoices | null>(null)
-  const [search, setSearch] = useState("")
 
   // Paint the canvas over the whole window. Plain state, not the browser
   // Fullscreen API: the pane merely swaps to fixed positioning, so React Flow
@@ -288,7 +219,6 @@ export function DiagramsPage({
     name: string
     archived: boolean
   } | null>(null)
-  const [newFlowOpen, setNewFlowOpen] = useState(false)
   // Switchboard: the board Actions ▸ Rename is open for.
   const [renameTarget, setRenameTarget] = useState<{ id: string; name: string } | null>(null)
   // The editor, so a pending autosave can be written before a structural write.
@@ -478,11 +408,11 @@ export function DiagramsPage({
   }, [active, refreshList, refreshChoices, readAgain])
 
   // Main says what changed. A save of this very board is this page's own autosave and
-  // changes nothing the list shows here; anything else may have renamed a folder,
-  // moved a board in or out of this folder, or moved this board — refetched once
-  // things settle, so a burst of writes costs one list. Another board's save only
-  // reorders the switcher, so a canvas off screen leaves it to the refetch it makes
-  // on coming back rather than following every keystroke typed elsewhere.
+  // changes nothing the list shows here; anything else may have renamed a folder or
+  // moved this board — refetched once things settle, so a burst of writes costs one
+  // list. Another board's save changes nothing this page shows, so a canvas off screen
+  // leaves it to the refetch it makes on coming back rather than following every
+  // keystroke typed elsewhere.
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null
     const off = listen("onWhiteboardsChanged", (change) => {
@@ -523,19 +453,6 @@ export function DiagramsPage({
             ? "No folder"
             : null
 
-  // The boards of this board's folder, with this one as the page holds it — its own
-  // saves don't refetch the list, so the list's copy of it may be behind.
-  const siblings = useMemo<DiagramSummary[] | null>(() => {
-    if (!index || !board) return null
-    const others = index.boards.filter((b) => b.folderId === board.folderId && b.id !== board.id)
-    return [summaryOf(board), ...others]
-  }, [index, board])
-
-  const results = useMemo(() => searchDiagrams(siblings ?? [], search), [siblings, search])
-  // The board either side of this one, in the switcher's own order — including
-  // whatever a live search has filtered it down to.
-  const nav = useMemo(() => diagramNavigation(results, boardId), [results, boardId])
-
   // The keys belong to whatever owns focus while a dialog, menu or picker is open —
   // and to nothing here at all while the board is off screen.
   const keyboardEnabled =
@@ -544,24 +461,12 @@ export function DiagramsPage({
     !terminalPickerOpen &&
     !pickerOpen &&
     deleteTarget === null &&
-    !newFlowOpen &&
     renameTarget === null
-
-  function openBoard(id: string) {
-    if (id !== boardId) onOpenBoard(id)
-  }
-
-  function stepBoard(delta: -1 | 1) {
-    const target = delta === -1 ? nav.previous : nav.next
-    if (target) openBoard(target.id)
-  }
-
-  useArrowKeys(keyboardEnabled && nav.ordered.length > 1, stepBoard)
 
   // ── Telling the host ────────────────────────────────────────────────
 
-  // The header's breadcrumb and status line. Reported once the folder's name is
-  // known (or there is none), so it never flashes "No folder" for a board that has one.
+  // The tab's name and folder. Reported once the folder's name is known (or there is
+  // none), so it never flashes "No folder" for a board that has one.
   const boardChange = useRef(onBoardChange)
   useEffect(() => {
     boardChange.current = onBoardChange
@@ -619,14 +524,12 @@ export function DiagramsPage({
       setActionsOpen(false)
       setTerminalPickerOpen(false)
       setDeleteTarget(null)
-      setNewFlowOpen(false)
       setRenameTarget(null)
     }
   }, [active])
 
   // A different board in the same instance starts with nothing of the last one's open.
   useEffect(() => {
-    setSearch("")
     setDeleteTarget(null)
     setRenameTarget(null)
     setTerminalPickerOpen(false)
@@ -639,11 +542,36 @@ export function DiagramsPage({
     if (fullscreen) paneRef.current?.focus()
   }, [fullscreen])
 
+  // Full screen asked for by the host before the board was drawn (a board coming back
+  // the way it was left, its canvas mounted afresh): taken once it is — full screen
+  // exists only over a drawn board, and the host would otherwise move a loading page
+  // onto <body> with no way out of it.
+  const ready = board !== null
+  const readyNow = useRef(ready)
+  const wantFullscreen = useRef(false)
+  useEffect(() => {
+    readyNow.current = ready
+    if (ready && wantFullscreen.current) {
+      wantFullscreen.current = false
+      if (activeNow.current) setFullscreen(true)
+    }
+  }, [ready])
+  useEffect(() => {
+    if (!active) wantFullscreen.current = false
+  }, [active])
+
   // Each board owns its own canvas, and the host asks the one on screen.
   useEffect(() => {
     onFullscreen?.({
       isFullscreen: () => fullscreenNow.current,
-      leave: () => setFullscreen(false),
+      leave: () => {
+        wantFullscreen.current = false
+        setFullscreen(false)
+      },
+      enter: () => {
+        if (readyNow.current) setFullscreen(true)
+        else wantFullscreen.current = true
+      },
     })
     return () => onFullscreen?.(null)
   }, [onFullscreen])
@@ -780,15 +708,6 @@ export function DiagramsPage({
   // dialog would leave <body> with pointer-events: none, and the window dead to clicks.
   const dialogs = (
     <>
-      <NewFlowDiagramDialog
-        open={newFlowOpen}
-        onOpenChange={setNewFlowOpen}
-        folderId={board?.folderId ?? null}
-        folderName={folder?.name ?? null}
-        returnFocusRef={actionsRef}
-        onCreated={(created) => onOpenBoard(created.id)}
-      />
-
       <RenameDiagramDialog
         target={renameTarget}
         returnFocusRef={actionsRef}
@@ -881,43 +800,10 @@ export function DiagramsPage({
   return (
     <>
       <div className="flex size-full flex-col overflow-hidden">
-        {/* The bar — the switcher on the left, New whiteboard, full screen and
-            Actions on the right. Every destructive path starts here, on the board
-            you can see, rather than from a row in a list. */}
-        <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-black/[.08] bg-white px-3 py-[9px] dark:border-white/10 dark:bg-gray-950">
-          <div className="flex min-w-0 flex-1 items-center gap-1">
-            {/* Step / pick / step. The arrows only appear once there is
-                somewhere to step to. */}
-            {nav.ordered.length > 1 ? (
-              <DiagramStepButton direction="prev" target={nav.previous} onSelect={openBoard} />
-            ) : null}
-            <DiagramPicker
-              boards={siblings}
-              current={summaryOf(board)}
-              folderLabel={folderLabel}
-              onSelect={openBoard}
-              search={search}
-              onSearchChange={setSearch}
-              formatRelative={formatRelative}
-              active={active}
-            />
-            {nav.ordered.length > 1 ? (
-              <>
-                <DiagramStepButton direction="next" target={nav.next} onSelect={openBoard} />
-                {nav.position !== null ? (
-                  <span className="shrink-0 px-1 text-xs tabular-nums text-gray-400">
-                    {nav.position}/{nav.ordered.length}
-                  </span>
-                ) : null}
-              </>
-            ) : null}
-          </div>
-
+        {/* The bar — full screen and Actions. Every destructive path starts here, on
+            the board you can see, rather than from a row in a list or a tab. */}
+        <div className="flex shrink-0 items-center justify-end gap-1.5 border-b border-black/[.08] bg-white px-3 py-[9px] dark:border-white/10 dark:bg-gray-950">
           <div className="flex shrink-0 items-center gap-1.5">
-            <Button variant="secondary" className={BAR_BUTTON} onClick={() => setNewFlowOpen(true)}>
-              <Glyph name="plus" className="-ml-0.5" />
-              New whiteboard
-            </Button>
             <Button
               variant="secondary"
               className={cx(BAR_BUTTON, "size-[30px] px-0")}
@@ -1212,6 +1098,7 @@ export function DiagramsPage({
                 onTerminalFloat={onTerminalFloat}
                 onTerminalRemoved={onTerminalRemoved}
                 onDirtyChange={onDirtyChange}
+                onAnsweringChange={onAnsweringChange}
               />
             ) : (
               <DiagramCanvas

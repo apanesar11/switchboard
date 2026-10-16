@@ -34,8 +34,8 @@ and workspace discovery), `npm run test:editor`, `npm run test:databases`,
 and its one-time migration, the layout, ✦ Answer and Google Images — all under plain
 Node in scratch folders. `npm run check:diagrams` type-checks the whiteboard editor.
 Three checks run the built editor in a hidden Electron window, with scratch data rather
-than your `~/.switchboard`: `npm run test:whiteboards:browser` (the Whiteboards screen
-and the terminals on a board), `npm run test:documents:browser` and
+than your `~/.switchboard`: `npm run test:whiteboards:browser` (the Whiteboards screen,
+its tabs and the terminals on a board), `npm run test:documents:browser` and
 `npm run test:rich-text:browser`.
 
 ## Set up your workspaces
@@ -143,12 +143,21 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   a row dragged onto a folder moves there, and a folder's **…** renames it, or deletes it
   once it is empty — a folder is never deleted with a whiteboard still in it.
 
-  An open whiteboard's header is a breadcrumb, **Whiteboards › folder › whiteboard**, and
-  the bar over the canvas holds the quick switcher (the whiteboards of that folder; ← and
-  → step through them), **New whiteboard**, full screen and **Actions**: **Open
-  terminal…**, **Show or hide terminals** (⌘A), **Rename…**, **Move to folder…**,
-  **Duplicate** (with its own copies of the documents on it), **Archive** and **Delete**.
-  Esc never takes you out of a whiteboard; the breadcrumb does. A whiteboard whose file
+  Whiteboards open in tabs, as many as you like, one on screen at a time. The strip
+  across the top starts with **Whiteboards** — this list, pinned, never closed — then a
+  tab per open whiteboard with its folder under its name; **+** opens another (search
+  every whiteboard, or pick from the ones edited last and the folders, or make a **New
+  whiteboard…**), × or a middle click closes one, ⌘W closes the one on screen, ⌃Tab and
+  ⌃⇧Tab go round them and ⌘1–9 pick one. Drag a tab to move it; right-click for Close
+  other tabs, Close tabs to the right and Show in Whiteboards. A whiteboard on another tab
+  shows a blue dot when one of its terminals rings and a violet one while ✦ Answer is
+  still drawing on it. Closing a tab never asks — whiteboards save as you go. The tabs
+  are still there after a relaunch, and the rail's **Whiteboards** comes back to the one
+  you left (full screen, if it was); pressed again, it shows the list. The bar over the
+  canvas holds full screen and **Actions**: **Open terminal…**, **Show or hide
+  terminals** (⌘A), **Rename…**, **Move to folder…**, **Duplicate** (opened in a tab of
+  its own, with its own copies of the documents on it), **Archive** and **Delete**. Esc
+  never takes you out of a whiteboard; the Whiteboards tab does. A whiteboard whose file
   can't be read says so, with **Try again** for once it is fixed. Click a shape on the
   toolbar down the left and click the canvas to place it; with a box selected, Tab adds
   the next one joined to its right and starts you typing, ⇧Tab steps back, the arrow keys
@@ -324,7 +333,8 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   Anthropic request when that credential is absent.
 - **Sidebar** — the rail of workspaces closes, for when you want the whole window for a
   terminal or a diff. The button beside the traffic lights, or **View ▸ Hide Sidebar**
-  (⌃⌘S); it is remembered, ⌘1–9 still switch workspace without it, and if a shell rings
+  (⌃⌘S); it is remembered, ⌘1–9 still switch workspace without it (on the Whiteboards
+  screens, with a whiteboard open in a tab, they pick a tab), and if a shell rings
   while it is closed the button carries the blue dot. Nothing reloads — the terminal keeps
   its scrollback, its focus and its shell. The Editor's full-screen button goes further
   and hides the header too, until you press it again or Esc.

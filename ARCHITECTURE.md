@@ -1066,19 +1066,23 @@ real `~/.switchboard`.
 **The bundle's seam is one board.** `window.SBDiagrams.create(element, props)` makes an
 editor for exactly `props.boardId` and never opens another on its own. Props: `boardId`;
 `active` (false while off screen);
-`onOpenSettings`; `onOpenBoard(id)` (the quick switcher, ← / →, New whiteboard and
-Duplicate — the host changes the route); `onClosed(folderId)` (after Delete, and Back on
-a board that no longer exists or can't be read — the host lets the canvas go and shows
-the list it was in; one that merely couldn't be read opens again from there once fixed);
-`onBoardChange(board, folder)` (after the load and every
-write — the host's breadcrumb and status line); `onDirty(count)`;
-`onFullscreenChange(open)`; `terminals` (the host's list, `{ wsId, open, minimized,
+`onOpenSettings`; `onOpenBoard(id)` (Duplicate — the host opens the copy in a tab of its
+own, which changes the route); `onClosed(folderId)` (after Delete, and Back on a board
+that no longer exists or can't be read — the host closes its tab, lets the canvas go and
+shows the next tab, or with none left the list it was in; one that merely couldn't be
+read opens again from there once fixed); `onBoardChange(board, folder)` (after the load
+and every write — the name and folder on the board's tab); `onDirty(count)`;
+`onFullscreenChange(open)`; `onAnswering(count)` (how many ✦ Answers the editor is
+waiting for, 0 once none are or it goes — the dot on a hidden board's tab, and what keeps
+the LRU from letting that canvas go); `terminals` (the host's list, `{ wsId, open, minimized,
 pinned }[]`); `workspaceStatus` (`{ [wsId]: { dot, branch } }`, the rail's dot and branch,
 for pinned terminals' headers and the pickers); and the terminal callbacks
 `onOpenTerminal(wsId)`, `onToggleTerminals()`, `onTerminalSlots(slots)`,
 `onTerminalFloat(wsId)` and `onTerminalRemoved(wsId, reason, rect)`. The handle has
 `update(partial)`, `flush()`, `editAction(action, image, text)`, `fullscreen()`,
-`leaveFullscreen()` and `contains(el)`, and `destroy()` — flush, unmount, remove its
+`leaveFullscreen()`, `enterFullscreen()` (a board the user left full screen comes back
+that way — on screen only, and once drawn when it is still loading) and `contains(el)`,
+and `destroy()` — flush, unmount, remove its
 body-level portal; nothing reaches the host after it, so a late `onDirty(0)` cannot clear
 the flag of a new canvas the host has since made for the same board — `board()`, the
 summary as last reported, `pickWorkspace(anchor, opts)` — a light `WorkspacePicker`
@@ -1096,7 +1100,8 @@ it open). It also closes, unanswered, when `active` turns false and on `destroy(
 `pickWorkspace` answers null for a board going away or not in the window: a picker left
 open would float over the next screen and open a terminal on a board nobody can see. The
 global adds `flush()` (every board, parked ones included), `refreshAnswers(fresh)` and
-`blankSpec()`, the empty spec the screen's New whiteboard writes.
+`blankSpec()`, the empty spec New whiteboard writes — the home's, and the tab strip's
+picker's.
 
 `DiagramsPage.tsx` is that one board. It fetches the board first and draws it without
 waiting for the folder list. A board that has gone says `This whiteboard no longer
@@ -1105,11 +1110,8 @@ whiteboard can't be opened` over main's reason, with Back and
 **Try again**, which reads it again — as does the board coming back on screen still in
 that state — so a file fixed by hand opens without a restart while the host keeps the
 canvas. A spec that no longer parses still opens, so Rename, Move, Archive and Delete
-stay available on it. Its bar holds the quick switcher (`DiagramPicker.tsx`: the boards
-of THIS board's folder, active ones first and archived ones under their own heading, the
-trigger reading `name · folder`, ← / → stepping through them), **New whiteboard** (a
-name; it lands in this board's folder, its workspace left to main), full screen, and
-**Actions** (`data-whiteboard-actions`): **Open terminal…** (a picker: this board's
+stay available on it. Its bar holds full screen and **Actions** (`data-whiteboard-actions`),
+right-aligned and nothing else — moving between boards is the host's tab strip: **Open terminal…** (a picker: this board's
 workspace first, then Recent, then the rest, with search), **Show or hide terminals**
 (⌘A), **Rename…**, **Move to folder…** (every folder and No folder, the current one
 checked), **Duplicate** (and opens the copy), **Archive** or **Unarchive**, **Delete**.
@@ -1122,7 +1124,10 @@ that the same board is still on screen. Autosave writes the spec only and Rename
 name only, so neither can carry an old copy of the other over a newer one. The page
 refetches the folder list, debounced, on `sb:evt:wbChanged` — not for its own saves, nor
 for another board's while it is off screen — and again when `active` turns true, so the
-switcher, the breadcrumb's folder and the Move menu stay current.
+folder its tab names and the Move menu stay current. An answer that lands while the
+board is parked has no pane size to be revealed against: the editor keeps the boxes to
+show and pans to them once the board is shown again (a view worked out against a
+zero-sized pane is NaN).
 
 **A terminal can be pinned to a board.** A `shape: "terminal"` node is a workspace's
 terminal made board content — `{ id, label, shape: 'terminal', workspace, size, font?,
@@ -2386,7 +2391,8 @@ SB.state = { workspaces: [], byId: {}, route: {view:'workspace', wsId, tab:'chan
 the workspaces' `section`s, in the order main hands them over. Views are pure functions
 `(state) => HTMLElement`; `app.js` swaps `#main`'s child. It subscribes to `onLog`,
 `onRunState`, `onLinks`, `onFocus`, `onAppearance`, `onUsage`, and owns keyboard shortcuts
-(⌘1–9 switch workspace, ⌘R refresh, Esc back, ⌘. stop). Esc never goes back once
+(⌘1–9 switch workspace — on the Whiteboards screens, while a board is open in a tab, they
+pick a tab instead (R15) — ⌘R refresh, Esc back, ⌘. stop). Esc never goes back once
 something has acted on it (`defaultPrevented` — a Radix dialog or menu that closed on that
 very key marks it handled first), so one Esc is one step. An appearance change never calls
 `render()`: `term-theme.js` repaints the live xterms itself, and rebuilding the view would
@@ -2434,10 +2440,21 @@ id; a `whiteboard` route without one is the Whiteboards screen. `normalize()`,
 `sameRoute()` and `routeKey()` carry both fields, or two boards would be one route and
 `go()` would take the second for a re-render. A route to the old Diagrams tab,
 `{view:'workspace', tab:'diagrams'}`, lands on the Whiteboards screen rather than on the
-first tab, and `rememberScreen()` keeps an open board as `whiteboards`, so the window
-comes back to the list in the board's folder. `sb:evt:wbChanged` marks every `wb:` load
-stale without a render and redraws only when the Whiteboards screen is up — the one
-screen that shows the list; whoever shows it next revalidates it then. `SB.ensureScanned(wsId)` scans a workspace
+first tab, and `rememberScreen()` keeps an open board as `whiteboards`; the window comes
+back to the whiteboard tab last on screen there (`whiteboardEntry()`, which asks
+`SB.views.whiteboards.entry()`) — the board while its tab is open (and, once main's list
+has come in, while it lists the board), else the list in its folder. At launch the list
+has not come in yet, so a board deleted while the window was closed opens on its `This
+whiteboard no longer exists` page, whose Back closes the tab. The rail's Whiteboards row
+goes to the same place from any other screen, so a board left for the Grid is the board
+come back to; pressed again on the Whiteboards screens, it goes to the list. That is
+never `normalize()`'s doing: `back()` and a folder deleted route to
+`{view:'whiteboards'}` and mean the list; Delete closes the board's tab and shows the
+next one, and reaches the list (the board's folder) only when no tab is left.
+`sb:evt:wbChanged` marks every `wb:` load stale without a render and redraws only the
+screens that show the list: the Whiteboards screen, and an open board — its tabs and +
+picker name the other boards — for anything but an editor's own autosave; whoever shows
+it next revalidates it then, and an open + picker is repainted as the list comes in. `SB.ensureScanned(wsId)` scans a workspace
 once, if nothing has asked yet — for a terminal panel's branch and the pickers, which
 can name a workspace no route has visited.
 
@@ -2945,7 +2962,8 @@ slab is refused rather than navigating the window.
 
 ### R15 `views/whiteboards.js`, `views/wbterminals.js`, and the bundle in `src/diagrams/`
 The Whiteboards screen and an open board (§4.17). `views/whiteboards.js` is the
-classic-script seam: it draws the home and a board's header and keeps the canvases. The
+classic-script seam: it draws the home and the tab strip, keeps the tabs and keeps the
+canvases. The
 editor is the React bundle, one instance per open board. `views/wbterminals.js`
 (`SB.wbTerminals`) is the terminals over each board.
 
@@ -2984,39 +3002,86 @@ or make new folders.`, how many files could not be read and where they were left
 field keeps its text. The empty states are the mock-up's: `No whiteboards yet`,
 `Nothing in <folder> yet`, `Whiteboards you edit show here`, `Nothing archived`.
 
-**An open board** (`{view:'whiteboard', board}`, mock-up screen 2) is a persistent root
-like the Editor's (R13): the same element comes back on every render, so the canvas,
-its xterms and focus never see a teardown. Its header is swapped only when what it says
-has changed (`putHeader`, against a signature of `headerOf()`'s plain data): the editor
-reports every write, autosave included, and a header rebuilt for each took the crumb
-from under a press — mousedown on the old span, mouseup on the new, no click. The body
-loses only what is neither the slab nor app.js's notice bar (`[data-sb-notice]`), and the
-slab is appended only when it is not already there: taken out and put back on every
-render while a notice was up, it lost focus and a `<webview>`'s page. Header: the
-breadcrumb `Whiteboards › <folder> › <board>` — `Archived` or `No folder` in the middle
-for a board listed there, the first two going to the home on that folder — the board's
-name, and `Saved locally · 12 boxes · answers read sample-2 and example-1` (or `· no
-answers yet`), with `· 2 terminals` while any are open and `· archived`, fed by
-`onBoardChange` and the terminal layer. No workspace tabs. Body: the board's slab.
+**An open board** (`{view:'whiteboard', board}`) is a persistent root like the Editor's
+(R13): the same element comes back on every render, so the canvas, its xterms and focus
+never see a teardown. Its top is the tab strip, swapped only when what it says has
+changed (`putStrip`, against a signature of `stripModel()`'s plain data) and never while
+a tab is being dragged (it catches up when the drag ends): the editor reports every
+write, autosave included, and a strip rebuilt for each would take a tab from under a
+press — mousedown on the old tab, mouseup on the new, no click. The body loses only what
+is neither the slab nor app.js's notice bar (`[data-sb-notice]`), and the slab is
+appended only when it is not already there: taken out and put back on every render while
+a notice was up, it lost focus and a `<webview>`'s page. No breadcrumb, title or status
+line, and no workspace tabs: below the strip, the board's slab, edge to edge — no
+gutter, no rounded corners — its bar holding full screen and Actions.
+
+**Tabs** (the "Whiteboard tabs" mock-up, version 2). Many boards open at once, one on
+screen. `tabs = { open: [boardId…], active }` — the strip's order, and the tab last on
+screen, a board's id or null for the library — is written to `switchboard.wb.tabs` as
+either changes. Every render notes the route (`noteRoute`): a board's own screen gives
+it a tab, at the end unless `addTab()` already put it after the board it came from
+(Duplicate's copy), and the home makes the library the active tab; any other screen
+leaves both as they were, which is where the rail's row and a relaunch come back to
+(`entry()`). The strip (`.wbstrip`, light chrome like the rail, 56px) is the window's
+drag region where it is empty; the tabs and buttons are holes in it. First the library,
+`Whiteboards` over `K folders · N whiteboards`, pinned and never closed; then a tab per
+board — its name over where it is listed (its folder, `No folder` or `Archived`) — as
+wide as its name up to 220px, narrowing together to 104px before the strip scrolls
+sideways (the wheel scrolls it; the tab that comes up is scrolled into view); then **+**;
+and, only while some tabs are out of sight, `N open ▾`, every tab with where it is and
+its dot, then Close other tabs and Close all tabs. The tab on screen is white and joins
+what is under it — the page on the library, the board's bar on a board, dark when View ▸
+Terminal appearance is (the bundle's `dark:` keys on the same attribute). Its × shows on
+it and on hover; a board off screen shows one dot in that place instead — blue while one
+of its terminals rang unread (`SB.state.bell` for a workspace whose terminal is on the
+board), violet while ✦ Answer is still drawing on it (`onAnswering`). A click shows a tab
+and hands the keyboard back to the board; × and a middle click close one; dragging a tab
+along the strip moves it, a blue line showing where it lands, and a board's row dragged
+up from the library opens it in a tab there. A right-click: Close tab (⌘W on the one on
+screen), Close other tabs, Close tabs to the right, Show in Whiteboards (the library, in
+its folder). **+** opens a picker (`.wbfind`, on `<body>` like the menus, so the home's
+rebuilds never take a half-typed search with them): a search over every board, active
+ones first; with nothing typed, the six edited last, then the folders (No folder and
+Archived among them) to look through; `New whiteboard…` (a name, in the folder being
+looked at, else the board on screen's, else the library's — none from All, Recent, No
+folder and Archived; a refusal stays in the picker in main's words) and `All
+whiteboards ›`. A board already open is tagged `open` and shown in its tab, never opened
+twice; ↑ ↓ and Enter work from the search field, Backspace on an empty one leaves a
+folder, and Esc closes it (from New whiteboard…, goes back to the search). Closing never
+asks — a board saves as it goes: the tab goes, its canvas is let go (its editor writes
+first; its shells live on) and, when it was on screen, the tab to its right comes up,
+else the one to its left, else the library. ⌘W (File ▸ Close) closes the board's tab
+wherever the keyboard is on it, a shell included; on the library it stays the window's.
+⌃Tab and ⌃⇧Tab go round the tabs, the library among them; ⌘1–8 pick that board's tab and
+⌘9 the last — while a board is open in a tab, on the Whiteboards screens only, and never
+from inside a shell on a board. Esc on a focused tab is the board's, like Esc on the
+canvas. A board main no longer lists loses its tab when the list comes in, unless it has
+a canvas — that page says the board is gone, with Back. The home shows the strip only
+while a board is open; closing every tab leaves the home as it was.
 
 **Canvases are keyed by board.** One `SBDiagrams.create` instance and one `.dgslab` per
 board, shown in the board's screen and parked off the page while another screen shows —
 and moved onto `<body>` for its full screen, `position: fixed` and `no-drag`, since the
-slab then covers the header's drag region, which Electron still counts — and never
+slab then covers the strip's drag region, which Electron still counts — and never
 remounted by a render. No Grid square holds one (§4.10), so the slab takes no focus of
 its own: a press on empty paper leaves the keyboard on `<body>`, which the editor counts
 as the canvas, as it does the slab's ancestors. At most
-eight live at once: the least recently shown that is off screen, not full screen and
-holding nothing unsaved is let go — its layer destroyed, every shell living on, and its
+eight live at once: of those off screen, not full screen, holding nothing unsaved and
+with no answer on its way (letting one go would cancel it), a board with no tab before
+one in a tab, then the least recently shown, is let go — its tab stays and mounts a fresh
+canvas when it is shown again — its layer destroyed, every shell living on, and its
 editor flushed and destroyed after the current task, since that is often a callback from
 inside the editor. A canvas let go is marked dead: the editor's callbacks are silenced
 for the gap until its destroy (`kept()`), so a late dirty flag or slot list never lands
 on a new canvas for the same board, and no terminal layer is attached to it again. A
-full-screen board goes back once the route moves on. After Delete, or Back, the board's
-own screen goes to the list it was in — its breadcrumb's: its folder, No folder, or
-Archived (`listedIn`) — and the canvas is let go; one that merely couldn't be read
-opens again from that list once fixed. The quick switcher, ← / →, New whiteboard and
-Duplicate change the route (`openFrom`). `renderMain()`
+full-screen board goes back once the route moves on — and when the route left the
+Whiteboards screens altogether (⌘0 to the Grid, say), it is full screen again when it is
+next shown (`resumeFull`, `enterFullscreen()`), the way it was left; ⌃Tab or ⌘1–9 from a
+full-screen board hands full screen to the board shown next. After Delete, or Back, the
+board's tab closes and its canvas is let go; from its own screen the next tab comes up,
+or with none left the list it was in: its folder, No folder, or Archived (`listedIn`).
+One that merely couldn't be read opens again from that list once fixed. Duplicate opens
+the copy in a tab right after its board's (`openFrom`). `renderMain()`
 tells the view after every render which canvas is visible (`shown(route)`). Only the
 active canvas — the one on the board's own screen — handles document shortcuts, and
 hidden canvases turn their keyboard handlers off, so Backspace in a Terminal
@@ -3025,7 +3090,7 @@ workspace's rail dot and, once scanned, branch), pushes it only to canvases on s
 only when it changed, and gives every layer its turn (`layer.shown(visible)`). The seam:
 `SB.views.whiteboards = { render, shown, onKey, editAction,
 refresh, flushAll, toggleTerminalShortcut, terminalShown(wsId), terminalFocused(wsId),
-lastFolder(), api(boardId) }`, `api` for the smoke harness and the browser
+lastFolder(), entry(), api(boardId) }`, `api` for the smoke harness and the browser
 tests only. Main's flush (`sb:evt:diagramsFlush`), the window's blur and `pagehide` all
 write every board.
 
@@ -3173,9 +3238,10 @@ Esc (`escape()`) is the board's, never a step back, when something already answe
 on that very keydown in the capture phase, so by the window its Cancel is in no document
 at all — and it leaves a Radix picker, menu or dialog to Radix; it leaves a full-screen
 board before it means anything else; and inside the board — the canvas, its bar, the
-terminals' tray — it never leaves the board, nor
+terminals' tray, the tab strip — it never leaves the board, nor
 from the page itself on the board's own screen: the canvas has had its turn, and one Esc
-too many must not throw the user out; leaving is the breadcrumb or its caret. ⌘↵ (or ⌘I)
+too many must not throw the user out; leaving is the Whiteboards tab, or another tab.
+⌃Tab, ⌃⇧Tab and ⌘1–9 move between tabs (see Tabs) before anything else hears them. ⌘↵ (or ⌘I)
 over the canvas is ✦ Answer (the editor's own listener) and never Start. `onKey` leaves
 alone anything inside a terminal (`[data-wb-terminal="<ws>"]`, a panel or a pinned
 overlay) and, but for ⌘A and Esc, the tray, which carries the attribute with no
@@ -3210,7 +3276,8 @@ the old floating-panel test) runs the production `index.html` and preload, the b
 bundle, xterm and a real PTY (`SWITCHBOARD_NO_TMUX=1`) in a hidden Electron window, with
 a main of its own: its IPC is stubbed but for the store, which is the real
 `whiteboards.js` beside a temporary `SWITCHBOARD_CONFIG`. It covers the rail screen and
-its list, opening a board, Open terminal… floating the Terminal tab's own xterm, a
+its list, opening a board in the tab strip (the library pinned first; no breadcrumb,
+title or status line; a bar of full screen and Actions), Open terminal… floating the Terminal tab's own xterm, a
 second panel from the tray (whose + also puts its picker away) cascading down and left,
 Tile, minimize and restore, Close keeping the shell, ⌘A, the tray leaving the zoom
 controls clickable, Pin keeping the same xterm, cols/rows and text position (slot body
@@ -3224,7 +3291,11 @@ a panel's exit footer and retry, and ✦ Answer's Conversation row, its count re
 the real `answer.js` from the real board file: New conversation pressed from the keyboard
 leaving Enter and Tab in the menu (no box added, none edited), a workspace changed and
 changed back in the open menu leaving nothing to continue, and a CLI main lists as
-`alone`. A
+`alone`; then the rail's Whiteboards row coming back from the Grid to the board left
+open, and the tabs — + and its search opening a board at the end of the strip, ⌃Tab
+round the library, ⌘W closing the tab on screen and not the window, a middle click
+closing another, the open set and the board on screen back after a reload, every tab
+closed leaving the home without a strip, and ⌘W there left to the window. A
 product bug it has found is listed in its `KNOWN_BUGS` by check name: the run reports it
 and passes only while it still fails, so a fix says to take it off the list.
 
@@ -3315,11 +3386,16 @@ and emptied.
     then one row per board: a mini preview, the name, `Edited 2h ago · 12 boxes ·
     answers read [sample-2]`, and `Open ›`. Rows drag onto folders.
 
-13. **An open whiteboard** (screen 2) — breadcrumb `Whiteboards › sample › Search
-    filters`, the name, `Saved locally · 12 boxes · answers read sample-2`; no workspace
-    tabs. Over the canvas, the bar: the quick switcher (`Search filters · sample`, ← →),
-    **New whiteboard**, full screen and **Actions** — Open terminal…, Show or hide
-    terminals `⌘A`, Rename…, Move to folder… ›, Duplicate, Archive, Delete. ✦ Answer's
+13. **An open whiteboard** (the Whiteboard tabs mock-up, version 2) — across the top, the
+    tab strip: `Whiteboards` over `3 folders · 14 whiteboards`, pinned first; a tab per
+    open board, `Search filters` over `sample`, the one on screen white and joined to the
+    board, × on it and on hover, a blue or violet dot in its place on a board off screen;
+    +; and `9 open ▾` while some tabs are out of sight. No breadcrumb, title or status
+    line, no workspace tabs; the board edge to edge below. Over the canvas, the bar: full
+    screen and **Actions** — Open terminal…, Show or hide terminals `⌘A`, Rename…, Move to
+    folder… ›, Duplicate, Archive, Delete. + opens `Search whiteboards`, Recent, Folders,
+    `New whiteboard…` and `All whiteboards ›`; a right-click on a tab, Close tab, Close
+    other tabs, Close tabs to the right, Show in Whiteboards. ✦ Answer's
     chevron menu (screen 3) has the **Workspace** row: `sample-2`, `~/Projects/sample-2 ·
     what a CLI reads`, **Change… ›**, the short picker opening beside it; a box an
     answer made carries a `sample-2` tag under its corner.
@@ -3335,8 +3411,8 @@ Clicking the branch pill opens the PR screen on its Overview. Clicking a summary
 opens Files. Clicking a file row opens Diff. The workspace name — the header title, the
 breadcrumb crumb, and the name strip on a Grid square — opens that workspace's Terminal.
 The back caret and Esc go back — except on an open whiteboard, where Esc on the board
-itself never leaves it, and the breadcrumb's `Whiteboards` and folder crumbs are the way
-back to the list.
+itself never leaves it, and the `Whiteboards` tab (or the rail's row, pressed there) is
+the way back to the list.
 
 ---
 

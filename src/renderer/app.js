@@ -191,6 +191,18 @@ window.SB = window.SB || {};
     try { return String(wb.lastFolder() || '') || 'all'; } catch (e) { return 'all'; }
   }
 
+  // Where the Whiteboards screens are come back to — from the rail's row, and at launch:
+  // the tab last on screen there, an open board or the library (views/whiteboards.js
+  // keeps the tabs, across launches). The library when that module is missing.
+  function whiteboardEntry() {
+    var wb = SB.views.whiteboards;
+    var out = null;
+    if (wb && typeof wb.entry === 'function') {
+      try { out = wb.entry(); } catch (e) { out = null; }
+    }
+    return out && out.view === 'whiteboard' && out.board ? { view: 'whiteboard', board: String(out.board) } : { view: 'whiteboards' };
+  }
+
   // A partial route inherits from the current one, so a segmented control can
   // call SB.go({tab:'logs'}) and a file row SB.go({view:'diff', repo, path}).
   function normalize(route) {
@@ -224,9 +236,10 @@ window.SB = window.SB || {};
       out.number = number;
       out.owner = r.owner || (same ? cur.owner : null) || null;
     }
-    // The home's folder is never inherited from the screen being left: the rail's row
-    // and the breadcrumb ask for "the Whiteboards screen", and the remembered folder is
-    // the answer (the board just shown, or the folder last looked at).
+    // The home's folder is never inherited from the screen being left: the library tab,
+    // and the rail's row pressed on the Whiteboards screens, ask for "the Whiteboards
+    // screen", and the remembered folder is the answer (the board just shown, or the
+    // folder last looked at).
     if (view === 'whiteboards') out.folder = typeof r.folder === 'string' && r.folder ? r.folder : whiteboardFolder();
     if (view === 'whiteboard') out.board = String(board);
     return out;
@@ -331,7 +344,8 @@ window.SB = window.SB || {};
   }
 
   // A pull request from the list counts as the list, and an open whiteboard as the
-  // Whiteboards screen: the window comes back to the list (in the board's folder).
+  // Whiteboards screen: the window comes back to it — to the tab last on screen there
+  // (whiteboardEntry), a board or the list.
   function rememberScreen(route) {
     // Settings is visited, not worked in: the window comes back to wherever it was before.
     if (route.view === 'settings') return;
@@ -973,13 +987,15 @@ window.SB = window.SB || {};
     }, d.icon('pr'), h('span', null, 'Pull requests'), h('span.sp')));
 
     // The third: every whiteboard, in the folders the user makes. No dot — a board has
-    // nothing running; its terminals' bells ring on their workspaces' rows below.
+    // nothing running; its terminals' bells ring on their workspaces' rows below. From
+    // another screen it comes back to the whiteboard tab last on screen; pressed again
+    // there, it is the way to the library.
     var wb = onWhiteboards();
     nav.appendChild(h('button.it.top' + (wb ? '.on' : ''), {
       type: 'button',
       title: 'Your whiteboards, in folders you make',
       'aria-current': wb ? 'true' : null,
-      onClick: function () { go({ view: 'whiteboards' }); }
+      onClick: function () { go(onWhiteboards() ? { view: 'whiteboards' } : whiteboardEntry()); }
     }, d.icon('board'), h('span', null, 'Whiteboards'), h('span.sp')));
 
     if (!state.workspaces.length) {
@@ -2004,12 +2020,16 @@ window.SB = window.SB || {};
 
   // Main says a whiteboard or folder changed (sb:evt:wbChanged) — after every write,
   // the editor's autosave included, which is many a minute while a board is being drawn.
-  // Every 'wb:' load goes stale QUIETLY, and only the screen showing the list, the
-  // Whiteboards screen, is redrawn for it. Whoever shows the list next revalidates it
-  // then. An open board learns of its own writes from the editor.
-  function handleWhiteboards() {
+  // Every 'wb:' load goes stale QUIETLY, and only the screens showing the list are redrawn
+  // for it: the Whiteboards screen, and an open board — whose tabs and + picker name the
+  // other boards — for anything but the editors' own autosaves, which change no name,
+  // folder or count there. Whoever shows the list next revalidates it then. An open board
+  // learns of its own writes from the editor.
+  function handleWhiteboards(change) {
     markStale('wb:');
-    if (state.route.view === 'whiteboards') schedule();
+    var view = state.route.view;
+    var autosave = !!change && change.reason === 'save' && !change.external;
+    if (view === 'whiteboards' || (view === 'whiteboard' && !autosave)) schedule();
   }
 
   function subscribe() {
@@ -2181,10 +2201,12 @@ window.SB = window.SB || {};
         return;
       }
       var wanted = pickInitial();
-      // Back to the Grid or to Usage if that is where the window was closed; the last
-      // workspace is still remembered and scanned, so the rail's dots are right either way.
+      // Back to the Grid or to Usage if that is where the window was closed — or to the
+      // whiteboard tab that was on screen; the last workspace is still remembered and
+      // scanned, so the rail's dots are right either way.
       var screen = lastScreen();
-      state.route = normalize({ view: FREE[screen] ? screen : 'workspace', wsId: wanted });
+      state.route = normalize(screen === 'whiteboards' ? whiteboardEntry()
+        : { view: FREE[screen] ? screen : 'workspace', wsId: wanted });
       state.loading = false;
       state.booted = true;
       render();                                            // first paint: no git has run yet

@@ -332,10 +332,9 @@ window.SB = window.SB || {};
       return !!slab && (slab.classList.contains('full') || slab.parentNode === document.body);
     }
 
-    // The bottom of the canvas bar (switcher, New whiteboard, Full screen, Actions), in
-    // slab pixels: the top of the React Flow canvas, else (no canvas drawn yet) just
-    // under the Actions button — should the bar wrap onto a second line, Actions is on
-    // its last. Null while neither is on the page: the board is still loading.
+    // The bottom of the canvas bar (Full screen, Actions), in slab pixels: the top of the
+    // React Flow canvas, else (no canvas drawn yet) just under the Actions button. Null
+    // while neither is on the page: the board is still loading.
     function barBottom() {
       if (!slab) return null;
       var at = slab.getBoundingClientRect();

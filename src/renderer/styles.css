@@ -1318,7 +1318,7 @@ aside .empty p{font-size:var(--fs-xs)}
 .ed .edmenu .msep{height:1px;margin:4px 6px;background:var(--ed-pal-rule)}
 
 /* ── Whiteboards (§4.17, R15; views/whiteboards.js) ──────────────────────── */
-/* An open board: the same slab as the Editor, the card under the header, which the
+/* An open board: the same slab as the Editor, the card under the tab strip, which the
    editor bundle (diagrams/diagrams.js) is mounted inside. Everything in .sbdg is styled
    by diagrams/diagrams.css; this only places the slab. Its own stacking context
    (z-index:0), so the terminal panels views/wbterminals.js floats inside it
@@ -1333,17 +1333,136 @@ aside .empty p{font-size:var(--fs-xs)}
 .dgslab::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
   box-shadow:inset 0 0 0 1px var(--line);z-index:2}
 .dgslab.blank{align-items:center;justify-content:center;background:var(--term-bg)}
-/* Full screen: the slab is on <body>, over the header's drag region — which Electron
+/* Full screen: the slab is on <body>, over the tab strip's drag region — which Electron
    still counts underneath it. Later in the document, so this hole is punched after. */
 .dgslab.full{-webkit-app-region:no-drag}
 
-/* The open board's header: Whiteboards › folder › board, then the name, then a line.
-   One line, always (mock-up screen 2): the folder and the board both give way, each
-   ellipsised, in proportion to their length; Whiteboards, the caret and the › stay. */
-.hd.wbbhd .crumb{margin-bottom:6px;min-width:0;white-space:nowrap}
-.hd.wbbhd .crumb > *{flex:none}
-.hd.wbbhd .crumb > span[data-nav] ~ span[data-nav],
-.hd.wbbhd .crumb > .cur{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Tabs (views/whiteboards.js): every whiteboard open at once, one on screen. The strip
+   takes the place of the header — its empty space is the window's drag region, as the
+   header was, and the tabs and buttons are holes in it — and the board's slab runs edge
+   to edge under it. Light chrome, like the rail; the tab on screen joins what is under
+   it: the page on the library, the board's bar on a board. */
+.wbview .dgbd{padding:0}
+.wbview .dgslab{margin-top:0;border-radius:0;box-shadow:none}
+.wbview .dgslab::after{display:none}
+.wbview .dgbd > .bar{margin:10px 12px}
+.wbstrip{display:flex;align-items:flex-end;gap:2px;height:56px;padding:12px 10px 0 12px;flex:none;
+  position:relative;z-index:1;background:var(--sidebar);box-shadow:inset 0 -1px 0 var(--line);
+  -webkit-app-region:drag}
+/* With the rail closed the window's top 30px — the traffic lights and the rail's button —
+   is main's padding: the strip's grey runs up into it, as a title bar, its tabs still
+   clear of .drag's 38px. */
+.win.norail .wbstrip{margin-top:-30px;height:86px;padding-top:42px}
+/* A tab is as wide as its name, up to 220px; crowded, they narrow together, browser-style,
+   down to 104px before the strip scrolls sideways (the wheel scrolls it). */
+.wbtl{display:flex;align-items:flex-end;gap:2px;flex:0 1 auto;min-width:0;height:100%;position:relative;
+  overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-app-region:no-drag}
+.wbtl::-webkit-scrollbar{display:none}
+.wbtab{position:relative;display:flex;flex-direction:column;justify-content:center;gap:1px;height:43px;
+  flex:0 1 auto;min-width:104px;max-width:220px;padding:0 7px 1px 13px;border-radius:8px 8px 0 0;color:var(--ink-3);
+  cursor:default;user-select:none;outline:none;-webkit-app-region:no-drag}
+.wbtab:hover{background:var(--tint-2);color:var(--ink)}
+.wbtab:focus-visible{box-shadow:inset 0 0 0 2px rgba(9,105,218,.45)}
+.wbtab .l1{display:flex;align-items:center;gap:6px;min-width:0}
+.wbtab .nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:var(--fs-sm);font-weight:600}
+.wbtab .pl{display:block;min-width:0;padding-right:22px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:var(--fs-micro);color:var(--sec)}
+.wbtab.on{background:var(--surface);color:var(--ink);
+  box-shadow:inset 1px 0 0 var(--line),inset -1px 0 0 var(--line),inset 0 1px 0 var(--line)}
+.wbtab.on:focus-visible{box-shadow:inset 0 0 0 2px rgba(9,105,218,.45)}
+.wbtab.lifted{opacity:.4}
+/* × on the tab on screen and on hover; a dot in its place on a board off screen —
+   blue for a terminal that rang (the rail's bell), violet while ✦ Answer draws. */
+.wbtab .wbtx{display:inline-flex;align-items:center;justify-content:center;flex:none;width:18px;height:18px;
+  margin-right:-2px;border-radius:var(--r-sm);color:var(--sec);visibility:hidden}
+.wbtab .wbtx .ic{display:inline-flex}
+.wbtab .wbtx svg{width:9px;height:9px}
+.wbtab .wbtx .dot{display:none;width:7px;height:7px}
+.wbtab.on .wbtx,.wbtab:hover .wbtx,.wbtab.has-dot .wbtx{visibility:visible}
+.wbtab.has-dot .wbtx .dot{display:block}
+.wbtab.has-dot .wbtx .ic{display:none}
+.wbtab.has-dot:hover .wbtx .dot{display:none}
+.wbtab.has-dot:hover .wbtx .ic{display:inline-flex}
+.wbtab .wbtx:hover{background:var(--tint-3);color:var(--ink)}
+.dot.ai{background:#8b5cf6}
+/* The library: pinned first, never closed; a hairline between it and the boards. */
+.wbtab.wblib{flex:none;min-width:0;padding:0 14px 1px 12px;margin-right:7px}
+.wbtab.wblib .l1 .ic{display:inline-flex;color:var(--ink-3)}
+.wbtab.wblib.on .l1 .ic{color:var(--ink-2)}
+.wbtab.wblib .pl{padding-right:0}
+.wbtab.wblib::after{content:"";position:absolute;right:-5px;top:13px;bottom:12px;width:1px;background:var(--edge)}
+.wbtab.wblib.on::after{display:none}
+.wbins{position:absolute;bottom:3px;width:2px;height:36px;border-radius:1px;background:var(--link);
+  pointer-events:none;z-index:2}
+.wbadd{display:inline-flex;align-items:center;justify-content:center;flex:none;align-self:center;
+  width:28px;height:28px;margin:1px 0 0 2px;border-radius:var(--r-md);color:var(--ink-3);-webkit-app-region:no-drag}
+.wbadd:hover{background:var(--tint-3);color:var(--ink)}
+.wbstrip .sp{min-width:12px}
+/* "N open": only while some tabs are out of sight (.ovf, measured after each render). */
+.wbmore{display:none;align-items:center;gap:5px;flex:none;align-self:center;height:26px;margin-top:1px;
+  padding:0 8px 0 10px;border-radius:var(--r-md);background:var(--fill);font-size:var(--fs-xs);font-weight:500;
+  color:var(--ink-2);white-space:nowrap;-webkit-app-region:no-drag}
+.wbstrip.ovf .wbmore{display:inline-flex}
+.wbmore:hover{background:var(--sel);color:var(--ink)}
+.wbmore .ic svg{width:9px;height:9px}
+/* On a board the tab on screen is the top of the board's bar, which follows View ▸
+   Terminal appearance (the bundle's dark: variant keys on the same attribute). */
+:root[data-term-theme="dark"] .wbstrip.board .wbtab.on{background:#030712;color:#f9fafb;box-shadow:none}
+:root[data-term-theme="dark"] .wbstrip.board .wbtab.on .pl,
+:root[data-term-theme="dark"] .wbstrip.board .wbtab.on .wbtx{color:#99a1af}
+:root[data-term-theme="dark"] .wbstrip.board .wbtab.on .wbtx:hover{background:rgba(255,255,255,.12);color:#fff}
+:root[data-term-theme="dark"] .wbstrip.board .wbtab.on:focus-visible{box-shadow:inset 0 0 0 2px rgba(124,183,255,.55)}
+
+/* The strip's picker and menus: on <body>, fixed, placed by views/whiteboards.js. Later in
+   the document than every drag region, so .menu's no-drag holds over the strip. */
+.menu.wbpop{position:fixed;top:0;left:0;right:auto;z-index:1100}
+.wbmenu .mi{gap:8px}
+.wbmenu .mi[disabled]{opacity:.45;pointer-events:none}
+.wbmenu .mi .ml{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.wbmenu .mi .kbd{margin-left:auto;padding-left:18px;color:var(--sec);font-size:var(--fs-xs)}
+.wbmenu .msep{height:1px;margin:4px 6px;background:var(--line)}
+.wbopenl{min-width:280px;max-width:400px;max-height:min(60vh,520px);overflow-y:auto}
+.wbopenl .mi .ck{display:inline-flex;align-items:center;width:14px;flex:none;color:var(--ink-2)}
+.wbopenl .mi .ck svg{width:12px;height:12px}
+.wbopenl .mi.on .ml{font-weight:600}
+.wbopenl .mi .dot{width:7px;height:7px}
+.wbopenl .mi .pl{flex:0 1 auto;max-width:45%;margin-left:auto;padding-left:14px;overflow:hidden;
+  text-overflow:ellipsis;color:var(--sec);font-size:var(--fs-xs)}
+.wbfind{width:340px;padding:0;overflow:hidden}
+.wbfh{display:flex;align-items:center;gap:8px;height:40px;padding:0 12px;border-bottom:1px solid var(--line);
+  color:var(--sec);cursor:text}
+.wbfh .ic{display:inline-flex}
+.wbfh .ic svg{width:13px;height:13px}
+.wbfq{flex:1;min-width:0;height:100%;border:0;outline:none;background:transparent;font:inherit;
+  font-size:var(--fs-base);color:var(--ink)}
+.wbfq::placeholder{color:var(--sec)}
+.wbfl{max-height:min(52vh,380px);overflow-y:auto;padding:4px}
+.wbfg{padding:8px 10px 4px;font-size:var(--fs-micro);font-weight:600;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--sec)}
+.wbfr{display:flex;align-items:center;gap:8px;width:100%;height:30px;padding:0 10px;border-radius:var(--r-md);
+  font-size:var(--fs-sm);color:var(--ink);text-align:left;white-space:nowrap}
+.wbfr:hover,.wbfr.hi{background:var(--tint-2)}
+.wbfr > .ic{display:inline-flex;flex:none;color:var(--ink-3)}
+.wbfr > .ic svg{width:13px;height:13px}
+.wbfr .nm{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.wbfr .tag{flex:none;height:17px;padding:0 6px;border-radius:9px;background:var(--fill);color:var(--ink-3);
+  font-size:var(--fs-micro);line-height:17px}
+.wbfr .ct{flex:0 1 auto;max-width:45%;margin-left:auto;padding-left:10px;overflow:hidden;text-overflow:ellipsis;
+  color:var(--sec);font-size:var(--fs-xs)}
+.wbfr .ct + .ic{color:var(--chev)}
+.wbfr .ct + .ic svg{width:10px;height:10px}
+.wbfr.up{color:var(--ink-2);font-weight:600}
+.wbfr.mk,.wbfr.mk > .ic{color:var(--link)}
+.wbfn{padding:10px 12px;font-size:var(--fs-xs);line-height:1.45;color:var(--sec)}
+.wbfn.bad{color:var(--err-fg)}
+.wbff{display:flex;align-items:center;gap:4px;padding:5px 6px;border-top:1px solid var(--line)}
+.wbff[hidden]{display:none}
+.wbff button{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 8px;border-radius:var(--r-md);
+  font-size:var(--fs-sm);color:var(--ink-2)}
+.wbff button:hover{background:var(--tint-2);color:var(--ink)}
+.wbff .ic{display:inline-flex}
+.wbff .ic svg{width:11px;height:11px}
 
 /* The Whiteboards screen (mock-up screen 1): folders on the left, a fixed 206px column
    that stays put while the list scrolls; one 52px row per board on the right.
