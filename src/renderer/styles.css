@@ -704,8 +704,9 @@ aside .it.on .ic{color:var(--ink)}
 .warning .track .fill{background:var(--chg)}
 .critical .track .fill{background:var(--fail)}
 .critical .pct{color:var(--err-fg)}
-/* the Grid header's one line about Claude — bar, percent, when it resets — and a
-   button to the screen. Between the views and the ⋯, which stays on the gutter. */
+/* the one line about Claude — bar, percent, when it resets — and a button to the
+   screen; on the Grid's header (between the views and the ⋯, which stays on the
+   gutter) and on the Whiteboards screens (.wbstrip .gauge, .wbgauge). */
 .gauge{display:inline-flex;align-items:center;gap:8px;height:28px;padding:0 8px;
   border-radius:var(--r-md);font-size:var(--fs-sm);color:var(--ink);white-space:nowrap;flex:none}
 .gauge .track{width:96px}
@@ -1406,6 +1407,12 @@ aside .empty p{font-size:var(--fs-xs)}
 .wbstrip.ovf .wbmore{display:inline-flex}
 .wbmore:hover{background:var(--sel);color:var(--ink)}
 .wbmore .ic svg{width:9px;height:9px}
+/* The five-hour Claude gauge (views/usage.js) at the strip's right end, where the Grid's
+   header has it: a hole in the drag region, like the tabs. */
+.wbstrip .gauge{align-self:center;margin:1px 0 0 4px;-webkit-app-region:no-drag}
+/* With no board open there is no strip, and it is the home header's, right of the title:
+   in a slot that lays out as if it were not there. */
+.wbgauge{display:contents}
 /* On a board the tab on screen is the top of the board's bar, which follows View ▸
    Terminal appearance (the bundle's dark: variant keys on the same attribute). */
 :root[data-term-theme="dark"] .wbstrip.board .wbtab.on{background:#030712;color:#f9fafb;box-shadow:none}

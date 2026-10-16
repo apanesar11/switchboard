@@ -84,7 +84,7 @@ switchboard/
   src/renderer/views/wbterminals.js — a whiteboard's terminals: panels, tray, pins [R15]
   src/renderer/wbterminals.css  — their styles, after styles.css                  [R15]
   src/renderer/views/grid.js    — Grid: four workspace panes, in views            [R10]
-  src/renderer/views/usage.js   — Usage screen + the Grid's five-hour gauge         [R11]
+  src/renderer/views/usage.js   — Usage screen + the five-hour gauge (Grid, Whiteboards) [R11]
   src/main/usage.js             — Claude usage: the keychain token, the endpoint    [M7]
   src/main/editor.js            — the Editor's file access: tree, read, save, HEAD base, stat, find in files [M8]
   src/renderer/views/files.js   — Files + All diffs screens                       [R6]
@@ -1898,8 +1898,9 @@ its rows from the height, and the pair settle wherever xterm's default 24 rows p
 ### 4.11 Claude usage
 
 The three bars claude.ai's "Your usage" page shows — the five-hour session, the week,
-and any per-model week — in the app: a gauge in the Grid's header for the session, and a
-Usage screen for all of them behind the row pinned to the bottom of the rail. Route
+and any per-model week — in the app: a gauge for the session in the Grid's header and on
+the Whiteboards screens (§4.17), and a Usage screen for all of them behind the row pinned
+to the bottom of the rail. Route
 `{view:'usage'}`; like the Grid it carries no `wsId`, and it shows with no workspaces at
 all, being about this Mac's Claude sign-in rather than any folder.
 
@@ -1948,12 +1949,18 @@ configured account that has never had an answer at all. This is the whole fix fo
 
 **A poll landing must not cost a render.** `app.js` keeps a signature of what is
 visible — the plan, and each limit's percent, severity and reset — and when a poll
-changes nothing it does nothing. When one does, the rail's row and the Grid's gauge are
-rewritten in place (`views/usage.js` `refresh()`), and only the Usage screen itself is
+changes nothing it does nothing. When one does, the rail's row and every gauge on screen
+are rewritten in place (`views/usage.js` `refresh()`), and only the Usage screen itself is
 rebuilt, being the one screen with no terminal on it: a render of the Grid for a bar
 that moved two percent would re-parent four live shells and drop whichever one had
 focus. A gauge appearing takes a render, and `refresh()` says so by answering `false`.
-Removing a gauge after sign-out happens in place, preserving the live terminals.
+Removing a gauge after sign-out happens in place, preserving the live terminals. The
+Whiteboards tab strip is kept across renders and off the page while another screen shows,
+out of `refresh()`'s reach; an open board's render brings its gauge up to date in place
+(`update()`) rather than swapping the strip, whose signature says only whether a gauge
+shows — and a strip whose gauge a sign-out took away in place is swapped once one shows
+again. The strip's ResizeObserver watches the gauge too, so `N open` follows a gauge that
+grew or shrank in place.
 Measured: after an answer that moved the bar, the Grid's `.grid` element is the one that
 was there before, and the gauge that had focus still has it.
 
@@ -2690,12 +2697,15 @@ screen does the same). A failed refresh with good numbers still up shows them an
 "· couldn't refresh" to the updated-ago line rather than blanking the screen; the
 full-screen sentence with Try again is only for the never-answered case.
 
-It also exports `gauge()`, the Grid header's session bar (`.gauge`: the bar, the
-percent, when it resets; a button to this screen; nothing at all when there is no good
-answer yet — a later failure keeps the last good gauge), and `refresh()`, which brings every
-gauge on screen up to date in place and answers whether the document now agrees with
-`state.usage` — `false` means only a rebuild can make it, and `app.js` renders then and
-only then.
+It also exports `gauge()`, the session bar of the Grid's header and the Whiteboards
+screens (`.gauge`: the bar, the percent, when it resets; a button to this screen; nothing
+at all when there is no good answer yet — a later failure keeps the last good gauge);
+`shown()`, whether there is one to show; `refresh()`, which brings every gauge on screen up
+to date in place and answers whether the document now agrees with `state.usage` — `false`
+means only a rebuild can make it (a screen that holds a gauge — the Grid's header, the
+Whiteboards strip or header — has none), and `app.js` renders then and only then; and
+`update(el)`, which brings one gauge kept off the page (the Whiteboards strip's) up to date
+before it shows again, touching nothing when it already says the latest.
 
 ### R4 `views/workspace.js`
 The Changes tab and the shared header the Logs, Terminal, Editor and Databases tabs borrow
@@ -2969,7 +2979,9 @@ editor is the React bundle, one instance per open board. `views/wbterminals.js`
 
 **The Whiteboards screen** (`{view:'whiteboards', folder}`, mock-up screen 1) is built
 fresh on every render, like Pull requests, from `SB.load('wb:index', whiteboardsList)`.
-Header `.hd.tight`: `Whiteboards`, **New folder** and **New whiteboard**, and under them
+Header `.hd.tight`: `Whiteboards`, the Claude session gauge while no board is open (in a
+`.wbgauge` slot that is always there, so app.js's positional focus restore never lands
+on the wrong button when it comes), **New folder** and **New whiteboard**, and under them
 `N whiteboards · K folders · A archived`. Body: two columns. On the left, the folders —
 `All whiteboards` with its count, `Recent` (the twelve edited last), the heading
 `Folders` and a row per folder with its count and, on one the migration made and nothing
@@ -3029,7 +3041,10 @@ board — its name over where it is listed (its folder, `No folder` or `Archived
 wide as its name up to 220px, narrowing together to 104px before the strip scrolls
 sideways (the wheel scrolls it; the tab that comes up is scrolled into view); then **+**;
 and, only while some tabs are out of sight, `N open ▾`, every tab with where it is and
-its dot, then Close other tabs and Close all tabs. The tab on screen is white and joins
+its dot, then Close other tabs and Close all tabs. At the strip's right end is the Claude
+session gauge (§4.11, R11), where the Grid's header has it; a full-screen board covers
+it with the strip, and with no board open (no strip) it sits in the home's header, right
+of the title. The tab on screen is white and joins
 what is under it — the page on the library, the board's bar on a board, dark when View ▸
 Terminal appearance is (the bundle's `dark:` keys on the same attribute). Its × shows on
 it and on hover; a board off screen shows one dot in that place instead — blue while one
@@ -3346,7 +3361,7 @@ and emptied.
 9. **Usage** — header `Usage` with the plan at the right and `updated 40s ago` under it;
    one row per limit: `Session`, `This week`, `Fable this week` — name, bar, percent,
    `resets 5:00 PM`. Reached from the row pinned to the bottom of the rail, or from the
-   session gauge in the Grid's header. When there is no answer: the sentence and Try again.
+   session gauge in the Grid's header or on the Whiteboards screens. When there is no answer: the sentence and Try again.
 
 10. **Pull requests** — the rail's row under Grid. Header `Pull requests`, the login at
     the right, ↻, `3 open pull requests · updated 40s ago`; one row per open pull request

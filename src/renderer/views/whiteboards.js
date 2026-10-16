@@ -672,6 +672,10 @@ SB.views = SB.views || {};
     return h('div.hd.tight.wbhd',
       h('div.top',
         h('h1', null, 'Whiteboards'),
+        // The Claude gauge is the strip's while there is one (a board open in a tab). In
+        // a slot that is always there, so the gauge coming or going never moves the
+        // buttons after it: app.js puts the focus back by position after a render.
+        h('span.wbgauge', null, tabs.open.length ? null : usageGauge()),
         h('button.btn', {
           type: 'button',
           dataset: { wbNewFolder: '' },
@@ -1095,7 +1099,9 @@ SB.views = SB.views || {};
     var m = stripModel(r);
     var sig = JSON.stringify(m);
     var mounted = !!v.hd && v.hd.parentNode === v.root;
-    if (mounted && v.hdSig === sig) return;
+    // The signature says the gauge shows, but views/usage.js takes it away in place on a
+    // sign-out; a strip that lost it is swapped once the gauge is back.
+    if (mounted && v.hdSig === sig && !!v.hd.querySelector('.gauge') === m.gauge) return;
     if (mounted && tabDrag) { stripStale = true; return; }
     v.hdSig = sig;
     swapStrip(v, stripEl(m));
@@ -1108,6 +1114,7 @@ SB.views = SB.views || {};
     loadIndex();
     var item = makeCanvas(r.board);
     putStrip(v, r);
+    updateGauge(v.hd);
     item.home = v.body;
     if (item.fullscreen) {
       if (v.body.firstChild) v.body.replaceChildren();
@@ -1345,12 +1352,15 @@ SB.views = SB.views || {};
     return t;
   }
 
+  // Only whether the gauge shows, not what it says: views/usage.js rewrites it in place
+  // when a poll lands, so new numbers never cost the strip a swap.
   function stripModel(r) {
     var data = lastGood;
     return {
       home: !(r.view === 'whiteboard' && r.board),
       sub: data ? D.plural(data.folders.length, 'folder') + ' · ' + D.plural(live(data).length, 'whiteboard') : '',
-      tabs: tabs.open.map(function (id) { return tabOf(id, r); })
+      tabs: tabs.open.map(function (id) { return tabOf(id, r); }),
+      gauge: gaugeShown()
     };
   }
 
@@ -1415,9 +1425,36 @@ SB.views = SB.views || {};
         'aria-haspopup': 'menu',
         dataset: { wbMore: '' },
         onClick: function (e) { toggleOpenList(e.currentTarget); }
-      }, m.tabs.length + ' open', D.icon('chevD')));
+      }, m.tabs.length + ' open', D.icon('chevD')),
+      m.gauge ? usageGauge() : null);
     strip.addEventListener('keydown', tabKeys);
     return strip;
+  }
+
+  // The five-hour Claude gauge (views/usage.js), the Grid header's: at the strip's right
+  // end, where the Grid has it, or in the home's header while no board is open and so
+  // no strip is drawn. A full-screen board covers the strip, and the gauge with it.
+  // usage.js rewrites it in place when a poll lands; a strip kept off the page
+  // meanwhile is brought up to date when it is drawn again (updateGauge).
+  function usageView() {
+    var u = SB.views.usage;
+    return u && typeof u.gauge === 'function' ? u : null;
+  }
+
+  function gaugeShown() {
+    var u = usageView();
+    return !!u && typeof u.shown === 'function' && u.shown();
+  }
+
+  function usageGauge() {
+    var u = usageView();
+    return u ? u.gauge() : null;
+  }
+
+  function updateGauge(strip) {
+    var u = usageView();
+    var el = strip && strip.querySelector('.gauge');
+    if (el && u && typeof u.update === 'function') u.update(el);
   }
 
   function tabFrom(e) {
@@ -1611,6 +1648,10 @@ SB.views = SB.views || {};
     if (stripWatch && strip !== stripSeen) {
       stripWatch.disconnect();
       if (strip) stripWatch.observe(strip);
+      // The gauge changes width in place when a poll lands (views/usage.js), and the tabs
+      // get what it leaves. Nothing fitOverflow() does resizes it, so this cannot loop.
+      var gauge = strip && strip.querySelector('.gauge');
+      if (gauge) stripWatch.observe(gauge);
     }
     stripSeen = strip;
     if (!list) { revealed = null; return; }

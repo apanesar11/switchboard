@@ -1,14 +1,16 @@
-// SB.views.usage — the Usage screen, and the Grid header's five-hour gauge.
-// ARCHITECTURE §6 R11.
+// SB.views.usage — the Usage screen, and the five-hour gauge the Grid's header and the
+// Whiteboards screens carry. ARCHITECTURE §6 R11.
 //
 // What claude.ai's "Your usage" page shows, in the app: the five-hour session window,
 // the week, and any per-model week ("Fable this week"), each as one row — name, bar,
 // percent, when it resets. The data is main's (sb:usage:get and sb:evt:usage, §4.11)
 // and lives in state.usage; this file only draws it.
 //
-// The gauge is the Grid header's one line about Claude. When a poll lands, refresh()
-// rewrites it in place rather than app.js rendering: a bar that moved two percent is
-// not worth re-parenting four live terminals and dropping whichever one had focus.
+// The gauge is the one line about Claude on the Grid's header and on the Whiteboards
+// tab strip (or the Whiteboards header, while no board is open). When a poll lands,
+// refresh() rewrites it in place rather than app.js rendering: a bar that moved two
+// percent is not worth re-parenting four live terminals and dropping whichever one
+// had focus.
 window.SB = window.SB || {};
 
 (function (SB) {
@@ -53,14 +55,30 @@ window.SB = window.SB || {};
     }, h('span.fill', { style: { width: limit.percent + '%' } }));
   }
 
-  // ── the Grid's gauge ──────────────────────────────────────────────────────
+  // ── the gauge ─────────────────────────────────────────────────────────────
+
+  // Where a screen holds a gauge, so refresh() can tell one that ought to have one but
+  // has none: the Grid's header, the Whiteboards tab strip, and the Whiteboards header
+  // while no board is open and so no strip is drawn.
+  var HOLDERS = '#main .gridhd, #main .wbstrip, #main .wbhd';
+
+  // Whether there is a gauge to show: a good answer with a session in it.
+  function shown() {
+    var u = usage();
+    return !!(u && u.session);
+  }
+
+  function gaugeWords(s) {
+    var when = resetText(s);
+    return s.percent + '% of this session’s Claude usage' + (when ? ', ' + when : '');
+  }
 
   function fillGauge(el, s) {
     D.clear(el);
     SEVERITIES.forEach(function (c) { el.classList.remove(c); });
     el.classList.add(s.severity);
     var when = resetText(s);
-    var words = s.percent + '% of this session’s Claude usage' + (when ? ', ' + when : '');
+    var words = gaugeWords(s);
     el.title = words;
     el.setAttribute('aria-label', words);
     el.appendChild(bar(s));
@@ -71,27 +89,36 @@ window.SB = window.SB || {};
   // null before the first good answer or after sign-out. A transient refresh failure
   // does not take the gauge away — state.usage is still the last good numbers.
   function gauge() {
-    var u = usage();
-    if (!u || !u.session) return null;
+    if (!shown()) return null;
     var el = h('button.gauge', { type: 'button', onClick: function () { SB.go({ view: 'usage' }); } });
-    fillGauge(el, u.session);
+    fillGauge(el, usage().session);
     return el;
   }
 
   // Bring every gauge on screen up to date with state.usage. True when the document
   // now agrees with it; false when only a rebuild can make it — the gauge has to
-  // appear on a Grid that has none, or go from one that should no longer show it.
+  // appear on a screen that holds one (HOLDERS) and has none. One that should no
+  // longer show goes in place.
   function refresh() {
-    var u = usage();
-    var want = !!(u && u.session);
     var live = Array.prototype.slice.call(document.querySelectorAll('.gauge'));
-    if (!want) {
+    if (!shown()) {
       live.forEach(function (el) { el.remove(); });
       return true;
     }
-    if (!live.length) return !document.querySelector('#main .gridhd');
-    live.forEach(function (el) { fillGauge(el, u.session); });
+    if (!live.length) return !document.querySelector(HOLDERS);
+    live.forEach(function (el) { fillGauge(el, usage().session); });
     return true;
+  }
+
+  // One gauge brought up to date before it shows again: the Whiteboards strip is kept
+  // across renders and off the page while another screen shows, out of refresh()'s
+  // reach when a poll lands. Left alone when it already says the latest, so a render
+  // for every bell rewrites nothing.
+  function update(el) {
+    if (!el || !shown()) return;
+    var s = usage().session;
+    if (el.title === gaugeWords(s) && el.classList.contains(s.severity)) return;
+    fillGauge(el, s);
   }
 
   // ── the screen ────────────────────────────────────────────────────────────
@@ -177,5 +204,5 @@ window.SB = window.SB || {};
   }
 
   SB.views = SB.views || {};
-  SB.views.usage = { render: render, gauge: gauge, refresh: refresh };
+  SB.views.usage = { render: render, gauge: gauge, shown: shown, refresh: refresh, update: update };
 })(window.SB);

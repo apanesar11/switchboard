@@ -317,10 +317,11 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   rail and with no screen of its own. Views are remembered in the config; the window
   comes back to the Grid if that is where you left it.
 - **Usage** — how much of your Claude plan is used, read through Claude Code's own
-  sign-in. The sidebar row and Grid gauge only appear after a local Claude OAuth
+  sign-in. The sidebar row and the session gauge only appear after a local Claude OAuth
   sign-in is found; a machine with only Codex shows neither. Removing the Claude
   sign-in clears the cached numbers and hides the display on the next check.
-  The five-hour session is the bar at the top of the Grid; the **Usage** row at
+  The five-hour session is the bar at the top of the Grid and of Whiteboards (out of
+  sight while a whiteboard is full screen); the **Usage** row at
   the bottom of the sidebar has all of it — the session, the week and the per-model
   week, each with when it resets — and its dot turns red when the session is nearly
   spent. It refreshes every few minutes on its own, when the window comes back to the

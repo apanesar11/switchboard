@@ -1091,10 +1091,11 @@ window.SB = window.SB || {};
   }
 
   // A poll lands every five minutes, and usually nothing it says has changed.
-  // When something has, the rail's row and the Grid's gauge are rewritten in place
-  // (views/usage.js refresh()); only the Usage screen itself is rebuilt, being the
-  // one screen with no terminal on it. Rendering the Grid for a bar that moved two
-  // percent would re-parent four live shells and drop whichever one had focus.
+  // When something has, the rail's row and every gauge on screen (the Grid's, the
+  // Whiteboards') are rewritten in place (views/usage.js refresh()); only the Usage
+  // screen itself is rebuilt, being the one screen with no terminal on it. Rendering
+  // the Grid for a bar that moved two percent would re-parent four live shells and
+  // drop whichever one had focus.
   // A failed poll keeps the last GOOD numbers on screen — a transient rate-limit must
   // not blank the whole screen and drop the gauge, the way it did before. state.usage
   // is only ever the last ok answer; a failure sets state.usageError beside it. The
@@ -1118,7 +1119,7 @@ window.SB = window.SB || {};
     if (state.route.view === 'usage') { schedule(); return; }
     var view = SB.views.usage;
     var settled = view && typeof view.refresh === 'function' ? view.refresh() : true;
-    if (!settled) schedule();                          // the gauge has to appear, or go
+    if (!settled) schedule();                          // a gauge has to appear
   }
 
   // The Usage screen's refresh button, its "Try again", and ⌘R on that screen. Through

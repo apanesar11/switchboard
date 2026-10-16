@@ -37,9 +37,12 @@
 // (Low, Medium, High where Subtext and Read the boxes before it were, a pick sent to
 // main, an answer at High asked with its level and the boxes before it and drawn 360
 // wide, and Undo of it); the rail's Whiteboards row coming back from the Grid to the
-// board left open; the tabs — + and its search, ⌃Tab round the library, ⌘W, a middle
-// click, the open set and the board on screen after a reload, and ⌘W on the library
-// left to the window; and no renderer errors along the way.
+// board left open; the Claude gauge at the strip's right end (a poll landing on another
+// screen caught up in place when the board shows again, covered by full screen) and in
+// the home's header with no board open, gone with the sign-in; the tabs — + and its
+// search, ⌃Tab round the library, ⌘W, a middle click, the open set and the board on
+// screen after a reload, and ⌘W on the library left to the window; and no renderer
+// errors along the way.
 //
 // SWITCHBOARD_WHITEBOARD_CAPTURE=<dir> saves screenshots of each stage there;
 // SWITCHBOARD_WHITEBOARD_DEBUG=1 prints each stage and the renderer's errors as they come.
@@ -1310,6 +1313,58 @@ if (!process.versions.electron) {
         assert.doesNotMatch(await run(`document.querySelector(${q(canvas + ' .react-flow__background circle')})?.getAttribute('r') || ''`), /NaN/);
       });
 
+      mark("the Claude gauge on the strip: a poll off screen caught up in place, and under full screen");
+      // views/usage.js's five-hour gauge, the Grid header's, sent the way main sends every
+      // poll (sb:evt:usage). Fictional numbers; no reset time, so the gauge reads "N%".
+      const usageAnswer = percent => ({ ok: true, configured: true, plan: 'Example plan', fetchedAt: Date.now(),
+        session: { name: 'Session', percent, resetsAt: null, severity: percent >= 90 ? 'critical' : 'normal' },
+        weekly: { name: 'This week', percent: 20, resetsAt: null, severity: 'normal' }, scoped: [] });
+      const errorsBeforeGauge = errors.length;
+      await check('the Claude gauge on a board', async () => {
+        const gauge = '#main .wbstrip .gauge';
+        window.webContents.send('sb:evt:usage', usageAnswer(72));
+        await until(`document.querySelector(${q(gauge)})?.textContent === "72%"`);
+        assert.equal(await run('document.querySelectorAll(".gauge").length'), 1);
+        // A poll that lands while another screen shows finds the board's strip off the
+        // page; back on the board the same strip — never swapped for new numbers — and
+        // the same gauge say the new ones.
+        await run(`window.__wbStrip = document.querySelector("#main .wbstrip"); window.__wbGauge = document.querySelector(${q(gauge)})`);
+        await run(`SB.go({view:'usage'})`);
+        await until('SB.state.route.view === "usage" && !window.__wbStrip.isConnected');
+        window.webContents.send('sb:evt:usage', usageAnswer(93));
+        await until('document.querySelector("#main .ulim .pct")?.textContent === "93%"');
+        assert.equal(await run('window.__wbGauge.textContent'), '72%');
+        await run(`SB.go({view:'whiteboard',board:${q(boardId)}})`);
+        await until(`!!document.querySelector(${q('#main ' + canvas)})`);
+        assert.equal(await run(`document.querySelector(${q(gauge)})?.textContent`), '93%');
+        assert.equal(await run(`document.querySelector(${q(gauge)}).classList.contains("critical")`), true);
+        assert.equal(await run('document.querySelector("#main .wbstrip") === window.__wbStrip'), true);
+        assert.equal(await run(`document.querySelector(${q(gauge)}) === window.__wbGauge`), true);
+        // A sign-out takes the gauge away in place; the next good answer brings it back
+        // to the board.
+        window.webContents.send('sb:evt:usage', { ok: false, configured: false, reason: 'no-login', error: 'Example: not signed in' });
+        await until(`!document.querySelector(${q(gauge)})`);
+        window.webContents.send('sb:evt:usage', usageAnswer(50));
+        await until(`document.querySelector(${q(gauge)})?.textContent === "50%"`);
+        // The tabs are measured again when the gauge changes width in place: "N open"
+        // shows while it squeezes tabs out of sight, and goes once they are back.
+        await frames();
+        assert.equal(await run('document.querySelector("#main .wbstrip").classList.contains("ovf")'), false);
+        await run(`document.querySelector(${q(gauge)}).style.width = "1200px"`);
+        await until('document.querySelector("#main .wbstrip").classList.contains("ovf")');
+        await run(`document.querySelector(${q(gauge)}).style.width = ""`);
+        await until('!document.querySelector("#main .wbstrip").classList.contains("ovf")');
+        // Full screen covers the strip, and the gauge with it.
+        await click('Full screen');
+        await until('!!document.querySelector(\'[aria-label="Exit full screen"]\')');
+        await settled(canvas);
+        assert.equal(await run(`(() => { const r = document.querySelector(${q(gauge)}).getBoundingClientRect(); return !!document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest("body > .dgslab.full"); })()`), true);
+        await click('Exit full screen');
+        await until('!document.querySelector(\'[aria-label="Exit full screen"]\')');
+        await settled(canvas);
+        assert.deepEqual(errors.slice(errorsBeforeGauge), []);
+      });
+
       mark('tabs: + and its search, ⌃Tab, ⌘W, a middle click, a reload, and every tab closed');
       const errorsBeforeTabs = errors.length;
       const tabIds = () => run('Array.from(document.querySelectorAll("#main .wbtl .wbtab")).map(t => t.getAttribute("data-wb-tab"))');
@@ -1391,7 +1446,23 @@ if (!process.versions.electron) {
         assert.deepEqual(errors.slice(errorsBeforeTabs), []);
       });
 
-      console.log('PASS — Whiteboards: rail screen and home, a box resized from its corner and holding 600+ characters, a board the CLI writes to while open, a teleport (placed, given its destination, clicked, Back, Escape, Enter, its destination deleted and undone), open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid squares without whiteboards (old ones open Terminal), exit and retry, ✦ Answer\'s Conversation row (New conversation from the keyboard, a workspace changed and back, a CLI on its own), ✦ Answer\'s Details (Low, Medium, High; High sent to main, asked with, and drawn wide), the rail back from the Grid to the open board, tabs (+ and its search, ⌃Tab, ⌘W, a middle click, a reload, all closed)' +
+      mark('the Claude gauge on the home with no board open, and gone with the sign-in');
+      await check('the Claude gauge in the home header', async () => {
+        // The reload above asked main again, and main here has no sign-in: no gauge yet.
+        assert.equal(await run('!!document.querySelector(".gauge")'), false);
+        // Its coming never moves the focus off the button that had it (app.js puts the
+        // focus back by position after the render it takes).
+        await run('document.querySelector("#main .wbhd [data-wb-new-board]").focus()');
+        window.webContents.send('sb:evt:usage', usageAnswer(40));
+        await until('document.querySelector("#main .wbhd .top .gauge")?.textContent === "40%"');
+        assert.equal(await run('document.querySelectorAll(".gauge").length'), 1);
+        assert.equal(await run('!!document.activeElement?.hasAttribute("data-wb-new-board")'), true);
+        window.webContents.send('sb:evt:usage', { ok: false, configured: false, reason: 'no-login', error: 'Example: not signed in' });
+        await until('!document.querySelector(".gauge")');
+        assert.deepEqual(errors.slice(errorsBeforeGauge), []);
+      });
+
+      console.log('PASS — Whiteboards: rail screen and home, a box resized from its corner and holding 600+ characters, a board the CLI writes to while open, a teleport (placed, given its destination, clicked, Back, Escape, Enter, its destination deleted and undone), open board, Actions ▸ Open terminal… on the Terminal tab\'s xterm, second panel (cascade, Tile, resize, drag), tray minimize/restore, close keeps the shell, ⌘A and Show or hide terminals, pin (same xterm and cols/rows, overlay tracks pan, pinch and the zoom floor, saved in the board file), float, undo/redo of the float, Markdown/label Select All, full screen, Grid squares without whiteboards (old ones open Terminal), exit and retry, ✦ Answer\'s Conversation row (New conversation from the keyboard, a workspace changed and back, a CLI on its own), ✦ Answer\'s Details (Low, Medium, High; High sent to main, asked with, and drawn wide), the rail back from the Grid to the open board, the Claude gauge (on the strip, caught up after a poll off screen, under full screen, in the home header, gone with the sign-in), tabs (+ and its search, ⌃Tab, ⌘W, a middle click, a reload, all closed)' +
         (known.length ? ` (${known.length} known bug${known.length === 1 ? '' : 's'}: ${known.join('; ')})` : ''));
     } catch (error) {
       await capture('failure').catch(() => {});
