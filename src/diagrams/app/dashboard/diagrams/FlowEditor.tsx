@@ -330,8 +330,11 @@ import {
   TerminalDot,
   TEXT_TONE_STYLES,
   TONE_STYLES,
+  VideoBoardContext,
   VideoFace,
   WorkspaceTag,
+  forgetVideoPlace,
+  videoPlaceKey,
 } from "./DiagramNodes"
 import { PickerGlyph, WorkspacePicker, workspaceDir, workspaceGone } from "./WorkspacePicker"
 import { FLOW_EDGE_THEME } from "./DiagramEdges"
@@ -1547,6 +1550,7 @@ function VideoNode({ id, box, selected }: { id: string; box: FlowBoxNodeData; se
         label={box.label}
         playing={playing}
         interactive={interactive}
+        nodeId={id}
         onStop={() => editor?.stopVideo(id)}
       />
       {resizable ? <VideoResizer id={id} size={box.size} editor={editor} /> : null}
@@ -2000,7 +2004,9 @@ function FlowEditorCanvas({
   // Every one is back to its poster once the board leaves the screen or goes in or out
   // of full screen (`over`, the fitKey they were played under): the page takes the
   // players' iframes out of the document then, and put back, each would load again
-  // and start over, out loud.
+  // and start over, out loud. Where each left off is kept all the same (DiagramNodes.tsx
+  // video places, under this board's id — VideoBoardContext), so the next Play takes
+  // up there; Stop forgets it.
   const [videos, setVideos] = useState<{ over: string; playing: ReadonlyMap<string, string> }>(() => ({
     over: fitKey,
     playing: NO_VIDEOS,
@@ -3541,15 +3547,17 @@ function FlowEditorCanvas({
     }))
   }
 
-  // Its strip's Stop, or Enter again: its poster.
+  // Its strip's Stop, or Enter again: its poster — and the next Play from its start,
+  // not from where it was.
   const stopVideo = useCallback((id: string) => {
+    forgetVideoPlace(videoPlaceKey(boardId, id))
     setVideos((now) => {
       if (!now.playing.has(id)) return now
       const playing = new Map(now.playing)
       playing.delete(id)
       return { ...now, playing }
     })
-  }, [])
+  }, [boardId])
 
   // A player takes every press and wheel over it, and what is dragged over it lands in
   // YouTube's page. So while the canvas has a gesture under way — a press on it (a pan,
@@ -5555,6 +5563,7 @@ function FlowEditorCanvas({
   return (
     <DiagramFileCopyContext.Provider value={documents.getPath}>
     <EditorContext.Provider value={context}>
+    <VideoBoardContext.Provider value={boardId}>
     <TerminalContext.Provider value={terminalContext}>
       {/* Switchboard: a row — the canvas, and Google Images docked on its right
           while open, so the canvas narrows beside the panel rather than hiding
@@ -6098,6 +6107,7 @@ function FlowEditorCanvas({
         ) : null}
       </div>
     </TerminalContext.Provider>
+    </VideoBoardContext.Provider>
     </EditorContext.Provider>
     </DiagramFileCopyContext.Provider>
   )

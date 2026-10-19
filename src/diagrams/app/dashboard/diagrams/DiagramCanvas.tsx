@@ -30,7 +30,7 @@ import { useFlowDocuments } from "./useFlowDocuments"
 import { DiagramFileCopyContext } from "./DiagramFileCopy"
 import { cx } from "@/lib/utils"
 import type { DiagramSpec } from "@/lib/diagrams/types"
-import { VideoShownContext, diagramNodeTypes } from "./DiagramNodes"
+import { VideoBoardContext, VideoShownContext, diagramNodeTypes } from "./DiagramNodes"
 import { FLOW_EDGE_THEME } from "./DiagramEdges"
 
 // React Flow's own stylesheet. `style.css` (rather than `base.css`) because the
@@ -64,9 +64,15 @@ type Props = {
    * poster when it isn't (DiagramNodes.tsx ReadOnlyVideo).
    */
   shown?: boolean
+  /**
+   * Switchboard: the board this draws, by id — what a video played here keeps its
+   * place under, so Play after the poster comes back takes up where it left off
+   * (DiagramNodes.tsx VideoBoardContext). Without one a video starts over.
+   */
+  boardId?: string
 }
 
-export function DiagramCanvas({ spec, resetKey, diagramName, shown = true }: Props) {
+export function DiagramCanvas({ spec, resetKey, diagramName, shown = true, boardId }: Props) {
   const layout = useMemo(() => layoutDiagram(spec), [spec])
   const [document, setDocument] = useState<FlowBoxNodeData | null>(null)
   const [view, setView] = useState<DocumentView>("floating")
@@ -75,6 +81,7 @@ export function DiagramCanvas({ spec, resetKey, diagramName, shown = true }: Pro
   return (
     <DiagramFileCopyContext.Provider value={documents.getPath}>
     <VideoShownContext.Provider value={shown}>
+    <VideoBoardContext.Provider value={boardId ?? null}>
     <div className={cx("relative flex size-full min-w-0 bg-gray-50 dark:bg-gray-900", FLOW_EDGE_THEME)}>
       <div className="h-full min-w-0 flex-1">
       <ReactFlow
@@ -152,6 +159,7 @@ export function DiagramCanvas({ spec, resetKey, diagramName, shown = true }: Pro
       </div>
       {document?.documentId ? <DocumentPanel key={document.documentId} title={document.label} diagramName={diagramName} buffer={documents.active} view={view} onView={setView} readOnly onRename={() => {}} onEdit={() => {}} onSave={() => {}} onCopyPath={() => documents.getPath(document.documentId!)} onResolve={() => {}} onRetry={() => void documents.retry(document.documentId!, true)} onClose={() => setDocument(null)} /> : null}
     </div>
+    </VideoBoardContext.Provider>
     </VideoShownContext.Provider>
     </DiagramFileCopyContext.Provider>
   )

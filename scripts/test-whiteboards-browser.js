@@ -24,7 +24,9 @@
 // by its strip (the player letting go of the pointer), the Edit menu declined while the
 // player has the keyboard, Open on YouTube and Stop, Enter playing and stopping it, a
 // resize keeping 16:9, Tab adding a plain box, and the poster again after the board
-// leaves the screen and after full screen, with nothing asked of the network but the
+// leaves the screen and after full screen — saying where the video left off (the
+// fixture's player stands in for YouTube's widget API), Play taking it up there, Stop
+// and the video's end starting it over — with nothing asked of the network but the
 // poster and the player; opening a board, in a tab of the strip (the library pinned
 // first, no breadcrumb or status line, a bar of full screen and Actions);
 // Actions ▸
@@ -203,7 +205,19 @@ if (!process.versions.electron) {
   // anything else a 404 — nothing reaches the network.
   const httpsAsked = [];
   const httpsStrays = [];
-  const PLAYER_PAGE = '<!doctype html><meta charset="utf-8"><title>Example player</title><body style="margin:0;background:#111;color:#eee;font:14px sans-serif">Example player</body>';
+  // The player stands in for YouTube's widget API too: after the page's "listening" it
+  // posts its state (initialDelivery, from the start= it was loaded with, of a 10-minute
+  // video) as the real one does, and answers a seekTo command with the time sought —
+  // paused there, or ended at or past the end — so a test can say where a video got to.
+  const PLAYER_PAGE = '<!doctype html><meta charset="utf-8"><title>Example player</title><body style="margin:0;background:#111;color:#eee;font:14px sans-serif">Example player<script>' +
+    'var start = Number(new URLSearchParams(location.search).get("start")) || 0, DURATION = 600;' +
+    'function say(event, info) { parent.postMessage(JSON.stringify({ event: event, id: 1, channel: "widget", info: info }), "*"); }' +
+    'window.addEventListener("message", function (event) {' +
+    '  var m; try { m = JSON.parse(event.data); } catch (e) { return; }' +
+    '  if (m.event === "listening") { say("initialDelivery", { currentTime: start, playerState: -1, duration: DURATION, videoData: { video_id: location.pathname.slice(7) } }); say("onReady", null); }' +
+    '  if (m.event === "command" && m.func === "seekTo") { var t = Number(m.args[0]); say("infoDelivery", t >= DURATION ? { currentTime: DURATION, playerState: 0, duration: DURATION } : { currentTime: t, playerState: 2, duration: DURATION }); }' +
+    '});' +
+    '</script>';
   whiteboards.onChange(change => { if (window && !window.isDestroyed()) window.webContents.send('sb:evt:wbChanged', change); });
   shells.on('data', (id, chunk) => window?.webContents.send('sb:evt:term', id, chunk));
   shells.on('state', state => window?.webContents.send('sb:evt:termState', state));
@@ -923,18 +937,65 @@ if (!process.versions.electron) {
       await settled(vidSlab);
 
       // Off screen a video is its poster again: the page takes the player out with the
-      // board, and put back it would load again and play out loud from the start.
-      await pressOn(vidNode('talk') + ' .flow-video-poster');
-      await until(`document.querySelectorAll(${q(vidSlab + ' iframe')}).length === 1`);
-      await check('a video playing when its board leaves the screen is its poster when it comes back', async () => {
-        const loads = httpsAsked.filter(url => url.startsWith('https://www.youtube-nocookie.com/')).length;
+      // board, and put back it would load again and play out loud from the start. But
+      // where it got to is kept: the poster says so, and Play takes it up there.
+      // `seekPlayer` tells the fixture's player (from the page, as a message) where the
+      // video is, which it reports back as YouTube's would; a moment for the page to hear.
+      const seekPlayer = async seconds => {
+        await run(`document.querySelector(${q(vidSlab + ' iframe')}).contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [${seconds}] }), '*')`);
+        await frames(); await sleep(150);
+      };
+      const leaveAndComeBack = async () => {
         await run('SB.go({view:"whiteboards",folder:"all"})');
         await until('SB.state.route.view === "whiteboards"');
         await run(`SB.go({view:'whiteboard',board:${q(vid.data.id)}})`);
         await until(`!!document.querySelector(${q('#main ' + vidNode('talk') + ' .flow-video-poster')})`);
         await frames(); await sleep(200);
+      };
+      const resumeNote = () => run(`document.querySelector(${q(vidNode('talk') + ' .flow-video-resume')})?.textContent ?? null`);
+      // Play, and the player's page loaded: a message sent to the iframe before its page
+      // is there lands in about:blank and is lost, as a click would be.
+      const embedLoads = () => httpsAsked.filter(url => url.startsWith('https://www.youtube-nocookie.com/embed/')).length;
+      const playTalk = async () => {
+        const loads = embedLoads();
+        await pressOn(vidNode('talk') + ' .flow-video-poster');
+        await until(`document.querySelectorAll(${q(vidSlab + ' iframe')}).length === 1`);
+        await soon(() => embedLoads() > loads, 'the player to load');
+        await frames(); await sleep(150);
+      };
+      await playTalk();
+      await check('a video playing when its board leaves the screen is its poster when it comes back, saying where it got to', async () => {
+        const loads = httpsAsked.filter(url => url.startsWith('https://www.youtube-nocookie.com/')).length;
+        await seekPlayer(97);
+        await leaveAndComeBack();
         assert.deepEqual(await players(), []);
         assert.equal(httpsAsked.filter(url => url.startsWith('https://www.youtube-nocookie.com/')).length, loads, 'the player never loaded again');
+        assert.equal(await resumeNote(), 'Resume at 1:37');
+        assert.equal(await run(`document.querySelector(${q(vidNode('talk') + ' .flow-video-resume')}).dataset.resumeAt`), '97');
+        // As far as it got, of the player's 10 minutes, as a line along the bottom.
+        assert.equal(await run(`document.querySelector(${q(vidNode('talk') + ' .flow-video-seen i')}).style.width`), '16.17%');
+        assert.equal(await run(`document.querySelector(${q(vidNode('talk') + ' .flow-video-poster')}).title`), 'Resume Example talk at 1:37');
+      });
+      await capture('video-resume');
+      await check('Play takes the video up where it got to; Stop, then Play, starts it over', async () => {
+        await playTalk();
+        assert.equal(new URL((await players())[0]).searchParams.get('start'), '97');
+        await pressOn(vidNode('talk') + ' [aria-label="Stop"]');
+        await until(`document.querySelectorAll(${q(vidSlab + ' iframe')}).length === 0`);
+        assert.equal(await resumeNote(), null);
+        await playTalk();
+        assert.equal(new URL((await players())[0]).searchParams.get('start'), '42');
+      });
+      await check('a video left at its own start, or played to its end, comes back to a poster that starts it over', async () => {
+        // The player has only said it is at 42s, the video's start: nothing to resume.
+        await leaveAndComeBack();
+        assert.equal(await resumeNote(), null);
+        await playTalk();
+        await seekPlayer(600);
+        await leaveAndComeBack();
+        assert.deepEqual(await players(), []);
+        assert.equal(await resumeNote(), null);
+        assert.equal(await run(`!!document.querySelector(${q(vidNode('talk') + ' .flow-video-seen')})`), false);
       });
       await settled(vidSlab);
       await check('full screen, in and out, puts the poster back', async () => {

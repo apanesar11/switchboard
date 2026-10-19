@@ -18,6 +18,8 @@
 // A YouTube video's face (VideoFace) is drawn here for both canvases too: its poster
 // until it is played, then the player. The read-only canvas plays it itself; the
 // editor's VideoNode (FlowEditor.tsx) keeps what is playing in the editor's state.
+// Where each video left off is kept here (video places), by board and node, so a
+// video back on its poster — the board left the screen — plays on from there.
 
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { Handle, Position, getViewportForBounds, useReactFlow, useStore, useStoreApi, type NodeProps, type Viewport } from "@xyflow/react"
@@ -56,7 +58,18 @@ import {
 } from "@/lib/diagrams/types"
 import { plainTextParagraphs, richTextHtml } from "@/lib/diagrams/rich-text"
 import { flowCheckbox } from "@/lib/diagrams/rich-text-dom"
-import { isYouTubeVideoId, youTubeEmbedUrl, youTubeThumbnailUrl, youTubeWatchUrl } from "@/lib/diagrams/youtube"
+import {
+  YOUTUBE_PLAYER_ENDED,
+  YOUTUBE_PLAYER_ORIGIN,
+  formatYouTubeTime,
+  isYouTubeVideoId,
+  readYouTubePlayerMessage,
+  youTubeEmbedUrl,
+  youTubePlayerHello,
+  youTubeThumbnailUrl,
+  youTubeWatchUrl,
+  type YouTubePlayerInfo,
+} from "@/lib/diagrams/youtube"
 import { DiagramFileCopy } from "./DiagramFileCopy"
 
 // Every box is sized from its text; in the browser, measure that text for
@@ -349,6 +362,67 @@ function TeleportFace({ to }: { to?: string }) {
 export const VideoShownContext = createContext(true)
 
 /**
+ * Switchboard: the board either canvas draws, by id — what a video's place is kept
+ * under (videoPlaceKey). Null where there is no board to speak of: a video there
+ * starts over every time. FlowEditor and DiagramCanvas provide it.
+ */
+export const VideoBoardContext = createContext<string | null>(null)
+
+/**
+ * Switchboard: where a video left off — the player's last word on its time, with the
+ * video it was playing and, once the player has said, how long that video is.
+ */
+export type VideoPlace = { videoId: string; at: number; duration?: number }
+
+// Switchboard: every video's place, by board and node, for as long as the app runs.
+// Module state, not a canvas's: the host keeps a handful of boards' trees and lets the
+// rest go, and a tab closed and opened again should still take up where it was. Never
+// node data, which is saved, compared and undone. Written as the player plays (VideoPlayer),
+// read when the poster is drawn, and forgotten by Stop, by the video ending, and when
+// the node plays another video (the id no longer matches).
+const videoPlaces = new Map<string, VideoPlace>()
+
+/** The key a board's node keeps its video's place under. */
+export function videoPlaceKey(boardId: string, nodeId: string): string {
+  return `${boardId}\n${nodeId}`
+}
+
+/** Where the node `key` left off in `videoId`, if the player said, else undefined. */
+export function recallVideoPlace(key: string, videoId: string): VideoPlace | undefined {
+  const place = videoPlaces.get(key)
+  return place !== undefined && place.videoId === videoId && place.at >= 1 ? place : undefined
+}
+
+/** Stop, or the video ending: the next Play starts over. */
+export function forgetVideoPlace(key: string): void {
+  videoPlaces.delete(key)
+}
+
+/**
+ * One message from the player, kept: its time, and its length once it has one. The last
+ * second of a video, or its end, is not a place to come back to; that forgets instead.
+ */
+function noteVideoPlace(key: string, videoId: string, info: YouTubePlayerInfo): void {
+  const before = videoPlaces.get(key)
+  const duration = info.duration ?? (before?.videoId === videoId ? before.duration : undefined)
+  const ended = info.playerState === YOUTUBE_PLAYER_ENDED ||
+    (info.currentTime !== undefined && duration !== undefined && duration > 0 && info.currentTime >= duration - 1)
+  if (ended) {
+    videoPlaces.delete(key)
+    return
+  }
+  if (info.currentTime === undefined) {
+    if (before?.videoId === videoId && duration !== undefined && before.duration !== duration) {
+      videoPlaces.set(key, { ...before, duration })
+    }
+    return
+  }
+  const place: VideoPlace = { videoId, at: info.currentTime }
+  if (duration !== undefined) place.duration = duration
+  videoPlaces.set(key, place)
+}
+
+/**
  * Switchboard: a YouTube video's face, on either canvas. A strip across the top, which
  * the node is dragged by, with YouTube's glyph, the video's title, Open on YouTube and,
  * while it plays, Stop; under it the video's poster with a play button, or once it is
@@ -361,6 +435,12 @@ export const VideoShownContext = createContext(true)
  * the node rather than playing it. Both addresses are built from the checked id and
  * fixed hosts (lib/diagrams/youtube.ts), so nothing a board file says reaches the <img>
  * or the <iframe> as a URL.
+ *
+ * Given its node's id, on a board (VideoBoardContext), the face keeps the video's place
+ * as it plays, and a poster back after the player — the board left the screen or went in
+ * or out of full screen — says where it will take up ("Resume at 3:42", with how far
+ * along that is) and the next Play starts there rather than at `videoStart`. The
+ * caller's Stop forgets the place (forgetVideoPlace), so Stop then Play starts over.
  */
 export function VideoFace({
   videoId,
@@ -368,6 +448,7 @@ export function VideoFace({
   label,
   playing,
   interactive = true,
+  nodeId,
   onPlay,
   onStop,
 }: {
@@ -377,12 +458,20 @@ export function VideoFace({
   playing: boolean
   /** False while the editor's hand tool is out: the player takes no pointer then. */
   interactive?: boolean
+  /** The node this is the face of: with the board's id, where its place is kept. */
+  nodeId?: string
   onPlay?: () => void
   onStop: () => void
 }) {
+  const boardId = useContext(VideoBoardContext)
   const id = videoId !== undefined && isYouTubeVideoId(videoId) ? videoId : null
   const name = label.replace(/\s+/g, " ").trim() || VIDEO_LABEL
   const live = playing && id !== null
+  const placeKey = boardId !== null && nodeId !== undefined ? videoPlaceKey(boardId, nodeId) : null
+  // A place no further on than the video's own start says nothing new: the poster
+  // keeps quiet, and Play starts where it always did.
+  const recalled = placeKey !== null && id !== null ? recallVideoPlace(placeKey, id) : undefined
+  const place = recalled !== undefined && Math.floor(recalled.at) !== (videoStart ?? 0) ? recalled : undefined
   async function openOnYouTube() {
     if (id === null) return
     const result = await call("openExternal", youTubeWatchUrl({ videoId: id, start: videoStart }))
@@ -422,24 +511,75 @@ export function VideoFace({
       </div>
       <div className="flow-video-body">
         {live ? (
-          // Every press and wheel over the player is the player's — not a drag of the
-          // node, nor a pan of the canvas. The editor takes the pointer back from it
-          // while a gesture of its own is under way (styles.css, [data-flow-gesture]).
-          <div className={cx("flow-video-player nodrag nopan nowheel", !interactive && "flow-video-still")}>
-            <iframe
-              className="flow-video-frame"
-              src={youTubeEmbedUrl({ videoId: id, start: videoStart })}
-              title={name}
-              // Full screen in allow= alone: Electron warns that it takes precedence
-              // over an allowfullscreen attribute.
-              allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
-              referrerPolicy="strict-origin-when-cross-origin"
-            />
-          </div>
+          <VideoPlayer
+            key={id}
+            videoId={id}
+            start={place !== undefined ? Math.floor(place.at) : videoStart}
+            name={name}
+            interactive={interactive}
+            onInfo={placeKey === null ? undefined : (info) => noteVideoPlace(placeKey, id, info)}
+          />
         ) : (
-          <VideoPoster videoId={id} label={name} onPlay={onPlay} />
+          <VideoPoster videoId={id} label={name} place={place} onPlay={onPlay} />
         )}
       </div>
+    </div>
+  )
+}
+
+/**
+ * Switchboard: the player itself — YouTube's iframe, from `start` as it was when the
+ * player was mounted (a later word on where the video is must never change the iframe's
+ * address, which would load it again). Every press and wheel over it is the player's —
+ * not a drag of the node, nor a pan of the canvas; the editor takes the pointer back
+ * from it while a gesture of its own is under way (styles.css, [data-flow-gesture]).
+ *
+ * Once the iframe has loaded, the page says hello to it (youTubePlayerHello), and from
+ * then on the player posts its state and, four times a second as it plays, its time.
+ * Only messages from the player's origin and from this very frame are read, as what
+ * they are (readYouTubePlayerMessage): the page gets messages from other players, and
+ * from anything else that cares to post one.
+ */
+function VideoPlayer({
+  videoId,
+  start,
+  name,
+  interactive,
+  onInfo,
+}: {
+  videoId: string
+  start?: number
+  name: string
+  interactive: boolean
+  onInfo?: (info: YouTubePlayerInfo) => void
+}) {
+  const [src] = useState(() => youTubeEmbedUrl({ videoId, start }))
+  const frameRef = useRef<HTMLIFrameElement>(null)
+  const onInfoRef = useRef(onInfo)
+  onInfoRef.current = onInfo
+  useEffect(() => {
+    function hear(event: MessageEvent) {
+      const frame = frameRef.current
+      if (frame === null || event.origin !== YOUTUBE_PLAYER_ORIGIN || event.source === null || event.source !== frame.contentWindow) return
+      const info = readYouTubePlayerMessage(event.data)
+      if (info !== null) onInfoRef.current?.(info)
+    }
+    window.addEventListener("message", hear)
+    return () => window.removeEventListener("message", hear)
+  }, [])
+  return (
+    <div className={cx("flow-video-player nodrag nopan nowheel", !interactive && "flow-video-still")}>
+      <iframe
+        ref={frameRef}
+        className="flow-video-frame"
+        src={src}
+        title={name}
+        // Full screen in allow= alone: Electron warns that it takes precedence
+        // over an allowfullscreen attribute.
+        allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+        referrerPolicy="strict-origin-when-cross-origin"
+        onLoad={() => frameRef.current?.contentWindow?.postMessage(youTubePlayerHello(), YOUTUBE_PLAYER_ORIGIN)}
+      />
     </div>
   )
 }
@@ -449,10 +589,27 @@ export function VideoFace({
  * under a play button. YouTube answers for a picture it hasn't got with a grey stand-in
  * 120 pixels wide (HTTP 404, but a JPEG that loads), so a picture no wider than that,
  * or none at all (offline), gives a dark face with the video's title on it instead.
+ *
+ * A video that was left part way (`place`) says so, as YouTube's own thumbnails do: a
+ * red line along the bottom as far as it got (once the player has said how long the
+ * video is), and "Resume at 3:42" in the corner.
  */
-function VideoPoster({ videoId, label, onPlay }: { videoId: string | null; label: string; onPlay?: () => void }) {
+function VideoPoster({
+  videoId,
+  label,
+  place,
+  onPlay,
+}: {
+  videoId: string | null
+  label: string
+  place?: VideoPlace
+  onPlay?: () => void
+}) {
   const [missing, setMissing] = useState<string | null>(null)
   const picture = videoId !== null && missing !== videoId ? videoId : null
+  const resumeAt = place === undefined ? null : formatYouTubeTime(place.at)
+  const seen = place?.duration !== undefined && place.duration > 0 ? Math.min(1, place.at / place.duration) : null
+  const action = resumeAt === null ? `Play ${label}` : `Resume ${label} at ${resumeAt}`
   const face = (
     <>
       {picture !== null ? (
@@ -471,6 +628,16 @@ function VideoPoster({ videoId, label, onPlay }: { videoId: string | null; label
         <RiPlayFill className="size-7" />
       </span>
       {picture === null ? <span className="flow-video-name">{label}</span> : null}
+      {resumeAt !== null ? (
+        <span className="flow-video-resume" data-resume-at={Math.floor(place?.at ?? 0)}>
+          Resume at {resumeAt}
+        </span>
+      ) : null}
+      {seen !== null ? (
+        <span className="flow-video-seen" aria-hidden="true">
+          <i style={{ width: `${(seen * 100).toFixed(2)}%` }} />
+        </span>
+      ) : null}
     </>
   )
   return onPlay ? (
@@ -478,8 +645,8 @@ function VideoPoster({ videoId, label, onPlay }: { videoId: string | null; label
       type="button"
       className={cx("flow-video-poster", focusRing)}
       data-pictured={picture !== null}
-      aria-label={`Play ${label}`}
-      title={`Play ${label}`}
+      aria-label={action}
+      title={action}
       onClick={(event) => {
         event.stopPropagation()
         onPlay()
@@ -488,7 +655,7 @@ function VideoPoster({ videoId, label, onPlay }: { videoId: string | null; label
       {face}
     </button>
   ) : (
-    <div className="flow-video-poster" data-pictured={picture !== null} title={`Play ${label}`}>
+    <div className="flow-video-poster" data-pictured={picture !== null} title={action}>
       {face}
     </div>
   )
@@ -498,10 +665,12 @@ function VideoPoster({ videoId, label, onPlay }: { videoId: string | null; label
  * Switchboard: a video on the read-only canvas, which plays it there and then. Off
  * screen it goes back to its poster: the page takes the player's iframe out with the
  * board, and put back it would load again and start over, out loud. (Full screen
- * remounts that canvas — DiagramsPage's resetKey — which does the same.)
+ * remounts that canvas — DiagramsPage's resetKey — which does the same.) Back on
+ * screen, Play takes up where it left off (VideoFace); Stop forgets where that was.
  */
-function ReadOnlyVideo({ videoId, videoStart, label }: Pick<FlowBoxNodeData, "videoId" | "videoStart" | "label">) {
+function ReadOnlyVideo({ id, videoId, videoStart, label }: { id?: string } & Pick<FlowBoxNodeData, "videoId" | "videoStart" | "label">) {
   const shown = useContext(VideoShownContext)
+  const boardId = useContext(VideoBoardContext)
   const [playing, setPlaying] = useState(false)
   useEffect(() => {
     if (!shown) setPlaying(false)
@@ -512,8 +681,12 @@ function ReadOnlyVideo({ videoId, videoStart, label }: Pick<FlowBoxNodeData, "vi
       videoStart={videoStart}
       label={label}
       playing={playing && shown}
+      nodeId={id}
       onPlay={() => setPlaying(true)}
-      onStop={() => setPlaying(false)}
+      onStop={() => {
+        if (boardId !== null && id !== undefined) forgetVideoPlace(videoPlaceKey(boardId, id))
+        setPlaying(false)
+      }}
     />
   )
 }
@@ -527,6 +700,7 @@ export function FlowBox({
   labelOverride,
   onToggleCheck,
   onTeleport,
+  nodeId,
   className,
   children,
   ...box
@@ -536,6 +710,8 @@ export function FlowBox({
   onToggleCheck?: (field: "label" | "detail", paragraph: number) => void
   /** Switchboard: a click on a teleport, on the read-only canvas. */
   onTeleport?: (event: React.MouseEvent) => void
+  /** Switchboard: the node's id — what a video on the read-only canvas keeps its place under. */
+  nodeId?: string
   className?: string
   children?: React.ReactNode
 }) {
@@ -600,7 +776,7 @@ export function FlowBox({
   if (shape === "video") {
     return (
       <div className={cx("relative size-full", className)}>
-        <ReadOnlyVideo videoId={box.videoId} videoStart={box.videoStart} label={label} />
+        <ReadOnlyVideo id={nodeId} videoId={box.videoId} videoStart={box.videoStart} label={label} />
         {children}
       </div>
     )
@@ -710,12 +886,12 @@ function useTeleportClick(to: string | undefined): ((event: React.MouseEvent) =>
   }
 }
 
-export function FlowBoxNode({ data }: NodeProps) {
+export function FlowBoxNode({ id, data }: NodeProps) {
   const box = data as FlowBoxNodeData
   const teleport = useTeleportClick(box.shape === "teleport" ? box.teleportTo : undefined)
 
   return (
-    <FlowBox {...box} className={teleport ? "cursor-pointer" : undefined} onTeleport={teleport}>
+    <FlowBox {...box} nodeId={id} className={teleport ? "cursor-pointer" : undefined} onTeleport={teleport}>
       {/* A diagram's edges are routed by React Flow, so these handles carry
           real geometry — one per side, named after it, and each edge names the
           pair it uses (layoutFlow). They are all "source" handles; the canvas

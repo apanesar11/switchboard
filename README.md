@@ -239,7 +239,11 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   YouTube** and, while it plays, **Stop**; under it is YouTube's picture of the video.
   Click the picture (or select the video and press Enter) to play it there; Enter again
   or Stop puts the picture back, and so does leaving the whiteboard or going in or out of
-  full screen. Resized from its sides or bottom corners, it keeps the video's shape. ⌘C
+  full screen. A video you leave part way — paused or playing — remembers where it got
+  to for as long as Switchboard runs: the picture says so ("Resume at 3:42", with a red
+  line along its bottom as far as you got), and the next play takes it up there. Stop,
+  or watching it to the end, starts it over next time. Resized from its sides or bottom
+  corners, it keeps the video's shape. ⌘C
   copies it as its YouTube link, its start included, so it pastes as a link anywhere else
   and as a copy back on a whiteboard. Tab after a video adds a plain box. An archived
   whiteboard plays its videos too.

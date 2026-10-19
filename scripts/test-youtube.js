@@ -35,6 +35,11 @@ const {
   youTubeEmbedUrl,
   youTubeThumbnailUrl,
   youTubeWatchUrl,
+  YOUTUBE_PLAYER_ORIGIN,
+  YOUTUBE_PLAYER_ENDED,
+  youTubePlayerHello,
+  readYouTubePlayerMessage,
+  formatYouTubeTime,
 } = require(outfile);
 
 after(() => fs.rmSync(temp, { recursive: true, force: true }));
@@ -185,8 +190,11 @@ test('a drop reads its uri-list first, then its plain text; a Google Images resu
 });
 
 test('the poster, the player and the page are built from the id and the start alone', () => {
-  assert.equal(youTubeEmbedUrl(v(A)), `https://www.youtube-nocookie.com/embed/${A}?autoplay=1&rel=0&playsinline=1`);
-  assert.equal(youTubeEmbedUrl(v(A, { start: 90 })), `https://www.youtube-nocookie.com/embed/${A}?autoplay=1&start=90&rel=0&playsinline=1`);
+  // The player tells the page its time and state (enablejsapi), with no origin: a
+  // file:// page has none to give.
+  assert.equal(youTubeEmbedUrl(v(A)), `https://www.youtube-nocookie.com/embed/${A}?autoplay=1&rel=0&playsinline=1&enablejsapi=1`);
+  assert.equal(youTubeEmbedUrl(v(A, { start: 90 })), `https://www.youtube-nocookie.com/embed/${A}?autoplay=1&start=90&rel=0&playsinline=1&enablejsapi=1`);
+  assert.equal(new URL(youTubeEmbedUrl(v(A))).origin, YOUTUBE_PLAYER_ORIGIN);
   assert.equal(youTubeThumbnailUrl(A), `https://i.ytimg.com/vi/${A}/hqdefault.jpg`);
   assert.equal(youTubeWatchUrl(v(A)), `https://www.youtube.com/watch?v=${A}`);
   assert.equal(youTubeWatchUrl(v(A, { start: 90 })), `https://www.youtube.com/watch?v=${A}&t=90s`);
@@ -201,4 +209,47 @@ test('every address built from a video reads back as that video', () => {
   }
   // The poster's address is a picture, not the video.
   assert.equal(youTubeVideoFromText(youTubeThumbnailUrl(A)), null);
+});
+
+// ─── what the player says ───
+
+test('the page says hello to the player as YouTube\'s widget API expects', () => {
+  assert.deepEqual(JSON.parse(youTubePlayerHello()), { event: 'listening', id: 1, channel: 'widget' });
+  assert.equal(YOUTUBE_PLAYER_ORIGIN, 'https://www.youtube-nocookie.com');
+  assert.equal(YOUTUBE_PLAYER_ENDED, 0);
+});
+
+test('a message from the player is read for its time, length and state, and nothing else', () => {
+  // As the player posts them: JSON text (measured 2026-10-19), an initialDelivery when
+  // the page says hello and an infoDelivery on every change and four times a second as
+  // it plays — many with only the time, some with only other words.
+  const text = JSON.stringify({ event: 'infoDelivery', id: 1, channel: 'widget', info: { currentTime: 37.697901, playerState: 2, duration: 1344, videoData: { video_id: A }, volume: 100 } });
+  assert.deepEqual(readYouTubePlayerMessage(text), { currentTime: 37.697901, duration: 1344, playerState: 2 });
+  assert.deepEqual(readYouTubePlayerMessage(JSON.stringify({ event: 'initialDelivery', id: 1, channel: 'widget', info: { currentTime: 30, playerState: -1, duration: 1344 } })), { currentTime: 30, duration: 1344, playerState: -1 });
+  assert.deepEqual(readYouTubePlayerMessage(JSON.stringify({ event: 'infoDelivery', id: 1, info: { currentTime: 31.5 } })), { currentTime: 31.5 });
+  assert.deepEqual(readYouTubePlayerMessage({ event: 'infoDelivery', info: { playerState: 0 } }), { playerState: YOUTUBE_PLAYER_ENDED });
+  // Other messages of the player's, and messages that are not its, are nothing.
+  assert.equal(readYouTubePlayerMessage(JSON.stringify({ event: 'onReady', id: 1, channel: 'widget', info: null })), null);
+  assert.equal(readYouTubePlayerMessage(JSON.stringify({ event: 'apiInfoDelivery', id: 1, channel: 'widget', info: {} })), null);
+  assert.equal(readYouTubePlayerMessage(JSON.stringify({ event: 'infoDelivery', info: { volume: 100, muted: false } })), null);
+  assert.equal(readYouTubePlayerMessage(JSON.stringify({ event: 'infoDelivery', info: 'words' })), null);
+  assert.equal(readYouTubePlayerMessage('not json'), null);
+  assert.equal(readYouTubePlayerMessage(''), null);
+  assert.equal(readYouTubePlayerMessage(null), null);
+  assert.equal(readYouTubePlayerMessage(42), null);
+  assert.equal(readYouTubePlayerMessage([1, 2]), null);
+  // Numbers that are not times: strings, NaN, negatives, a state that is not whole.
+  assert.equal(readYouTubePlayerMessage({ event: 'infoDelivery', info: { currentTime: '12', duration: NaN, playerState: 1.5 } }), null);
+  assert.deepEqual(readYouTubePlayerMessage({ event: 'infoDelivery', info: { currentTime: -1, duration: 90 } }), { duration: 90 });
+});
+
+test('a time is written as YouTube writes one', () => {
+  assert.equal(formatYouTubeTime(0), '0:00');
+  assert.equal(formatYouTubeTime(5.9), '0:05');
+  assert.equal(formatYouTubeTime(97), '1:37');
+  assert.equal(formatYouTubeTime(222), '3:42');
+  assert.equal(formatYouTubeTime(3600), '1:00:00');
+  assert.equal(formatYouTubeTime(3723.4), '1:02:03');
+  assert.equal(formatYouTubeTime(-3), '0:00');
+  assert.equal(formatYouTubeTime(NaN), '0:00');
 });

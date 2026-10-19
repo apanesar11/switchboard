@@ -8,6 +8,11 @@
 // A board keeps only a video's id and where it starts. Every address is built here
 // from an id the validator checked and a fixed host, so nothing a board file says
 // reaches an <img> or an <iframe> as a URL.
+//
+// Also what the player says of itself: with enablejsapi=1 YouTube's player posts its
+// time and state to the page that holds it (readYouTubePlayerMessage), once the page
+// has said hello (youTubePlayerHello) — how a video takes up where it left off
+// (DiagramNodes.tsx VideoFace).
 
 import { VIDEO_START_MAX } from "./types"
 
@@ -118,18 +123,90 @@ export function parseYouTubeTime(raw: string): number | null {
   return seconds <= VIDEO_START_MAX ? seconds : null
 }
 
+/** The player's origin: where its messages come from, and where the page's go. */
+export const YOUTUBE_PLAYER_ORIGIN = "https://www.youtube-nocookie.com"
+
 /**
  * The player a click on the poster mounts: the privacy-enhanced host, which sets no
  * cookie just by loading; playing at once, since the click was the gesture; from
- * `start`; related videos from the same channel only. No enablejsapi or origin: a
- * file:// page has no origin to give.
+ * `start`; related videos from the same channel only; and telling the page its time
+ * and state (enablejsapi). No origin: a file:// page has no origin to give, and given
+ * none the player posts to any (measured 2026-10-19).
  */
 export function youTubeEmbedUrl(video: { videoId: string; start?: number }): string {
   const params = new URLSearchParams({ autoplay: "1" })
   if (video.start) params.set("start", String(video.start))
   params.set("rel", "0")
   params.set("playsinline", "1")
+  params.set("enablejsapi", "1")
   return `https://www.youtube-nocookie.com/embed/${video.videoId}?${params}`
+}
+
+// ─── what the player says ───
+
+/** What the player says of itself in one message, when it says anything of use. */
+export type YouTubePlayerInfo = {
+  /** Where it is, in seconds. */
+  currentTime?: number
+  /** How long the video is, in seconds. */
+  duration?: number
+  /** YouTube's player state: -1 unstarted, 0 ended, 1 playing, 2 paused, 3 buffering, 5 cued. */
+  playerState?: number
+}
+
+export const YOUTUBE_PLAYER_ENDED = 0
+
+/**
+ * The message the page posts to the player once it has loaded, after which the player
+ * posts its state and, as it plays, its time (readYouTubePlayerMessage). YouTube's
+ * widget API's "listening" handshake; the id comes back on every message.
+ */
+export function youTubePlayerHello(): string {
+  return JSON.stringify({ event: "listening", id: 1, channel: "widget" })
+}
+
+/**
+ * The time, length and state in one message from the player — the JSON text (or object)
+ * of an infoDelivery or initialDelivery — or null for any other message, or anything
+ * that is not one. Only finite, non-negative numbers are read; the player's other words
+ * (its quality, its volume, its loaded fraction) are left where they are. The caller
+ * has already checked the message's origin and source.
+ */
+export function readYouTubePlayerMessage(data: unknown): YouTubePlayerInfo | null {
+  let message: unknown = data
+  if (typeof message === "string") {
+    try {
+      message = JSON.parse(message)
+    } catch {
+      return null
+    }
+  }
+  if (!isRecord(message) || (message.event !== "infoDelivery" && message.event !== "initialDelivery")) return null
+  const info = message.info
+  if (!isRecord(info)) return null
+  const read: YouTubePlayerInfo = {}
+  const seconds = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined)
+  const currentTime = seconds(info.currentTime)
+  const duration = seconds(info.duration)
+  const playerState = typeof info.playerState === "number" && Number.isInteger(info.playerState) ? info.playerState : undefined
+  if (currentTime !== undefined) read.currentTime = currentTime
+  if (duration !== undefined) read.duration = duration
+  if (playerState !== undefined) read.playerState = playerState
+  return currentTime === undefined && duration === undefined && playerState === undefined ? null : read
+}
+
+/** Seconds as YouTube writes a time: 0:05, 3:42, 1:02:03. Floored; nothing under 0. */
+export function formatYouTubeTime(seconds: number): string {
+  const whole = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0))
+  const h = Math.floor(whole / 3600)
+  const m = Math.floor((whole % 3600) / 60)
+  const s = whole % 60
+  const two = (n: number) => String(n).padStart(2, "0")
+  return h > 0 ? `${h}:${two(m)}:${two(s)}` : `${m}:${two(s)}`
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 /**

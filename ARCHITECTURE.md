@@ -929,7 +929,40 @@ page takes the iframe out of the document then, and put back it would load again
 archived board's read-only canvas plays its own (`ReadOnlyVideo`, local state, the poster
 a `<button>`) and goes back to the poster off screen too: `DiagramCanvas` takes `shown`
 from DiagramsPage and hands it down in `VideoShownContext`; full screen remounts that
-canvas anyway. Several videos can play at once. A player is cross-origin and takes every
+canvas anyway. Several videos can play at once.
+
+**Where a video got to is kept, so the poster's Play takes it up there.** The embed
+carries `enablejsapi=1` and no `origin` (a file:// page has none to give; given none the
+player posts to any origin — measured 2026-10-19, and the reason the first cut left the
+API off). Once the iframe has loaded, `VideoPlayer` (DiagramNodes.tsx, the iframe's
+own component) posts YouTube's widget handshake to it (`youTubePlayerHello`, `{event:
+"listening"}`), and from then on the player posts an `initialDelivery` and then
+`infoDelivery` messages — on every state change and four times a second as it plays —
+each a JSON string with `info.currentTime`, `info.duration` and `info.playerState` among
+other words. One `message` listener per player reads only messages whose origin is
+`YOUTUBE_PLAYER_ORIGIN` and whose source is that very frame's window, and only for those
+three numbers (`readYouTubePlayerMessage`, lib/diagrams/youtube.ts: finite, non-negative,
+the state whole). What it hears goes into **video places** — a module-level map in
+DiagramNodes.tsx keyed by board id and node id (`videoPlaceKey`; `VideoBoardContext`
+carries the board's id, provided by FlowEditor and by DiagramCanvas from DiagramsPage's
+`boardId`), module state because the host keeps only a handful of boards' trees and a
+tab closed and opened again should still take up where it was; never node data, which is
+saved, compared and undone. Each place is `{videoId, at, duration?}`. A poster drawn with
+a place for its video, further on than the video's own `videoStart` and under a second
+from its end, says "Resume at 3:42" in its corner (`.flow-video-resume`, with
+`data-resume-at` in whole seconds) and draws a red line along its bottom as far as it got
+(`.flow-video-seen`, once the player has said the duration), as YouTube's own thumbnails
+do; the poster's title and the read-only button's label say "Resume … at 3:42" instead of
+"Play …". The next Play mounts the player from `floor(at)` in place of `videoStart`;
+`VideoPlayer` keeps the address it mounted with in state, so a later word on the time
+never changes the iframe's `src` (which would load it again). A place is forgotten by
+Stop and Enter-again (`stopVideo` in the editor, `ReadOnlyVideo`'s onStop) — a Stop that
+then plays from the start, as a Stop does — by the video ending (`playerState` 0, or a
+time within a second of the duration), and by the node playing another video (the id no
+longer matches, `recallVideoPlace`). A playing video that leaves the screen stops with
+the iframe, as before, and its place is the last time the player reported. main's part
+(videos.js) is unchanged: it neither reads nor sends these messages, and the embed URL's
+query is not what it gates. A player is cross-origin and takes every
 press and wheel over it, so while the canvas has a gesture under way — a press on it (a
 pan, a drag-select, a node dragged or resized, an arrow drawn), or anything dragged over
 the window (`dragenter` and `dragleave` counted, reset by a drop or `dragend`) — the
