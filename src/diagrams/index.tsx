@@ -10,11 +10,12 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { DiagramsPage, type ClientRect, type FullscreenHandle } from "./app/dashboard/diagrams/DiagramsPage"
 import type { FlowEditorHandle } from "./app/dashboard/diagrams/FlowEditor"
 import { WorkspacePicker } from "./app/dashboard/diagrams/WorkspacePicker"
-import { Toaster } from "./components/Toast"
+import { Toaster, toast } from "./components/Toast"
 import { PortalProvider } from "./lib/portal"
 import { refreshAnswerStatus } from "./lib/diagrams/ai-client"
 import { listWorkspaceChoices } from "./lib/diagrams/actions"
-import { clipboardImageFile } from "./lib/diagrams/upload"
+import { clipboardFiles, clipboardImageFile } from "./lib/diagrams/upload"
+import { flowLooksLikeCopiedFiles } from "./lib/diagrams/files"
 import { editFlowText } from "./lib/diagrams/rich-text-dom"
 import { BLANK_FLOW } from "./lib/diagrams/templates"
 import type { FlowSpec, TerminalSlot } from "./lib/diagrams/types"
@@ -504,7 +505,19 @@ function create(element: HTMLElement, initial: Props) {
       if (action === "cut") return editor.cut()
       // Text is the boxes ⌘C copied, or else a YouTube link pasted as its video — the
       // copy first, as a copied video's words are its link.
-      if (action === "paste" && !image) return editor.pasteBoxes(text) || editor.pasteVideo(text)
+      // Switchboard: and failing both, files Finder copied — a PDF, a spreadsheet or a
+      // picture — go on as the same files dropped. Their words are only their names, so
+      // main is asked for the files only when the words are names (it reads the
+      // clipboard for them in another process, osascript).
+      if (action === "paste" && !image) {
+        if (editor.pasteBoxes(text) || editor.pasteVideo(text)) return true
+        if (!flowLooksLikeCopiedFiles(text)) return false
+        return clipboardFiles().then(({ files, problems }) => {
+          for (const problem of problems) toast({ title: problem, variant: "error" })
+          if (files.length > 0) editor.paste(files)
+          return files.length > 0 || problems.length > 0
+        })
+      }
       if (action === "undo") { editor.undo(); return true }
       if (action === "redo") { editor.redo(); return true }
       if (action === "paste" && image) {

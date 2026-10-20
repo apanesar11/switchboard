@@ -92,9 +92,11 @@ switchboard/
   src/renderer/views/pr.js      — Pull request screen                             [R7]
   src/renderer/views/prs.js     — Pull requests screen: every open PR of yours    [R12]
   src/renderer/views/editor.js  — Editor tab (Monaco over the workspace's repos)  [R13]
-  src/main/whiteboards.js       — Whiteboards: folders, boards, documents, pictures; the migration [M10]
+  src/main/whiteboards.js       — Whiteboards: folders, boards, documents, pictures, files; the migration [M10]
   src/main/images.js            — Google Images beside a whiteboard: webview, session, fetch [M12]
   src/main/videos.js            — YouTube videos on a whiteboard: Referer, guards, title [M14]
+  src/main/sheets.js            — a whiteboard's spreadsheets: read once, paged, searched [M15]
+  src/main/sheet-worker.js      — reads one spreadsheet in a worker thread           [M15]
   src/main/answer.js            — ✦ Answer: Claude Code / Codex / Claude API / OpenAI [M11]
   src/main/databases.js         — local encrypted connections and read-only browsing [M13]
   src/renderer/views/databases.js — Databases tab: connections, entities, records     [R17]
@@ -994,6 +996,151 @@ Space, K and the arrows are YouTube's. The keyboard help lists "⌘ V · Paste a
 link as its video". Main's half — the Referer the player needs, its popups, navigations
 and permissions, and the title — is `main/videos.js` (M14).
 
+**A PDF or a spreadsheet goes on as the file itself** (added 2026-10-19, the user's ask:
+drop, paste or pick a PDF and see a preview of its first page with its name, opened beside
+the canvas to scroll through; and a spreadsheet — xlsx, xlsm, xlsb, xls, ods,
+numbers, csv, tsv — as a small card like a document's, opened on a panel to navigate its
+data). A `shape: "pdf"` or `shape: "sheet"` node names its file in `file`:
+`sbfile://file/<sha256 hex[0:32]>.<ext>`, a copy main keeps (below), the extension being
+what it is (`lib/diagrams/files.ts FLOW_FILE_EXTENSIONS`, mirrored in whiteboards.js
+`FILE_EXTENSIONS`). The validator requires it on those two and keeps it on nothing else:
+text of at most `FLOW_FILE_SRC_MAX_LENGTH` (120) that `parseFlowFileSrc` reads, its kind
+the node's shape — a pdf naming a spreadsheet would point Chromium's viewer at a file main
+never serves (`a "pdf" node needs "file", the sbfile:// address of a PDF kept on this
+Mac`; `"file" must be the sbfile://file/<name> address the app gave a PDF it keeps`;
+`"file" must name a PDF`, and the spreadsheet forms). A pdf's `src` is its **cover**, a
+picture of its first page kept as any picture is (`sbimg://image/<file>`, the image `src`
+rule), and optional: none is made for a PDF PDFKit can't open, or when Quick Look fails.
+The label is the file's name without its extension (`flowFileLabel`: one line, at most 200
+characters), else `PDF_LABEL` ("PDF") or `SHEET_LABEL` ("Spreadsheet"), which the
+validator and `flowSpecFromCanvas` also fall back to. A pdf is one of `FLOW_SIZED_SHAPES`,
+its `size` the whole node with the strip along its foot (`PDF_BAR`, 30): made 240 wide at
+its cover's shape (`flowPdfSize`, the page held between 120 and 600 high), or
+`FLOW_PDF_DEFAULT_SIZE` (240×341, a Letter page) with no cover, and resized keeping its
+proportions, never under 96×78. A sheet is always `FLOW_SHEET_SIZE` (240×76, a document's
+card) and keeps no `size`. Main's list thumbnail mirrors both. Neither has text to edit on
+the canvas (`hasText`), takes a colour, or is followed by anything but a plain box on Tab;
+✦ Answer's question path walks past both, as past a video — a file's name is not part of a
+question — Condense refuses them ("Leave PDFs and spreadsheets out of the selection before
+condensing."), and unfolding an arrow lays the tree out again around a pdf left where it
+was put, as around a picture (`tidyFlowTree`'s `pinImages`). The CLI checks and
+keeps them as any other box but cannot add one (only the app takes a file in), names them
+`id (a PDF "Name")` and `id (a spreadsheet "Name")` in its removal refusal, and
+`carryOverFlowLayout` gives a pdf still naming the same file its old cover when a
+republished spec leaves `src` out — only the app can make one.
+
+**Files are kept once, by their content, read-only.** `whiteboards.saveFile(bytes, ext)`
+writes `whiteboards/files/<sha>.<ext>` through a temp file and a rename with mode 0o444
+— "Open in Preview" hands the app this very copy, and an app saving over it would change
+every board that shows it — and answers its address and kind. It refuses an extension it
+doesn't keep, an empty file, a PDF over 100 MB or a spreadsheet over 50 MB
+(`FLOW_PDF_MAX_BYTES`, `FLOW_SHEET_MAX_BYTES`), and bytes that are not what the extension
+says: a PDF's `%PDF-` within its first 1024 bytes; a zip's `PK\x03\x04` for ods and
+numbers, and for xlsx, xlsm and xlsb a zip or an OLE compound file — what Excel makes of
+one locked with a password; for xls an OLE compound file or text (Excel's HTML and XML
+exports); for csv and tsv text — no NUL in the first 64 KB, a UTF-16 BOM excepted. Only
+the outside is checked: a damaged spreadsheet still goes on, and its panel says it can't
+be read (a locked one, that it is protected with a password). As with pictures, the same file dropped on two boards is one file, and copying
+or deleting a node or a board copies or deletes nothing on disk. For a PDF,
+`sb:diagrams:saveFile` also makes the cover: `nativeImage.createThumbnailFromPath(file,
+600×600)` (Quick Look, out of process, the page's shape kept; ~928×1200 px for a Letter
+page on a Retina Mac), raced against 15 s, kept through `saveImage` and answered as
+`cover: { src, width, height }` in pixels — any failure just leaves it out. Quick Look
+doesn't fail on a PDF it can't draw: it answers the Finder's PDF icon, so the picture is
+kept only when PDFKit, asked at the same time through `osascript -l JavaScript`, opens the
+file and counts a page (a locked PDF does, and keeps Quick Look's padlock page).
+
+**Dropped, pasted or picked.** A drop splits its files (`addDroppedFiles`): pictures to
+`addImages`, PDFs and spreadsheets (`flowFileKind`, by extension, else MIME type) to
+`addFiles`, and anything else refused in one toast ("<name> can't go on a whiteboard" —
+"Drop a picture, a PDF or a spreadsheet"). Edit ▸ Paste over the canvas, once the
+clipboard's words were neither boxes nor a video but are file names, one a line
+(`flowLooksLikeCopiedFiles` — a file Finder copied puts only its name there, and plain
+words never send main to the clipboard for files), asks main for the files Finder copied (`sb:diagrams:clipboardFiles`: drops.js
+`readCopiedFiles`, an osascript read of the pasteboard's file URLs, since this Electron's
+main-process clipboard has no files; then `whiteboards.readPastedFiles`, which reads a
+picture's, a PDF's or a spreadsheet's bytes within its limit, names anything else without
+reading it, and refuses one too big in a sentence) and takes them as the same files
+dropped. The rail's **PDF or spreadsheet** (F, after Image) opens a picker
+(`FLOW_FILE_ACCEPT`). `addFiles` is `addImages` again: each file uploaded
+(`uploadDiagramFile` → `sb:diagrams:saveFile`), centred on the drop point or the view's
+middle and moved down clear of every box there (`clearOfBoxes`, as a new document is — a
+file's name runs along one edge, which anything over it would hide), so several stand in a
+column; pictures land clear of what the same drop already put down (`landed`, which both
+add to) — several pictures stand in a column too — so neither covers the other, whichever
+lands first. Each is its own undo step, quiet when you have moved on to typing, the strip
+saying "Uploading 2 files…" while any is a PDF or a spreadsheet, and a board left
+mid-upload adding nothing.
+
+**Drawn as a page or a card; opened beside the canvas.** `DiagramNodes.tsx PdfFace` is
+both canvases' pdf: the cover shown whole from the top on white (paper in dark mode too)
+above the strip with a red PDF glyph and the name, or, with no cover or one that won't
+load, a placeholder page with a large glyph. A sheet is a document's card with
+`RiFileExcel2Line` in a green tile and `sheetFormatName(ext)` under the name ("Excel
+spreadsheet", "CSV file", …). Both carry the copy-path button (`diagramsGetFilePath`; a
+pdf's in its top corner, clear of the strip) and the tooltip "<name> · Double-click to
+open". Double-click, Enter with it the one node selected, or the toolbar's **Open PDF** /
+**Open spreadsheet** opens it in `FilePanel.tsx` (`fileNodeId` and `fileView` beside the
+document's), the one panel there with a document's — opening either puts the other away,
+and Google Images closes it — and the panel goes when its node is deleted or undone away.
+An archived board's read-only canvas opens it too, its name read-only. The panel is a
+document panel's chrome and classes (`flow-document-host`, `-floating`, `-docked`,
+`-focus`, `flow-document-panel`) on a `[data-flow-document-panel]` host, so the canvas's
+keys, the bundle's `editAction` and a pinned terminal's overlay leave it alone; 640 wide,
+resized from 360 up to 1400 or the window less 80. Its header has **Open in Preview** /
+**Open in Numbers or Excel** (`sb:diagrams:openFile`, `shell.openPath` on the read-only
+copy), the three views and Close; its name field renames the node when the edit ends —
+Enter or leaving it, one undo step, blank putting back "PDF" or "Spreadsheet" — and Esc
+undoes the edit first, then leaves focus view, then closes; the footer copies the path.
+
+**A PDF is Chromium's own viewer.** The body is `<iframe src="sbfile://file/<name>.pdf">`,
+keyed by the address and with no `sandbox` (which would keep the viewer from loading): its
+toolbar pages, zooms, rotates, prints and downloads, and its sidebar shows the pages. It has
+no search: Chrome's comes from the browser's find bar, which Electron hasn't got, and
+`webContents.findInPage` searches the whole window and miscounts a PDF's matches (measured
+2026-10-19) — Open in Preview is the way to search one. `index.js` registers `sbfile` in the one
+`protocol.registerSchemesAsPrivileged` call beside `sbimg` (standard, secure,
+`supportFetchAPI`, `stream`) and serves only a PDF from it (`serveDiagramFile`: host
+`file`, the name through `whiteboards.filePath`'s strict pattern, `.pdf` alone, the body
+streamed from `net.fetch` of the file with `Content-Type: application/pdf`,
+`X-Content-Type-Options: nosniff` and `Content-Disposition: inline`; anything else 404).
+A spreadsheet is never served or loaded as a page, and the page can't `fetch()` an
+`sbfile:` address at all (cross-origin): only the iframe loads it. `will-frame-navigate`,
+which keeps the page's own iframes on the YouTube player, also lets one go to a kept PDF
+(any `#page` fragment); a link clicked in a PDF takes the window itself to its address
+(measured: no initiator), which `will-navigate` sends to the browser, and one that tries to
+take the viewer's frame to http(s) goes to the browser instead, one a second at most.
+While the panel is resized the iframe takes no pointer (`data-resizing`), or it would
+swallow the moves and the resize would stall.
+
+**A spreadsheet is a grid main reads for it.** The panel asks `sb:diagrams:sheetInfo` once
+(`{ format, sheets: [{ name, rows, cols, truncated, clipped }] }` — hidden sheets left out unless
+every sheet is hidden; a CSV or TSV is one sheet, "Sheet1"), then `sheetRows` a page of
+200 rows at a time as the grid scrolls, cached per sheet, an answer for a sheet since left
+or a panel since closed dropped (a generation counter), and asked once scrolling pauses.
+Rows are ragged — each ends at its last cell with text, an empty one is `[]` — and a
+missing cell is empty. The grid draws only the rows and columns in view and some margin,
+rows 26px, each column as wide as its first page's widest text (56–320px) — measured with
+a canvas in the grid's own font, a number's digits as tabular figures — under sticky
+column letters with sticky row numbers beside; **Header row** (on by default) keeps row 1
+under the letters, in bold. A click selects a cell; the bar over the grid shows its
+reference ("B12") and its whole text, selectable. Arrows, ⌘-arrows, Page Up/Down and
+Home/End (⌘ for the corners) move the selection and scroll it into view; ⌘F opens find
+(`sheetFind`: a case-insensitive substring, at most 1000 matches), "3 of 41", Enter and
+⇧Enter cycling and scrolling each into view. Sheet tabs sit along the bottom, as in Excel;
+the footer says "rows × columns" and, when rows were left out, "Showing the first N rows"
+(a cell cut at 32,767 characters says so apart); a sheet the workbook's limit left out
+whole says that, with the Open in … button, rather than "This sheet is empty". ⌘C copies
+the selected cell: Edit ▸ Copy is a menu item, and with the panel focused app.js copies the
+document's selection, so the cell's text is kept selected, out of sight, while the grid
+has the keyboard, and dropped when it loses it — else ⌘C on the canvas would copy it. The
+name field's Enter hands the keyboard to the grid (or the panel), not the page, where the
+canvas would take the next Backspace; Enter and Esc that only confirm or cancel an input
+method's composition do nothing here. A sheet main can't read shows its sentence ("That spreadsheet is too big
+to show here", "That spreadsheet took too long to read", "That spreadsheet can't be read
+here", "That spreadsheet is protected with a password", "That file is no longer on this
+Mac") with the Open in … button and Try again. Reading is `main/sheets.js` (M15).
+
 **Condense replaces an explored discussion.** A rectangle selection of connected text
 nodes, or sibling branches sharing an outside parent, gets **✦ Condense** in the
 floating toolbar; ⌘I dispatches to it for multiple selected nodes. The complete selected
@@ -1091,10 +1238,19 @@ Undo has the other.
 | `sb.diagramsClipboardImage()` | `sb:diagrams:clipboardImage` | `{ ok, bytes, type }` — the clipboard's PNG, for Edit ▸ Paste over the canvas |
 | `sb.diagramsFetchImage(url, referrer?)` | `sb:diagrams:fetchImage` | `{ ok, bytes, type, name }` — a picture from the Google Images panel, by its address, as PNG, JPEG or WebP; or `{ ok:false, error }`. See Google Images, below |
 | `sb.diagramsVideoInfo(id)` | `sb:diagrams:videoInfo` | `{ ok, data: { title, author } }` — a YouTube video's title and channel, plain text on one line, by its 11-character id: asked of YouTube's oEmbed endpoint once, when a whiteboard makes the video; or `{ ok:false, error }` (`That video isn't on YouTube`, `That video can't be embedded`, `Couldn't reach YouTube`, …). Only the id crosses; main builds the address. See M14 |
+| `sb.diagramsSaveFile(bytes, ext)` | `sb:diagrams:saveFile` | `{ ok, data: { src, kind, cover? } }` — a PDF or a spreadsheet kept as `sbfile://file/<file>` (`kind` `pdf` or `sheet`), its bytes checked against `ext`; for a PDF `cover: { src, width, height }`, a picture of its first page in pixels, when Quick Look made one. Or `{ ok:false, error }` (`That isn't a PDF or a spreadsheet`, `That PDF is over 100 MB`, `That file isn't really an Excel spreadsheet — it may be damaged, or named for something else`, …). See M10 |
+| `sb.diagramsGetFilePath(src)` | `sb:diagrams:getFilePath` | `{ ok, data: path }` — the kept file's path, for Copy file path; `Invalid file address`, `That file is no longer on this Mac` |
+| `sb.diagramsOpenFile(src)` | `sb:diagrams:openFile` | `{ ok }` — the kept file opened in the Mac's app for it (`shell.openPath`); a smoke run logs it instead |
+| `sb.diagramsClipboardFiles()` | `sb:diagrams:clipboardFiles` | `{ ok, data: [{ name, type, bytes } \| { name, error }] }` — the files Finder copied, for Edit ▸ Paste over a canvas: a picture's, a PDF's or a spreadsheet's bytes (null for any other file), or why one can't go on (too big). At most 20 |
+| `sb.diagramsSheetInfo(src)` | `sb:diagrams:sheetInfo` | `{ ok, data: { format, sheets: [{ name, rows, cols, truncated, clipped }] } }` — a kept spreadsheet's shown sheets (`truncated`: rows left out; `clipped`: a cell cut at 32,767 characters); never a PDF. See M15 |
+| `sb.diagramsSheetRows(src, sheet, start, count)` | `sb:diagrams:sheetRows` | `{ ok, data: { start, rows: string[][] } }` — up to `count` (1–500) rows of sheet `sheet` from `start`, all 0-based; each row ends at its last cell with text |
+| `sb.diagramsSheetFind(src, sheet, query, limit)` | `sb:diagrams:sheetFind` | `{ ok, data: { matches: [{ row, col }], more } }` — the cells holding `query` (1–200 characters, any case) in reading order, at most `limit` (1–1000) |
 | `sb.diagramsDirty(count)` | `sb:diagrams:dirty` | `{ ok }` — 0 or 1, whenever it changes; see below |
 
-The pictures, the clipboard, the Google Images fetch, a video's title, the dirty count and
-the flush keep their `sb:diagrams:*` names: they are internal, and the bundle mirrors them.
+The pictures, the files, the clipboard, the Google Images fetch, a video's title, the
+dirty count and the flush keep their `sb:diagrams:*` names: they are internal, and the
+bundle mirrors them. Every one answers `{ ok:false, error }` with a sentence rather than
+throwing; a spreadsheet's sentences are shown beside its panel's Open in … button.
 
 **Folders are the user's.** Any number, made, renamed and deleted on the Whiteboards
 screen (R15). A folder's name is one line of 1–60 characters, unique whatever its case,
@@ -1358,7 +1514,9 @@ R15 right after the terminal, and while the canvas has the keyboard — not a bo
 text field, which gets the document's fallback like any field — Undo and Redo are the
 editor's, an image Paste fetches the clipboard's picture and adds it, and a text Paste is
 the boxes ⌘C copied or, failing that, a YouTube link's video (`pasteBoxes(text) ||
-pasteVideo(text)`). A link pasted into a box's own text field is that field's words.
+pasteVideo(text)`), or failing both, the files Finder copied — a PDF, a spreadsheet or a
+picture, as if dropped (`clipboardFiles`, below). A link pasted into a box's own text field
+is that field's words.
 While a video's player has the keyboard the IFRAME is the active element, and the
 bundle's `editAction`, app.js's document fallback and ⌘A decline for it as for a WEBVIEW
 (below): ⌘Z, ⌘C, ⌘V and ⌘A pressed in the player are not the canvas's.
@@ -2383,7 +2541,10 @@ touching `updatedAt` or telling any screen, dropped by `duplicate()` and by a re
 `dismissNotice()`, `noteWorkspace(wsId, {last})`, `workspaceChoices()`;
 `createDocument`, `getDocument`, `saveDocument`; `saveImage(bytes, type)`,
 `imagePath(name)` (synchronous, for the `sbimg` handler), `getImagePath(src)` and
-`IMAGE_TYPES`; `migrate()`, `settle()` and `onChange(fn)` (→ an unsubscribe; `index.js`
+`IMAGE_TYPES`; `saveFile(bytes, ext)`, `parseFileSrc(src)`, `filePath(name)`
+(synchronous, for the `sbfile` handler), `getFilePath(src)`, `readPastedFiles(paths)`,
+`FILE_EXTENSIONS` and `FILE_MAX_BYTES` — the PDFs and spreadsheets in `files/`, kept by
+content and read-only (§4.17); `migrate()`, `settle()` and `onChange(fn)` (→ an unsubscribe; `index.js`
 forwards each change as `sb:evt:wbChanged`); and `rootDir()` / `legacyKeyFor()` for the
 tests. The admin's server actions as files: the same answers, the same name rule (unique
 within a folder here), the same "archiving does not touch updatedAt". It checks only
@@ -2476,6 +2637,57 @@ guards `index.js` calls) and `videoInfo(id)` (the oEmbed title). The id rule mir
 `lib/diagrams/youtube.ts`, since main cannot require TypeScript; the pure helpers load no
 Electron, so `scripts/test-videos.js` (`npm run test:diagrams`) runs them under plain node
 and checks the two id rules agree. Nothing throws across IPC.
+
+### M15 `sheets.js`, `sheet-worker.js`
+A whiteboard's spreadsheets, read for their panel (§4.17): `info(file, ext)`,
+`rows(file, ext, sheet, start, count)` and `find(file, ext, sheet, query, limit)`, which
+`index.js`'s `sb:diagrams:sheet*` handlers call with the kept file's path (a PDF refused
+before), and the pure `parseDelimited(text, delim, limits)`, `decodeText(buf)`,
+`cellText(cell)`, `csvDelimiter(text)` and `readBytes(bytes, ext)`. A file is read once,
+in a `worker_threads` Worker (`sheet-worker.js`, which calls `readBook` and posts the
+result) with `resourceLimits.maxOldGenerationSizeMb` 1536 and 60 s, then terminated: a
+worker out of memory answers "That spreadsheet is too big to show here", one out of time
+"That spreadsheet took too long to read" — measured in Electron's main process, an
+out-of-memory worker is answered within ~26 ms and main carries on. The heap cap doesn't
+count Buffers, and SheetJS unpacks every part of a zip into one before it reads a cell —
+measured, a 1.8 MB .xlsx of three parts of zeros took the app past 1.6 GB — so
+`readBytes` first adds up what a zip unpacks to the way SheetJS unpacks it (`zipProblem`:
+every directory entry's local size, overridden by a ZIP64 field there and then, when there
+are extra fields there at all, the directory's; a deflated part written as a stream, sized nowhere, unpacked natively to
+measure it, as a stream a megabyte at a time, never past what is left) and refuses more than 1 GB as too big, and a
+directory that doesn't hold together as unreadable. Behind that, main polls its own
+resident memory every 250 ms while a worker runs and stops one that grows it by 2 GB
+(too big), and one worker runs at a time, the rest queued in order. The worker is a plain
+`__dirname` path, which works because the app is packaged without an asar. What comes back
+is packed: each sheet's cells as one string, with Uint32Array offsets for the cells and the
+rows that are transferred, not copied, so main never deserialises millions of small
+strings. The last three workbooks are kept (LRU, keyed by file — content-addressed, so
+never stale) and callers asking at once share one read; a failure isn't kept. Excel's
+formats, OpenDocument and Numbers go through SheetJS CE 0.20.3 (`xlsx`, from SheetJS's
+own CDN — the npm registry's is frozen at 0.18.5 with advisories; loaded in the worker
+only; the packager keeps only `xlsx.js` and `dist/cpexcel.js`): dense, `sheetRows` one
+past the limit, no formulas, HTML, styles or dates, each cell's text as Excel shows it
+(`cell.w`, else its value). A zip with no end-of-archive record is refused at once ("That
+spreadsheet can't be read here"): SheetJS loops for good on a zip header followed by junk.
+A password-protected workbook (for xlsx, xlsm and xlsb an OLE file holding the encrypted
+zip) says so. CSV and TSV are parsed here — RFC 4180 (quotes,
+doubled quotes, CRLF, CR or LF; `;` when a CSV's first line has more of them than commas
+outside quotes), decoded as UTF-8 (BOM dropped), UTF-16 by its BOM, or Windows-1252 when
+not valid UTF-8. Limits, past which a sheet says `truncated`: 100,000 rows a sheet,
+2,000,000 cells and 64M characters a workbook (a few thousand long shared strings could
+otherwise fill two million cells from a small file) — a sheet after the budget is spent
+comes back with no rows, `truncated`. A cell stops at 32,767 characters, which says
+`clipped` instead, every row being there. Rows and
+columns keep their places (a sheet starting at C5 starts with empty rows and columns), each
+row ends at its last cell with text and a sheet at its last row with any. Arguments are
+checked — integers in range, a query of 1–200 characters — and nothing throws: every
+answer is `{ ok, data }` or `{ ok:false, error }`, a sentence. `scripts/test-sheets.js`
+(`npm run test:diagrams`) runs it under plain node: the parser's edge cases, the decoding,
+xlsx, xlsb, xls, ods and Numbers workbooks built with SheetJS at test time, paging, find,
+the limits, a damaged file, a zip bomb (declared and streamed parts, ZIP64 sizes), a
+workbook written as a stream, a password-locked OOXML file, a worker out of memory, of
+time or past the app's memory, one reader at a time, the cache, and that main itself never
+loads SheetJS.
 
 ---
 

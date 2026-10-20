@@ -29,6 +29,11 @@
 // (carryOverFlowLayout), and a spec that would drop boxes is refused unless
 // --allow-removals says that is the point — a spec written from memory rather than
 // from `show` would otherwise wipe the board.
+//
+// A PDF or a spreadsheet on a board is a file the app keeps (whiteboards/files/, named
+// by its content and shared by every board), which only the app's editor adds — from
+// a file dropped, pasted or picked. Here a "pdf" or "sheet" box is checked and kept as
+// any other is, and its "file" must name one of those, as `show` gives it.
 
 const fs = require('fs');
 const path = require('path');
@@ -47,7 +52,9 @@ const USAGE = `Usage:
   whiteboard.js new-document <file.md|->             a Markdown document a "document" box can show
 
 <board> is an id or a name; --folder picks between boards of one name.
---here keeps the boards whose workspace is the one this directory is in.`;
+--here keeps the boards whose workspace is the one this directory is in.
+A "pdf" or "sheet" box shows a file the app keeps, which only the app takes in (drop,
+paste or pick one onto a board there); a spec keeps such a box as \`show\` gives it.`;
 
 class Refusal extends Error {}
 
@@ -64,7 +71,7 @@ function editorLib() {
         'export { parseDiagramSpec } from "./validate"',
         'export { layoutDiagram } from "./layout"',
         'export { carryOverFlowLayout } from "./flow-editor"',
-        'export { VIDEO_LABEL } from "./types"',
+        'export { VIDEO_LABEL, PDF_LABEL, SHEET_LABEL } from "./types"',
       ].join('\n'),
       resolveDir: dir,
       loader: 'ts',
@@ -224,6 +231,9 @@ function describeNode(node) {
   const quoted = label.length > 40 ? label.slice(0, 39) + '…' : label;
   // A video's label is its title, or the words every untitled video has.
   if (node.shape === 'video') return `${node.id} (a YouTube video${label && label !== editorLib().VIDEO_LABEL ? ` "${quoted}"` : ''})`;
+  // A PDF's and a spreadsheet's is its file's name, or the word every unnamed one has.
+  if (node.shape === 'pdf') return `${node.id} (a PDF${label && label !== editorLib().PDF_LABEL ? ` "${quoted}"` : ''})`;
+  if (node.shape === 'sheet') return `${node.id} (a spreadsheet${label && label !== editorLib().SHEET_LABEL ? ` "${quoted}"` : ''})`;
   return `${node.id}${label ? ` ("${quoted}")` : ''}`;
 }
 

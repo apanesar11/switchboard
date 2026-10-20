@@ -25,6 +25,8 @@ import {
   FLOW_BOX_TEXT_MAX_LENGTH,
   FLOW_SIDES,
   FLOW_TERMINAL_DEFAULT_SIZE,
+  PDF_LABEL,
+  SHEET_LABEL,
   TELEPORT_LABEL,
   TERMINAL_BASE_FONT,
   TERMINAL_FONT_MAX,
@@ -113,17 +115,25 @@ export function flowSpecFromCanvas(
   const kept = new Set(nodes.filter((node) => !blank.has(node.id)).map((node) => node.id))
 
   const specNodes: FlowNodeSpec[] = nodes.filter((node) => !blank.has(node.id)).map((node) => {
-    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, answeredIn, detached, workspace, font, minimized, teleportTo, videoId, videoStart } =
+    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, answeredIn, detached, workspace, font, minimized, teleportTo, videoId, videoStart, file } =
       node.data
     // Switchboard: a pinned terminal is labelled with its workspace, as the
-    // validator labels it — a teleport "Teleport", and a video with no title
-    // "YouTube video".
+    // validator labels it — a teleport "Teleport", a video with no title
+    // "YouTube video", and a PDF or a spreadsheet with no name "PDF" or "Spreadsheet".
     const terminal = shape === "terminal" ? (workspace ?? label) : undefined
     const cleanLabel =
       terminal ??
       (shape === "teleport" ? TELEPORT_LABEL : undefined) ??
       cleanBoxText(label) ??
-      (shape === "note" ? "" : shape === "video" ? VIDEO_LABEL : UNTITLED_FLOW_LABEL)
+      (shape === "note"
+        ? ""
+        : shape === "video"
+        ? VIDEO_LABEL
+        : shape === "pdf"
+        ? PDF_LABEL
+        : shape === "sheet"
+        ? SHEET_LABEL
+        : UNTITLED_FLOW_LABEL)
     const cleanDetail = cleanBoxText(detail)
     return {
       id: node.id,
@@ -147,7 +157,8 @@ export function flowSpecFromCanvas(
       answeredIn: ai === true && answeredIn ? answeredIn : undefined,
       detached: detached === true ? true : undefined,
       position: { x: pixel(node.position.x), y: pixel(node.position.y) },
-      src: shape === "image" ? src : undefined,
+      // Switchboard: and a PDF's picture of its first page, when it has one.
+      src: shape === "image" || (shape === "pdf" && src) ? src : undefined,
       documentId: shape === "document" ? documentId : undefined,
       size:
         isFlowSizedShape(shape) && size
@@ -168,6 +179,8 @@ export function flowSpecFromCanvas(
         shape === "video" && videoStart !== undefined && Number.isInteger(videoStart) && videoStart > 0
           ? videoStart
           : undefined,
+      // Switchboard: the file a PDF or a spreadsheet shows.
+      file: shape === "pdf" || shape === "sheet" ? file : undefined,
     }
   })
 
@@ -790,9 +803,14 @@ export function tidyFlowTree(
   { pinImages = false }: { pinImages?: boolean } = {},
 ): Map<string, FlowPoint> {
   const unknown = new Set(revealed)
-  // A video is placed as deliberately as a picture is, and stays put as one does.
+  // A video is placed as deliberately as a picture is, and stays put as one does —
+  // and so is a PDF, dropped where it was wanted with its cover showing.
   const pinned = pinImages
-    ? new Set(boxes.filter((box) => box.shape === "image" || box.shape === "video").map((box) => box.id))
+    ? new Set(
+        boxes
+          .filter((box) => box.shape === "image" || box.shape === "video" || box.shape === "pdf")
+          .map((box) => box.id),
+      )
     : new Set<string>()
   const after = tidyTrees(
     boxes,
@@ -1056,6 +1074,12 @@ export function carryOverFlowLayout(
       // Switchboard: a video's start is not carried. Like its id, it is what the
       // video is, not how the board was arranged: a spec that leaves it out plays
       // from the beginning.
+      // Switchboard: nor is a PDF's or a spreadsheet's file — but a PDF still showing
+      // the same file keeps the picture of its cover. Only the app makes one, as the
+      // file is dropped, so a spec that leaves it out has lost it, not taken it away.
+      src:
+        node.src ??
+        (node.shape === "pdf" && old.shape === "pdf" && node.file === old.file ? old.src : undefined),
     }
   })
   const edges = next.edges.map((edge) => {

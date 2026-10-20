@@ -6,7 +6,7 @@
 // the work to git.js / github.js / runner.js, then shape the result into the
 // exact payload §4 promises.  Nothing here throws across IPC.
 
-const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeTheme, net, protocol, safeStorage, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeImage, nativeTheme, net, protocol, safeStorage, session, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -45,6 +45,9 @@ const images = require('./images.js');
 // YouTube videos on a whiteboard (§4.17): the player's Referer and permissions, its popups
 // and navigations, and the title asked of YouTube.
 const videos = require('./videos.js');
+// PDFs and spreadsheets on a whiteboard (§4.17): a spreadsheet's sheets, rows and search,
+// read in a worker thread so a huge one can't stall this process.
+const sheets = require('./sheets.js');
 const answer = require('./answer.js');
 const { Publisher } = require('./publisher.js');
 const publisher = new Publisher({
@@ -248,6 +251,38 @@ function openExternal(url) {
 }
 
 /**
+ * Whether `url` is a PDF a whiteboard kept — sbfile://file/<name>.pdf, with any #page or
+ * view fragment the viewer adds — and nothing else: no query, no other folder, no other
+ * kind of file.
+ */
+function isPdfAddress(url) {
+  const parsed = whiteboards.parseFileSrc(String(url || '').split('#')[0]);
+  return !!parsed && parsed.kind === 'pdf';
+}
+
+/** Whether a frame is showing a kept PDF now. A frame torn down mid-question isn't. */
+function showsAPdf(frame) {
+  try {
+    return !!frame && isPdfAddress(frame.url);
+  } catch (_) {
+    return false;
+  }
+}
+
+/** One link out of a PDF a second, however many it asks for: allow() says whether this one goes. */
+function pdfLinkGate(now = Date.now) {
+  let last = -Infinity;
+  return {
+    allow() {
+      const at = now();
+      const quiet = at - last >= 1000;
+      last = at;
+      return quiet;
+    },
+  };
+}
+
+/**
  * "You have unsaved changes in N files" — true when the user chose Discard Changes.
  * The one native dialog the app puts up on its own: a bar in the page cannot hold a
  * close or a quit open while it waits for an answer, and a sheet on the window is
@@ -367,11 +402,21 @@ function createWindow() {
     event.preventDefault();
     openExternal(url);
   });
-  // The page's own iframes are video players, and each stays on the player.
+  // The page's own iframes are video players, and each stays on the player — and a PDF
+  // panel's viewer, which may load its PDF (any page of it) and nothing else. A link
+  // clicked in a PDF takes the window itself to its address (measured: no initiator),
+  // which will-navigate above sends to the browser; should one take the viewer's frame
+  // instead, it goes to the browser too, one link a second at most.
+  const pdfLinks = pdfLinkGate();
   mainWindow.webContents.on('will-frame-navigate', event => {
     if (!videos.leavesThePlayer(event, mainWindow.webContents)) return;
+    if (isPdfAddress(event.url)) return;
     event.preventDefault();
-    console.error('[switchboard] kept a video player from leaving for', String(event.url || '').slice(0, 120));
+    if (showsAPdf(event.frame) && /^https?:\/\//i.test(String(event.url)) && pdfLinks.allow()) {
+      openExternal(event.url);
+      return;
+    }
+    console.error('[switchboard] kept a frame from leaving for', String(event.url || '').slice(0, 120));
   });
 
   // The Google Images panel (§4.17) is the one <webview> this page may have: the panel's
@@ -1416,6 +1461,118 @@ handle('sb:diagrams:fetchImage', (url, referrer) => images.fetchImage(url, refer
 // The id alone crosses: videos.js builds the address.
 handle('sb:diagrams:videoInfo', id => videos.videoInfo(id));
 
+// PDFs and spreadsheets on a whiteboard. A file dropped, pasted or picked comes as its
+// bytes and what its name says it is; whiteboards.js keeps it — once, by content,
+// read-only — and answers { ok, data: { src, kind, cover? } }, a PDF's cover being a
+// picture of its first page kept as any picture is. The rest take the node's
+// sbfile://file/<name> address, never a path.
+handle('sb:diagrams:saveFile', async (bytes, ext) => {
+  const saved = await whiteboards.saveFile(bytes, ext);
+  if (!saved.ok) return saved;
+  const data = { src: saved.src, kind: saved.kind };
+  if (saved.kind === 'pdf') {
+    const cover = await pdfCover(saved.file);
+    if (cover) data.cover = cover;
+  }
+  return { ok: true, data };
+});
+handle('sb:diagrams:getFilePath', src => whiteboards.getFilePath(src));
+// The files Finder copied, for Edit ▸ Paste over a canvas once the clipboard's words were
+// neither boxes nor a video (a copied file's words are only its name): { ok, data: [{ name,
+// type, bytes } | { name, error }] }, which the bundle puts on as it would the same files
+// dropped. Read off the clipboard by osascript (drops.js) — this clipboard has no files.
+handle('sb:diagrams:clipboardFiles', async () => {
+  const paths = await drops.readCopiedFiles();
+  return { ok: true, data: await whiteboards.readPastedFiles(paths) };
+});
+// "Open in Preview": the Mac's own app for the file, on the board's read-only copy.
+handle('sb:diagrams:openFile', async src => {
+  const found = await whiteboards.getFilePath(src);
+  if (!found.ok) return found;
+  // A smoke run says what it would have opened: it runs on the user's Mac, and an app
+  // springing open in front of them is not part of a test.
+  if (process.env.SB_SMOKE) { console.log('SMOKE openFile:', JSON.stringify(found.data)); return { ok: true }; }
+  const problem = await shell.openPath(found.data);
+  return problem ? { ok: false, error: `Couldn't open it: ${problem}` } : { ok: true };
+});
+// A spreadsheet's panel: its sheets, a page of rows as the grid scrolls, and a search.
+// sheets.js reads the file once, in a worker, and answers from what it read.
+handle('sb:diagrams:sheetInfo', async src => {
+  const found = await sheetFile(src);
+  return found.ok ? sheets.info(found.file, found.ext) : found;
+});
+handle('sb:diagrams:sheetRows', async (src, sheet, start, count) => {
+  const found = await sheetFile(src);
+  return found.ok ? sheets.rows(found.file, found.ext, sheet, start, count) : found;
+});
+handle('sb:diagrams:sheetFind', async (src, sheet, query, limit) => {
+  const found = await sheetFile(src);
+  return found.ok ? sheets.find(found.file, found.ext, sheet, query, limit) : found;
+});
+
+/** The kept spreadsheet a sheet node's address names: { ok, file, ext } — never a PDF. */
+async function sheetFile(src) {
+  const parsed = whiteboards.parseFileSrc(src);
+  if (!parsed || parsed.kind !== 'sheet') return { ok: false, error: "That isn't a spreadsheet" };
+  const found = await whiteboards.getFilePath(src);
+  return found.ok ? { ok: true, file: found.data, ext: parsed.ext } : found;
+}
+
+// A PDF's cover: Quick Look's picture of its first page (out of process; the page's shape
+// kept), at most COVER_SIZE across and down in points — more pixels on a Retina Mac.
+// Quick Look can stall on a strange file, so it gets COVER_TIMEOUT_MS. And it doesn't
+// fail on a PDF it can't draw — a damaged or cut-short one answers the Finder's icon
+// for a PDF, which would be kept as the "first page" — so the picture is kept only when
+// PDFKit, asked at the same time, opens the file and finds a page (a locked PDF does;
+// its cover is Quick Look's padlock page). Any failure — that, an empty picture, a stall —
+// leaves the PDF without a cover, drawn as a plain page.
+const COVER_SIZE = 600;
+const COVER_TIMEOUT_MS = 15 * 1000;
+// PDFKit's page count for the file at argv[0], "0" when it can't open it — JavaScript for
+// Automation, so it runs out of process as Quick Look does, and needs nothing installed.
+const PDF_PAGES_JXA = 'function run(a){ObjC.import("Quartz");var d=$.PDFDocument.alloc.initWithURL($.NSURL.fileURLWithPath(a[0]));return d.isNil()?"0":String(d.pageCount)}';
+
+/** Whether PDFKit opens the PDF at `file` and finds a page in it; false on any failure. */
+function pdfHasPages(file) {
+  return new Promise(resolve => {
+    execFile('/usr/bin/osascript', ['-l', 'JavaScript', '-e', PDF_PAGES_JXA, file], { timeout: COVER_TIMEOUT_MS }, (err, stdout) => {
+      resolve(!err && Number(String(stdout).trim()) > 0);
+    });
+  });
+}
+
+async function pdfCover(file) {
+  let timer = null;
+  try {
+    const [opens, image] = await Promise.all([
+      pdfHasPages(file),
+      Promise.race([
+        nativeImage.createThumbnailFromPath(file, { width: COVER_SIZE, height: COVER_SIZE }),
+        new Promise(resolve => { timer = setTimeout(() => resolve(null), COVER_TIMEOUT_MS); }),
+      ]),
+    ]);
+    if (!opens || !image || image.isEmpty()) return null;
+    const png = image.toPNG();
+    const size = pngSize(png);
+    if (!size) return null;
+    const saved = await whiteboards.saveImage(png, 'image/png');
+    return saved.ok ? { src: saved.src, width: size.width, height: size.height } : null;
+  } catch (err) {
+    console.error('[switchboard] no cover for a PDF:', String((err && err.message) || err).slice(0, 200));
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** A PNG's size in pixels, from its header — what the canvas sizes a PDF's node by. */
+function pngSize(png) {
+  if (!Buffer.isBuffer(png) || png.length < 24 || png.toString('latin1', 12, 16) !== 'IHDR') return null;
+  const width = png.readUInt32BE(16);
+  const height = png.readUInt32BE(20);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
 // 0 or 1 — see `diagramDirty`. A count that rises during a quit takes back a
 // Discard given for the smaller one.
 handle('sb:diagrams:dirty', count => {
@@ -1732,8 +1889,13 @@ async function stopEverything() {
 // standard, secure scheme so the page can show it like any image; registered before
 // `ready`, as Electron requires, and served from the images folder and nowhere else —
 // whiteboards.imagePath() also finds a picture the migration left in the old tree.
+// sbfile://file/<file> — a PDF or a spreadsheet on a whiteboard, kept beside the pictures.
+// Only a PDF is ever served, for its panel's <iframe>, and streamed: Chromium's own viewer
+// reads it as it comes. A spreadsheet is read over IPC (sheets.js), never loaded as a page.
+// Electron takes this list once, so both schemes are in the one call.
 protocol.registerSchemesAsPrivileged([
   { scheme: 'sbimg', privileges: { standard: true, secure: true, supportFetchAPI: true } },
+  { scheme: 'sbfile', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
 ]);
 
 function serveDiagramImage(request) {
@@ -1744,6 +1906,23 @@ function serveDiagramImage(request) {
   } catch (_) { file = null; }
   if (!file) return new Response('not found', { status: 404 });
   return net.fetch(pathToFileURL(file).toString()).catch(() => new Response('not found', { status: 404 }));
+}
+
+// A PDF as a PDF and nothing else: its type stated and not to be guessed at, shown in
+// place rather than downloaded.
+const PDF_HEADERS = { 'Content-Type': 'application/pdf', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline' };
+
+function serveDiagramFile(request) {
+  let file = null;
+  try {
+    const url = new URL(request.url);
+    const name = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
+    if (url.host === 'file' && name.endsWith('.pdf')) file = whiteboards.filePath(name);
+  } catch (_) { file = null; }
+  if (!file) return new Response('not found', { status: 404 });
+  return net.fetch(pathToFileURL(file).toString()).then(
+    res => (res.ok ? new Response(res.body, { headers: PDF_HEADERS }) : new Response('not found', { status: 404 })),
+    () => new Response('not found', { status: 404 }));
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -1786,6 +1965,7 @@ if (!app.requestSingleInstanceLock()) {
     });
     buildMenu();
     protocol.handle('sbimg', serveDiagramImage);
+    protocol.handle('sbfile', serveDiagramFile);
     // Before the window, so the panel's first page already goes out as Chrome would ask
     // for it, with no permission to grant and nowhere to download to.
     images.setupImagesSession();

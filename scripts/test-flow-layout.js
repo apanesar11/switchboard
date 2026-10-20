@@ -82,6 +82,12 @@ const {
   isFlowVideoPortrait,
   flowVideoMinWidth,
   flowVideoSizeForWidth,
+  PDF_LABEL,
+  SHEET_LABEL,
+  PDF_BAR,
+  FLOW_PDF_DEFAULT_SIZE,
+  FLOW_SHEET_SIZE,
+  FLOW_FILE_SRC_MAX_LENGTH,
 } = require(typesFile);
 
 after(() => fs.rmSync(temp, { recursive: true, force: true }));
@@ -1000,4 +1006,180 @@ test('folding a branch leaves a video placed beside it where it is, as it leaves
   // Unpinned, the same video would have been moved out of the branch's way.
   const loose = apply(showing, tidyFlowTree(showing, edges, ['q']));
   assert.notDeepEqual({ x: loose.get('talk').x, y: loose.get('talk').y }, { x: video.x, y: video.y });
+});
+
+// ── Switchboard: PDFs and spreadsheets ──
+
+// Made-up file names, 32 hex characters as main's are (AGENTS.md).
+const HASH_1 = '0123456789abcdef0123456789abcdef';
+const HASH_2 = 'fedcba9876543210fedcba9876543210';
+const PDF_FILE = `sbfile://file/${HASH_1}.pdf`;
+const SHEET_FILE = `sbfile://file/${HASH_2}.xlsx`;
+const COVER = `sbimg://image/${HASH_1}.png`;
+
+test('a PDF and a spreadsheet keep their file, a PDF its cover and its size, each labelled by its name or else its kind', () => {
+  const parsed = parseDiagramSpec({ kind: 'flow', nodes: [
+    { id: 'report', label: 'Example quarterly report', shape: 'pdf', file: PDF_FILE, src: COVER, size: { width: 240, height: 340.6 } },
+    { id: 'scan', label: '   ', shape: 'pdf', file: ` ${PDF_FILE} ` },
+    { id: 'figures', label: 'Example figures', shape: 'sheet', file: SHEET_FILE, src: COVER, size: { width: 400, height: 300 } },
+    { id: 'export', shape: 'sheet', file: `sbfile://file/${HASH_2}.csv` },
+    { id: 'plain', label: 'A box', file: PDF_FILE, src: COVER },
+    { id: 'picture', label: 'A picture', shape: 'image', src: COVER, file: PDF_FILE },
+  ], edges: [] });
+  assert.equal(parsed.ok, true, parsed.error);
+  const by = new Map(parsed.value.nodes.map(n => [n.id, n]));
+  const report = by.get('report');
+  assert.deepEqual([report.label, report.file, report.src, report.size], ['Example quarterly report', PDF_FILE, COVER, { width: 240, height: 341 }]);
+  // A PDF with no name says "PDF"; one with no cover has none, and its file is trimmed.
+  assert.deepEqual([by.get('scan').label, by.get('scan').file, by.get('scan').src, by.get('scan').size], [PDF_LABEL, PDF_FILE, undefined, undefined]);
+  // A spreadsheet has neither a picture nor a size of its own: its card is the one size.
+  const figures = by.get('figures');
+  assert.deepEqual([figures.label, figures.file, figures.src, figures.size], ['Example figures', SHEET_FILE, undefined, undefined]);
+  assert.deepEqual([by.get('export').label, by.get('export').file], [SHEET_LABEL, `sbfile://file/${HASH_2}.csv`]);
+  // Only a PDF or a spreadsheet shows a file.
+  assert.deepEqual([by.get('plain').file, by.get('plain').src], [undefined, undefined]);
+  assert.deepEqual([by.get('picture').file, by.get('picture').src], [undefined, COVER]);
+  // Every kind of spreadsheet main keeps is one.
+  for (const ext of ['xlsx', 'xlsm', 'xlsb', 'xls', 'ods', 'numbers', 'csv', 'tsv']) {
+    const sheet = parseDiagramSpec({ kind: 'flow', nodes: [{ id: 's', shape: 'sheet', file: `sbfile://file/${HASH_2}.${ext}` }], edges: [] });
+    assert.equal(sheet.ok, true, `${ext}: ${sheet.error}`);
+  }
+});
+
+test('a PDF or a spreadsheet with no file, a file of the other kind, or an address not ours, fails the board, naming the node', () => {
+  const board = (shape, extra) => parseDiagramSpec({ kind: 'flow', nodes: [{ id: 'a', label: 'A' }, { id: 'f', shape, ...extra }], edges: [] });
+  assert.deepEqual(board('pdf', {}), { ok: false, error: 'Node 2: a "pdf" node needs "file", the sbfile:// address of a PDF kept on this Mac' });
+  assert.deepEqual(board('sheet', {}), { ok: false, error: 'Node 2: a "sheet" node needs "file", the sbfile:// address of a spreadsheet kept on this Mac' });
+  assert.deepEqual(board('pdf', { file: '' }), board('pdf', {}));
+  assert.deepEqual(board('pdf', { file: null }), board('pdf', {}));
+  assert.deepEqual(board('sheet', { file: 42 }), { ok: false, error: 'Node 2: "file" must be text' });
+  // Each names a file of its own kind.
+  assert.deepEqual(board('pdf', { file: SHEET_FILE }), { ok: false, error: 'Node 2: "file" must name a PDF' });
+  assert.deepEqual(board('sheet', { file: PDF_FILE }), { ok: false, error: 'Node 2: "file" must name a spreadsheet' });
+  // Only an address main gave a file it keeps: never a URL, a path, or a name of another kind.
+  for (const file of [
+    'https://example.com/fictional.pdf',
+    '/Users/example/Documents/fictional.pdf',
+    `sbfile://file/${HASH_1}.docx`,
+    `sbfile://file/${HASH_1.toUpperCase()}.pdf`,
+    `sbfile://file/${HASH_1.slice(1)}.pdf`,
+    `sbfile://other/${HASH_1}.pdf`,
+    `sbfile://file/../${HASH_1}.pdf`,
+    `sbfile://file/${HASH_1}.pdf?page=2`,
+    `sbfile://file/${HASH_1}.PDF`,
+  ]) {
+    assert.deepEqual(board('pdf', { file }), { ok: false, error: 'Node 2: "file" must be the sbfile://file/<name> address the app gave a PDF it keeps' }, file);
+  }
+  assert.deepEqual(board('sheet', { file: 'https://example.com/fictional.xlsx' }), { ok: false, error: 'Node 2: "file" must be the sbfile://file/<name> address the app gave a spreadsheet it keeps' });
+  const long = `sbfile://file/${'a'.repeat(FLOW_FILE_SRC_MAX_LENGTH)}.pdf`;
+  assert.deepEqual(board('pdf', { file: long }), { ok: false, error: `Node 2: "file" must be ${FLOW_FILE_SRC_MAX_LENGTH} characters or fewer` });
+  // A cover, when there is one, is a picture's address as an image's is.
+  assert.deepEqual(board('pdf', { file: PDF_FILE, src: 'http://example.com/fictional.png' }), { ok: false, error: 'Node 2: "src" must start with https://' });
+  assert.deepEqual(board('pdf', { file: PDF_FILE, src: 'a cover' }), { ok: false, error: 'Node 2: "src" must be a full URL starting with https://' });
+  assert.equal(board('pdf', { file: PDF_FILE, src: 'https://example.com/fictional.png' }).ok, true);
+});
+
+test('a PDF and a spreadsheet are saved with their file, a PDF with its cover and size, as the validator reads them back', () => {
+  const data = (extra) => ({ label: '', shape: 'rounded', tone: 'default', dashed: false, textSize: 'medium', align: 'center', bold: false, italic: false, ...extra });
+  const node = (id, extra) => ({ id, position: { x: 0, y: 0 }, data: data(extra) });
+  const spec = flowSpecFromCanvas({}, [
+    node('report', { label: 'Example quarterly report', shape: 'pdf', file: PDF_FILE, src: COVER, size: { width: 240, height: 340.6 } }),
+    node('scan', { shape: 'pdf', file: PDF_FILE, src: '' }),
+    node('figures', { label: 'Example figures', shape: 'sheet', file: SHEET_FILE, src: COVER, size: FLOW_SHEET_SIZE }),
+    node('unnamed', { shape: 'sheet', file: SHEET_FILE }),
+    node('box', { label: 'A box', file: PDF_FILE, src: COVER }),
+  ], []);
+  const by = new Map(spec.nodes.map(n => [n.id, n]));
+  const report = by.get('report');
+  assert.deepEqual([report.label, report.shape, report.file, report.src, report.size], ['Example quarterly report', 'pdf', PDF_FILE, COVER, { width: 240, height: 341 }]);
+  // Unnamed, a PDF is saved as "PDF" and a spreadsheet as "Spreadsheet", never "Untitled".
+  assert.deepEqual([by.get('scan').label, by.get('scan').src], [PDF_LABEL, undefined]);
+  assert.deepEqual([by.get('figures').src, by.get('figures').size], [undefined, undefined]);
+  assert.deepEqual([by.get('unnamed').label, by.get('unnamed').file], [SHEET_LABEL, SHEET_FILE]);
+  assert.deepEqual([by.get('box').file, by.get('box').src], [undefined, undefined]);
+  // What is saved is what the validator accepts, unchanged.
+  const again = parseDiagramSpec(JSON.parse(JSON.stringify(spec)));
+  assert.equal(again.ok, true, again.error);
+  assert.deepEqual(JSON.parse(JSON.stringify(again.value)), JSON.parse(JSON.stringify(spec)));
+});
+
+test('a PDF is drawn the size it was given, else a portrait page over its bar; a spreadsheet as a document\'s card', () => {
+  assert.deepEqual(FLOW_PDF_DEFAULT_SIZE, { width: 240, height: 311 + PDF_BAR });
+  assert.deepEqual(FLOW_PDF_DEFAULT_SIZE, { width: 240, height: 341 });
+  assert.deepEqual(FLOW_SHEET_SIZE, { width: 240, height: 76 });
+  assert.deepEqual(flowNodeSize({ shape: 'pdf' }), FLOW_PDF_DEFAULT_SIZE);
+  assert.deepEqual(flowNodeSize({ shape: 'pdf', label: 'A name far too long for any one line of a box '.repeat(4) }), FLOW_PDF_DEFAULT_SIZE, 'its name never sizes it');
+  assert.deepEqual(flowNodeSize({ shape: 'pdf', size: { width: 400, height: 180 } }), { width: 400, height: 180 });
+  assert.deepEqual(flowNodeSize({ shape: 'sheet' }), FLOW_SHEET_SIZE);
+  assert.deepEqual(flowNodeSize({ shape: 'sheet', size: { width: 600, height: 400 } }), FLOW_SHEET_SIZE, 'a spreadsheet is never resized');
+  assert.deepEqual(flowNodeSize({ shape: 'sheet' }), flowNodeSize({ shape: 'document' }));
+});
+
+test('a PDF and a spreadsheet laid out on the canvas and read back off it are the same — what undo restores', () => {
+  const parsed = parseDiagramSpec({ kind: 'flow', nodes: [
+    { id: 'report', label: 'Example quarterly report', shape: 'pdf', file: PDF_FILE, src: COVER, position: { x: 0, y: 0 }, size: { width: 240, height: 400 } },
+    { id: 'scan', shape: 'pdf', file: PDF_FILE, position: { x: 400, y: 0 } },
+    { id: 'figures', label: 'Example figures', shape: 'sheet', file: SHEET_FILE, position: { x: 800, y: 0 } },
+  ], edges: [{ from: 'report', to: 'figures' }] });
+  assert.equal(parsed.ok, true, parsed.error);
+  const canvas = layoutDiagram(parsed.value);
+  const at = new Map(canvas.nodes.map(n => [n.id, n]));
+  assert.deepEqual([at.get('report').width, at.get('report').height, at.get('report').data.file, at.get('report').data.src], [240, 400, PDF_FILE, COVER]);
+  assert.deepEqual([at.get('scan').width, at.get('scan').height], [FLOW_PDF_DEFAULT_SIZE.width, FLOW_PDF_DEFAULT_SIZE.height]);
+  assert.deepEqual([at.get('figures').width, at.get('figures').height, at.get('figures').data.file], [240, 76, SHEET_FILE]);
+  const back = flowSpecFromCanvas({}, canvas.nodes, canvas.edges);
+  assert.deepEqual(JSON.parse(JSON.stringify(back.nodes)), JSON.parse(JSON.stringify(parsed.value.nodes)));
+});
+
+test('a board rewritten from a terminal keeps a PDF\'s place, size and cover while it shows the same file', () => {
+  const sized = { width: 240, height: 400 };
+  const before = { kind: 'flow', nodes: [
+    { id: 'report', label: 'Example quarterly report', shape: 'pdf', file: PDF_FILE, src: COVER, position: { x: 10, y: 20 }, size: sized },
+    { id: 'swapped', label: 'Example report', shape: 'pdf', file: PDF_FILE, src: COVER, size: sized },
+    { id: 'was-pdf', label: 'Example report', shape: 'pdf', file: PDF_FILE, src: COVER, size: sized },
+    { id: 'figures', label: 'Example figures', shape: 'sheet', file: SHEET_FILE, position: { x: 400, y: 20 } },
+  ], edges: [] };
+  const next = { kind: 'flow', nodes: [
+    { id: 'report', label: 'Example quarterly report', shape: 'pdf', file: PDF_FILE },
+    { id: 'swapped', label: 'Another example report', shape: 'pdf', file: `sbfile://file/${HASH_2}.pdf` },
+    { id: 'was-pdf', label: 'Now a box' },
+    { id: 'figures', label: 'Example figures', shape: 'sheet', file: SHEET_FILE },
+  ], edges: [] };
+  const { spec } = carryOverFlowLayout(before, next);
+  const by = new Map(spec.nodes.map(n => [n.id, n]));
+  assert.deepEqual([by.get('report').position, by.get('report').size, by.get('report').src], [{ x: 10, y: 20 }, sized, COVER]);
+  // Another file's PDF is another PDF: the old cover would show the wrong pages.
+  assert.equal(by.get('swapped').src, undefined, 'a cover goes only with its own file');
+  assert.deepEqual([by.get('was-pdf').size, by.get('was-pdf').src], [undefined, undefined], 'a box is given neither a PDF\'s size nor its cover');
+  assert.deepEqual(by.get('figures').position, { x: 400, y: 20 });
+  // What is carried over is still a board the validator takes.
+  assert.equal(parseDiagramSpec(spec).ok, true);
+});
+
+test('a question\'s path walks past a PDF and a spreadsheet, whose labels are only file names', () => {
+  const node = (id, x, data = {}) => ({ id, position: { x, y: 0 }, data: { label: id, shape: 'rounded', ...data } });
+  const nodes = [
+    node('Start here', 0),
+    node('report', 300, { label: 'Example quarterly report', shape: 'pdf', file: PDF_FILE }),
+    node('figures', 600, { label: 'Example figures', shape: 'sheet', file: SHEET_FILE }),
+    node('Ask', 900),
+  ];
+  const edges = [
+    { source: 'Start here', target: 'report', targetHandle: 'left' },
+    { source: 'report', target: 'figures', targetHandle: 'left', data: { label: 'read with' } },
+    { source: 'figures', target: 'Ask', targetHandle: 'left', data: { label: 'then' } },
+  ];
+  const steps = flowQuestionPath(nodes, edges, 'Ask');
+  assert.deepEqual(steps.map(step => [step.label, step.arrow]), [['Start here', 'read with → then']]);
+});
+
+test('folding a branch leaves a PDF placed beside it where it is, as it leaves a picture', () => {
+  const start = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b', 'c']);
+  const b = start.boxes.find(item => item.id === 'b');
+  const pdf = { id: 'report', x: b.x, y: b.y, ...FLOW_PDF_DEFAULT_SIZE, shape: 'pdf' };
+  const showing = [...start.boxes.filter(item => item.id !== 'b'), pdf];
+  const edges = start.edges.filter(edge => edge.target !== 'b');
+  const folded = apply(showing, tidyFlowTree(showing, edges, ['q'], [], { pinImages: true }));
+  assert.deepEqual({ x: folded.get('report').x, y: folded.get('report').y }, { x: pdf.x, y: pdf.y });
+  assert.equal(folded.get('c').y - (folded.get('a').y + H), FLOW_TAB_GAP_Y, 'the branch still closes up');
 });

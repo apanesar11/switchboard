@@ -150,6 +150,27 @@ contextBridge.exposeInMainWorld('sb', {
   // A YouTube video's title and channel, by its 11-character id: { ok, data: { title,
   // author } } or { ok:false, error } — asked of YouTube once, when a video is made.
   diagramsVideoInfo: id => ipcRenderer.invoke('sb:diagrams:videoInfo', id),
+  // A PDF or a spreadsheet for a canvas: its bytes and its extension (what its name says
+  // it is — main checks the bytes agree) in, { ok, data: { src, kind, cover? } } out —
+  // src the sbfile://file/<file> address main keeps it at, and for a PDF a picture of its
+  // first page as { src, width, height } when one could be made.
+  diagramsSaveFile: (bytes, ext) => ipcRenderer.invoke('sb:diagrams:saveFile', bytes, ext),
+  // The kept file's path on this Mac, for Copy file path: { ok, data }.
+  diagramsGetFilePath: src => ipcRenderer.invoke('sb:diagrams:getFilePath', src),
+  // The files Finder copied, for Edit ▸ Paste over a canvas: { ok, data: [{ name, type,
+  // bytes }] } — bytes for a picture, a PDF or a spreadsheet, null for anything else —
+  // with { name, error } in place of one too big to go on a board.
+  diagramsClipboardFiles: () => ipcRenderer.invoke('sb:diagrams:clipboardFiles'),
+  // Opens the kept file in the Mac's own app for it (Preview, Numbers, Excel): { ok }.
+  diagramsOpenFile: src => ipcRenderer.invoke('sb:diagrams:openFile', src),
+  // A spreadsheet's panel, by the node's address. Info: { format, sheets: [{ name, rows,
+  // cols, truncated, clipped }] }. Rows: up to 500 from `start` of the sheet at index `sheet`, all
+  // 0-based — { start, rows }, each row its cells' text up to its last with any. Find:
+  // the cells holding `query` (1–200 characters, any case), at most `limit` (≤ 1000) —
+  // { matches: [{ row, col }], more }. Each fails as { ok:false, error }, a sentence.
+  diagramsSheetInfo: src => ipcRenderer.invoke('sb:diagrams:sheetInfo', src),
+  diagramsSheetRows: (src, sheet, start, count) => ipcRenderer.invoke('sb:diagrams:sheetRows', src, sheet, start, count),
+  diagramsSheetFind: (src, sheet, query, limit) => ipcRenderer.invoke('sb:diagrams:sheetFind', src, sheet, query, limit),
 
   // ✦ Answer (§4.18) — who answers a box's question on this Mac, and the asking.
   // answerStatus: { ok, settings, providers, keysSafe }; `opts.fresh` looks for the

@@ -19,6 +19,8 @@ import {
   DEFAULT_FLOW_TEXT_ALIGN,
   DEFAULT_FLOW_TEXT_SIZE,
   DEFAULT_FLOW_TONE,
+  FLOW_PDF_DEFAULT_SIZE,
+  FLOW_SHEET_SIZE,
   FLOW_TELEPORT_SIZE,
   FLOW_TERMINAL_DEFAULT_SIZE,
   FLOW_TERMINAL_FLOOR,
@@ -220,7 +222,7 @@ export type FlowBoxNodeData = {
   align: FlowTextAlign
   bold: boolean
   italic: boolean
-  /** An image's picture. */
+  /** An image's picture. Switchboard: or a PDF's, of its first page. */
   src?: string
   documentId?: string
   /** The size someone gave a note, text, image or box — see FlowNodeSpec.size. */
@@ -240,6 +242,8 @@ export type FlowBoxNodeData = {
   /** Switchboard: the YouTube video a video plays, and where it starts. */
   videoId?: string
   videoStart?: number
+  /** Switchboard: the PDF or spreadsheet a "pdf" or "sheet" shows — see FlowNodeSpec.file. */
+  file?: string
 }
 
 /** What a flow edge carries, so the editor can read an edge back into a spec. */
@@ -427,7 +431,7 @@ function detailHeight(lines: string[]): number {
  * A node's width and height. A box is FLOW_NODE_WIDTH wide and as tall as
  * its text; a note, a text and an image are sized as FlowNodeSpec.size says.
  * Switchboard: a box resized by hand too — as wide as it was made, and as tall,
- * unless its text needs more.
+ * unless its text needs more. And a PDF as its size says, a spreadsheet as a document.
  * Exported because the editor re-sizes a node as its text is
  * typed, and it has to land on exactly the size the read-only canvas would
  * give the same node.
@@ -442,6 +446,12 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
   // resize handles keep its player 16:9 (or 9:16), and one a CLI wrote is drawn as
   // stated, the player letterboxing inside.
   if (shape === "video") return node.size ?? FLOW_VIDEO_DEFAULT_SIZE
+  // Switchboard: a PDF is the size it was given, its name's bar included — made at its
+  // cover's shape (files.ts flowPdfSize) and resized as a picture is — or, never given
+  // one, a portrait page over the bar. A spreadsheet's card is the one size, as a
+  // document's is.
+  if (shape === "pdf") return node.size ?? FLOW_PDF_DEFAULT_SIZE
+  if (shape === "sheet") return FLOW_SHEET_SIZE
   // Switchboard: a pinned terminal is the size it was given — pinned at a high zoom,
   // that can be less than its resize handles allow, so only the floor of a header
   // and a sliver of body binds here — and folded, only its header, in place.
@@ -722,6 +732,7 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
       teleportTo: node.teleportTo,
       videoId: node.videoId,
       videoStart: node.videoStart,
+      file: node.file,
     } satisfies FlowBoxNodeData,
     draggable: false,
     selectable: false,

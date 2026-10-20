@@ -74,5 +74,13 @@ export function DiagramFileCopy({ box }: { box: FlowBoxNodeData }) {
     label="Copy Markdown file path"
     onPath={() => documentPath(box.documentId!)}
   />
+  // Switchboard: a PDF's or a spreadsheet's own file, kept by its content. A PDF's sits
+  // in the page's top corner rather than the bottom one, where it would straddle the
+  // strip with the name.
+  if ((box.shape === "pdf" || box.shape === "sheet") && box.file) return <CopyPathButton
+    className={cx("flow-file-copy", box.shape === "pdf" && "top-1.5 bottom-auto")}
+    label={box.shape === "pdf" ? "Copy PDF file path" : "Copy spreadsheet file path"}
+    onPath={() => call("diagramsGetFilePath", box.file!)}
+  />
   return null
 }

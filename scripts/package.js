@@ -61,6 +61,11 @@ async function packageApp(options = {}) {
       /^\/node_modules\/monaco-editor\/(?!min(?:\/|$)|package\.json$|LICENSE$|ThirdPartyNotices\.txt$)/,
       // Legacy per-language worker entry points (the assets/ workers are the ones used) and non-English NLS bundles.
       /^\/node_modules\/monaco-editor\/min\/vs\/(?:nls|language)(?:\/|$)/,
+      // SheetJS (src/main/sheet-worker.js) loads xlsx.js, and xlsx.js only ./dist/cpexcel.js: not its
+      // CLI, its typings, its ES module, its browser worker or its ~5 MB of prebuilt browser bundles.
+      /^\/node_modules\/xlsx\/(?:bin|types)(?:\/|$)/,
+      /^\/node_modules\/xlsx\/(?:xlsx\.mjs|xlsxworker\.js)$/,
+      /^\/node_modules\/xlsx\/dist\/(?!cpexcel\.js$)/,
     ],
     // A local ad-hoc signature needs no Apple account or signing certificate.
     osxSign: {

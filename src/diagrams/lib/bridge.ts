@@ -191,6 +191,43 @@ export type VideoInfo = Result<{ title: string; author: string }>
  */
 export type ImageOffer = { guestId: number; url: string; fallback?: string; referrer: string }
 
+/**
+ * A PDF or a spreadsheet main kept for a whiteboard (diagramsSaveFile): its address,
+ * sbfile://file/<name>, and what it is. A PDF's `cover` is a picture of its first page,
+ * kept as any picture is (sbimg://image/<file>), with its size in pixels — absent when
+ * none could be made (an encrypted PDF, Quick Look failing).
+ */
+export type SavedFlowFile = {
+  src: string
+  kind: "pdf" | "sheet"
+  cover?: { src: string; width: number; height: number }
+}
+
+/**
+ * A spreadsheet's sheets as main read them (diagramsSheetInfo): each one's name, how
+ * many rows and columns it has, whether main stopped short of its end (`truncated` —
+ * past its row or cell limit; `rows` is then what was read, and none means the sheet
+ * was left out whole) and whether a cell's text was cut at 32,767 characters, every row
+ * still there (`clipped`). `format` is the file's extension.
+ */
+export type SheetInfo = {
+  format: string
+  sheets: { name: string; rows: number; cols: number; truncated: boolean; clipped: boolean }[]
+}
+
+/** A run of a sheet's rows from `start` (0-based), each cell its text as shown. */
+export type SheetRows = { start: number; rows: string[][] }
+
+/** Where a search of a sheet found its text, row by row: 0-based cells, `more` when cut short. */
+export type SheetMatches = { matches: { row: number; col: number }[]; more: boolean }
+
+/**
+ * A file Finder copied (diagramsClipboardFiles): its name and bytes — a picture's (with
+ * its type), a PDF's or a spreadsheet's — or, for any other file, its name with no bytes;
+ * or the sentence saying why one that could go on a board can't (too big, unreadable).
+ */
+export type PastedFile = { name: string; type: string; bytes: Uint8Array | null } | { name: string; error: string }
+
 type Bridge = {
   whiteboardsList(): Promise<Result<WhiteboardsIndex>>
   whiteboardsGet(id: string): Promise<Result<WhiteboardDetail>>
@@ -266,6 +303,20 @@ type Bridge = {
   diagramsFetchImage(url: string, referrer?: string): Promise<FetchedImage>
   onDiagramsImageOffer(cb: (offer: ImageOffer) => void): () => void
   diagramsVideoInfo(videoId: string): Promise<VideoInfo>
+  // Switchboard: PDFs and spreadsheets. `ext` is what the file is, as its name or type
+  // says (lib/diagrams/files.ts flowFileExtension); main checks the bytes agree.
+  diagramsSaveFile(bytes: Uint8Array, ext: string): Promise<Result<SavedFlowFile>>
+  /** The kept file's path on this Mac, for Copy file path. */
+  diagramsGetFilePath(src: string): Promise<Result<string>>
+  /** The files Finder copied, for Edit ▸ Paste over a canvas. */
+  diagramsClipboardFiles(): Promise<Result<PastedFile[]>>
+  /** Opens the kept file in the Mac's own app for it (Preview, Numbers, Excel). */
+  diagramsOpenFile(src: string): Promise<{ ok: true } | { ok: false; error: string }>
+  diagramsSheetInfo(src: string): Promise<Result<SheetInfo>>
+  /** At most 500 rows from `start`, of the sheet at `sheet` (0-based) in diagramsSheetInfo's list. */
+  diagramsSheetRows(src: string, sheet: number, start: number, count: number): Promise<Result<SheetRows>>
+  /** Every cell whose text holds `query`, ignoring case, at most `limit` (≤ 1000). */
+  diagramsSheetFind(src: string, sheet: number, query: string, limit: number): Promise<Result<SheetMatches>>
   openExternal(url: string): Promise<{ ok: true } | { ok: false; error: string }>
 }
 

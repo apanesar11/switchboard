@@ -14,7 +14,7 @@
 // modules, so it runs unchanged in the browser, the route and vitest.
 
 import type { FlowCanvasEdge, FlowCanvasNode } from "./flow-editor"
-import { DIAGRAM_TEXT_MAX_LENGTH, FLOW_BOX_TEXT_MAX_LENGTH } from "./types"
+import { DIAGRAM_TEXT_MAX_LENGTH, FLOW_BOX_TEXT_MAX_LENGTH, type FlowShape } from "./types"
 
 // ─── models and effort ───
 
@@ -442,6 +442,17 @@ function loopBacks(
   return back
 }
 
+/** Switchboard: the boxes whose label is none of the flow's words — see flowQuestionPath. */
+const FLOW_AI_WORDLESS_SHAPES: ReadonlySet<FlowShape> = new Set<FlowShape>([
+  "image",
+  "document",
+  "terminal",
+  "teleport",
+  "video",
+  "pdf",
+  "sheet",
+])
+
 /**
  * The boxes leading up to `id`, the first one first: back along the arrow
  * that comes into each box's left side (the one Tab draws), or failing that
@@ -481,8 +492,9 @@ export function flowQuestionPath(
     // An image or an empty note says nothing, but the walk goes on past it.
     // Switchboard: nor does a pinned terminal, whose label is only its workspace, nor a
     // teleport, whose label is only "Teleport", nor a video, whose title is a
-    // stranger's words and never part of the question.
-    if (label && from.data.shape !== "image" && from.data.shape !== "document" && from.data.shape !== "terminal" && from.data.shape !== "teleport" && from.data.shape !== "video") {
+    // stranger's words and never part of the question — nor a PDF or a spreadsheet,
+    // whose label is only a file's name.
+    if (label && !FLOW_AI_WORDLESS_SHAPES.has(from.data.shape)) {
       path.push({ label, detail: tidyBox(from.data.detail), arrow })
       carried = undefined
     } else {

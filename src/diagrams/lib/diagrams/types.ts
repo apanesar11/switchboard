@@ -53,6 +53,11 @@ export type DiagramSpec = FlowSpec
 // another node on the same board (`teleportTo`). Its label is always "Teleport".
 // Switchboard: and a "video" — a YouTube video that plays in its box (it needs
 // `videoId`). Its label is the video's title, or "YouTube video" until one is known.
+// Switchboard: and a "pdf" and a "sheet" — a PDF or a spreadsheet kept on this Mac
+// (they need `file`). A PDF is drawn as a picture of its first page (`src`, when one
+// could be made) over its name; a spreadsheet as a card with its name, as a document
+// is. Either opens beside the canvas. Only the editor makes one, from a file dropped,
+// pasted or picked; their label is the file's name.
 export const FLOW_SHAPES = [
   "box",
   "rounded",
@@ -65,6 +70,8 @@ export const FLOW_SHAPES = [
   "terminal",
   "teleport",
   "video",
+  "pdf",
+  "sheet",
 ] as const
 
 export type FlowShape = (typeof FLOW_SHAPES)[number]
@@ -85,7 +92,7 @@ export function isFlowBoxShape(shape: FlowShape): shape is FlowBoxShape {
  * Switchboard: a pinned terminal and a video are sized by hand too, and so is a
  * box — one never resized is as wide as every other box and as tall as its text.
  */
-export const FLOW_SIZED_SHAPES = [...FLOW_BOX_SHAPES, "note", "text", "image", "terminal", "video"] as const
+export const FLOW_SIZED_SHAPES = [...FLOW_BOX_SHAPES, "note", "text", "image", "terminal", "video", "pdf"] as const
 
 export function isFlowSizedShape(shape: FlowShape): boolean {
   return (FLOW_SIZED_SHAPES as readonly FlowShape[]).includes(shape)
@@ -193,6 +200,8 @@ export type FlowNodeSpec = {
   /**
    * The picture an "image" node shows: an https URL. Required for an image,
    * and only kept on one. `label` is its alt text.
+   * Switchboard: or sbimg://image/<file>, a picture kept on this Mac. And a "pdf"
+   * keeps one too, when one could be made: the picture of its first page.
    */
   src?: string
   /** Stable UUID of a plain Markdown file beside the local diagrams. */
@@ -240,6 +249,12 @@ export type FlowNodeSpec = {
    * video; absent means from the beginning.
    */
   videoStart?: number
+  /**
+   * Switchboard: the file a "pdf" or a "sheet" shows — sbfile://file/<name>, a copy
+   * kept on this Mac by its content (src/main/whiteboards.js), its extension saying
+   * what it is (lib/diagrams/files.ts). Required on those two, and only kept on them.
+   */
+  file?: string
 }
 
 export type FlowEdgeSpec = {
@@ -417,6 +432,29 @@ export function flowVideoSizeForWidth(width: number, portrait: boolean): FlowSiz
   const across = Math.min(most, Math.max(flowVideoMinWidth(portrait), Math.round(width)))
   return { width: across, height: Math.round(across * ratio) + VIDEO_BAR }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Switchboard: PDFs and spreadsheets
+// ─────────────────────────────────────────────────────────────────────
+
+/** What a PDF or a spreadsheet is labelled when its file's name gives nothing. */
+export const PDF_LABEL = "PDF"
+export const SHEET_LABEL = "Spreadsheet"
+/**
+ * The strip along a PDF's foot with its name — what is left of the node when it has no
+ * picture of its cover. A PDF's `size` includes it.
+ */
+export const PDF_BAR = 30
+/**
+ * A PDF made with no size of its own: a portrait page 240 wide (US Letter's shape) over
+ * the bar. A PDF with a cover is made at its cover's shape instead (files.ts
+ * flowPdfSize). Mirrored in src/main/whiteboards.js for the list's thumbnail.
+ */
+export const FLOW_PDF_DEFAULT_SIZE: FlowSize = { width: 240, height: 311 + PDF_BAR }
+/** A spreadsheet's card, the one size, as a document's. Mirrored in whiteboards.js. */
+export const FLOW_SHEET_SIZE: FlowSize = { width: 240, height: 76 }
+/** A file's address, at most — sbfile://file/ and a 32-character name and extension. */
+export const FLOW_FILE_SRC_MAX_LENGTH = 120
 
 /** A rectangle on screen, in client (window) pixels. */
 export type ClientRect = { left: number; top: number; width: number; height: number }

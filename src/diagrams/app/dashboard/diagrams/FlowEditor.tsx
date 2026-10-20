@@ -69,6 +69,13 @@
 // would draw blurred and misread the pointer. Pinning, floating, undo and delete
 // move the node in and out of the board like any other edit; the host hears which
 // it was (onTerminalRemoved).
+// Switchboard: a PDF or a spreadsheet dropped, pasted or picked (the rail's PDF or
+// spreadsheet, F) is kept on this Mac by main, once, by its content, and goes on as a
+// node ("pdf", "sheet") naming it: a PDF as the picture of its first page over its
+// name, a spreadsheet as a card. Double-click, Enter or the toolbar's Open opens it in
+// a panel beside the canvas (FilePanel.tsx) — Chromium's own viewer for a PDF, a grid
+// to page through for a spreadsheet — the one panel there with a document's: opening
+// either puts the other away. Its name is changed there, as a document's title is.
 //
 // It edits the SAME spec every other part of the Diagrams feature reads.
 // layoutDiagram() turns the spec into the canvas, and flowSpecFromCanvas()
@@ -150,6 +157,9 @@ import {
   RiContractRightLine,
   RiExpandRightLine,
   RiArrowLeftRightLine,
+  RiAttachment2,
+  RiFileExcel2Line,
+  RiFilePdf2Line,
   RiArrowLeftSLine,
   RiBold,
   RiCheckLine,
@@ -241,6 +251,9 @@ import {
   FLOW_TEXT_ALIGNS,
   FLOW_TEXT_SIZES,
   FLOW_TONES,
+  PDF_BAR,
+  PDF_LABEL,
+  SHEET_LABEL,
   TERMINAL_BASE_FONT,
   TERMINAL_FONT_MAX,
   TERMINAL_FONT_MIN,
@@ -268,8 +281,11 @@ import {
 import {
   diagramImageProblem,
   imageDisplaySize,
+  uploadDiagramFile,
   uploadDiagramImage,
 } from "@/lib/diagrams/upload"
+// Switchboard: PDFs and spreadsheets — which files are which, and what their nodes say.
+import { FLOW_FILE_ACCEPT, flowFileKind, flowFileLabel, flowFileProblem, flowPdfSize } from "@/lib/diagrams/files"
 import { normalizeFlowText, normalizeWorkspaceId } from "@/lib/diagrams/validate"
 import {
   FLOW_AI_DETAILS,
@@ -316,10 +332,12 @@ import {
 import { FIT_VIEW_OPTIONS } from "./DiagramCanvas"
 import { ImageSearchPanel, type ImageSearchAsk } from "./ImageSearchPanel"
 import { DocumentPanel, type DocumentView } from "./DocumentPanel"
+import { FilePanel } from "./FilePanel"
 import { useFlowDocuments } from "./useFlowDocuments"
 import { DiagramFileCopyContext } from "./DiagramFileCopy"
 import {
   FlowBox,
+  openableFile,
   FLOW_TEXT_WRAP,
   TELEPORT_DURATION_MS,
   teleportViewport,
@@ -456,9 +474,10 @@ function notReady(provider: ProviderStatus): AnswerFailure | null {
 
 /**
  * The single-letter keys for the tools, and "i" for an image. Switchboard: "g"
- * for Google Images, "p" for a teleport (a portal).
+ * for Google Images, "p" for a teleport (a portal), "f" for a PDF or a spreadsheet
+ * (a file).
  */
-const TOOL_KEYS: Record<string, Tool | "image" | "images"> = {
+const TOOL_KEYS: Record<string, Tool | "image" | "images" | "files"> = {
   v: "select",
   h: "hand",
   r: "shape",
@@ -467,6 +486,7 @@ const TOOL_KEYS: Record<string, Tool | "image" | "images"> = {
   i: "image",
   g: "images",
   p: "teleport",
+  f: "files",
 }
 
 /** Switchboard: no video playing. */
@@ -481,9 +501,6 @@ const TELEPORT_ARRIVAL_MS = 2_000
 const TEXT_PLACEHOLDER = "Type something"
 const NOTE_PLACEHOLDER = "Write a note"
 const DETAIL_PLACEHOLDER = "Second line"
-
-/** How far apart several images dropped or pasted at once land. */
-const IMAGE_CASCADE = 30
 
 /** How long "3 answers added · Undo" stays up after an answer lands. */
 const ANSWERED_NOTICE_MS = 8_000
@@ -745,13 +762,16 @@ function isText(box: FlowBoxNodeData): boolean {
 /** Whether a node has text you can edit directly on the canvas. */
 function hasText(box: FlowBoxNodeData): boolean {
   // Switchboard: nor has a pinned terminal — its label is only its workspace — nor a
-  // teleport, which always says "Teleport", nor a video, whose label is its title.
+  // teleport, which always says "Teleport", nor a video, whose label is its title, nor
+  // a PDF or a spreadsheet, whose name is changed in its panel, as a document's is.
   return (
     box.shape !== "image" &&
     box.shape !== "document" &&
     box.shape !== "terminal" &&
     box.shape !== "teleport" &&
-    box.shape !== "video"
+    box.shape !== "video" &&
+    box.shape !== "pdf" &&
+    box.shape !== "sheet"
   )
 }
 
@@ -892,7 +912,16 @@ function clipboardWords(box: FlowBoxNodeData): string {
   if (box.shape === "video" && box.videoId) return youTubeWatchUrl({ videoId: box.videoId, start: box.videoStart })
   const label =
     normalizeFlowText(box.label) ||
-    (box.shape === "image" ? "Image" : box.shape === "note" ? "Note" : UNTITLED_FLOW_LABEL)
+    (box.shape === "image"
+      ? "Image"
+      : box.shape === "note"
+        ? "Note"
+        // Switchboard: and a PDF or a spreadsheet with no name says what it is.
+        : box.shape === "pdf"
+          ? PDF_LABEL
+          : box.shape === "sheet"
+            ? SHEET_LABEL
+            : UNTITLED_FLOW_LABEL)
   const detail = box.detail ? normalizeFlowText(box.detail) : ""
   return detail ? `${label}\n${detail}` : label
 }
@@ -1267,18 +1296,22 @@ function Resizer({
       </>
     )
   }
+  // Switchboard: a PDF keeps its proportions as a picture does, and never gets so small
+  // that its strip is all there is of it.
   const least =
     box.shape === "image"
       ? { width: 24, height: 24 }
-      : box.shape === "diamond"
-        ? FLOW_DIAMOND_MIN_SIZE
-        : isFlowBoxShape(box.shape)
-          ? FLOW_BOX_MIN_SIZE
-          : { width: 80, height: 48 }
+      : box.shape === "pdf"
+        ? { width: 96, height: PDF_BAR + 48 }
+        : box.shape === "diamond"
+          ? FLOW_DIAMOND_MIN_SIZE
+          : isFlowBoxShape(box.shape)
+            ? FLOW_BOX_MIN_SIZE
+            : { width: 80, height: 48 }
   return (
     <NodeResizer
       isVisible
-      keepAspectRatio={box.shape === "image"}
+      keepAspectRatio={box.shape === "image" || box.shape === "pdf"}
       minWidth={least.width}
       minHeight={least.height}
       maxWidth={FLOW_SIZE_MAX}
@@ -1652,13 +1685,16 @@ function EditableBoxNode({ id, data, selected }: NodeProps) {
     !selectionRect &&
     !editing &&
     !connecting &&
-    (box.shape === "note" || box.shape === "text" || box.shape === "image" || isFlowBoxShape(box.shape))
+    // Switchboard: and a PDF, as a picture is. A spreadsheet's card is the one size.
+    (box.shape === "note" || box.shape === "text" || box.shape === "image" || box.shape === "pdf" || isFlowBoxShape(box.shape))
 
   return (
     <div className={cx("relative size-full", interactive && "group")}>
       <FlowBox
         {...box}
-        label={box.label.trim() || box.shape === "note" ? box.label : UNTITLED_FLOW_LABEL}
+        // Switchboard: a PDF or a spreadsheet whose name is cleared in its panel says
+        // what it is (FlowBox), not "Untitled".
+        label={box.label.trim() || box.shape === "note" || box.shape === "pdf" || box.shape === "sheet" ? box.label : UNTITLED_FLOW_LABEL}
         labelOverride={
           editing ? <TextEditor id={id} box={box} editor={editor} /> : undefined
         }
@@ -1986,6 +2022,18 @@ function FlowEditorCanvas({
   const documentBox = documentNode?.data as FlowBoxNodeData | undefined
   // Switchboard: one store of documents for every whiteboard, keyed by document id.
   const documents = useFlowDocuments(documentBox?.documentId)
+  // Switchboard: the PDF or spreadsheet open beside the canvas (FilePanel), and how —
+  // the one panel there with a document's, so at most one of the two ids is set.
+  const [fileNodeId, setFileNodeId] = useState<string | null>(null)
+  const [fileView, setFileView] = useState<DocumentView>("floating")
+  const fileNode = nodes.find((node) => node.id === fileNodeId && openableFile(node.data as FlowBoxNodeData) !== null)
+  const fileBox = fileNode?.data as FlowBoxNodeData | undefined
+  const openFileOf = openableFile(fileBox)
+  // Its node deleted, cut, or undone away: the panel goes, and stays gone — Redo
+  // bringing the node back doesn't open it again.
+  useEffect(() => {
+    if (fileNodeId !== null && !fileNode) setFileNodeId(null)
+  }, [fileNodeId, fileNode])
   const documentsFlush = documents.flush
   const alive = useRef(true)
   useEffect(() => () => { alive.current = false }, [])
@@ -2066,7 +2114,11 @@ function FlowEditorCanvas({
     toolRef.current = tool
   })
   const [uploading, setUploading] = useState(0)
+  // Switchboard: how many of those are PDFs and spreadsheets, so the strip says
+  // "Uploading 2 files…" rather than images, and their own picker's input.
+  const [uploadingFiles, setUploadingFiles] = useState(0)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const filesInputRef = useRef<HTMLInputElement | null>(null)
   // Cancels the uploads still running when the editor goes away (another
   // diagram, another tab), rather than letting them finish into nothing.
   const uploadsRef = useRef<AbortController | null>(null)
@@ -2414,11 +2466,11 @@ function FlowEditorCanvas({
     }
   }, [store, scheduleSlots])
   // Switchboard: a pinned terminal moved, resized, selected, folded or minimized —
-  // or its workspace left the rail, or a document opened over it — moves or changes
-  // its slot.
+  // or its workspace left the rail, or a document (or a PDF or spreadsheet) opened
+  // over it — moves or changes its slot.
   useEffect(() => {
     scheduleSlots()
-  }, [nodes, edges, choices, freshPins, documentNodeId, documentView, scheduleSlots])
+  }, [nodes, edges, choices, freshPins, documentNodeId, documentView, fileNodeId, fileView, scheduleSlots])
 
   // After the editor moves the selection itself (Tab, Shift+Tab, Duplicate,
   // starting to type), two things React Flow keeps would otherwise point at
@@ -2878,13 +2930,17 @@ function FlowEditorCanvas({
     return dx !== 0 || dy !== 0
   }
 
+  // Switchboard: a PDF's or a spreadsheet's panel is a document's (the same chrome and
+  // classes), and keeps its node in view the same way.
+  const panelNodeId = documentNodeId ?? fileNodeId
+  const panelView = documentNodeId !== null ? documentView : fileView
   useEffect(() => {
-    if (!documentNodeId || documentView === "focus") return
+    if (!panelNodeId || panelView === "focus") return
     let frame = 0
     const show = () => {
       cancelAnimationFrame(frame)
       frame = requestAnimationFrame(() => {
-        const node = nodesRef.current.find((entry) => entry.id === documentNodeId)
+        const node = nodesRef.current.find((entry) => entry.id === panelNodeId)
         if (node) reveal(rectOf(node))
       })
     }
@@ -2895,7 +2951,7 @@ function FlowEditorCanvas({
     if (panel) observer.observe(panel)
     show()
     return () => { cancelAnimationFrame(frame); observer.disconnect() }
-  }, [documentNodeId, documentView])
+  }, [panelNodeId, panelView])
 
   // Makes `node` the whole selection.
   function select(node: Node) {
@@ -2982,7 +3038,26 @@ function FlowEditorCanvas({
     setTool("select")
     setDocumentStartsWriting(writing)
     setDocumentView("floating")
+    // Switchboard: in place of a PDF or a spreadsheet open there.
+    setFileNodeId(null)
     setDocumentNodeId(node.id)
+  }
+
+  // Switchboard: a PDF or a spreadsheet opens beside the canvas as a document does,
+  // floating, in place of whatever document is open there (written out first, as its
+  // own Close does).
+  function openFile(node: Node) {
+    if (openableFile(node.data as FlowBoxNodeData) === null) return
+    changeEditing(null)
+    setImagesOpen(false)
+    setImageMenu(false)
+    setTool("select")
+    if (documentNodeId !== null) {
+      void documents.flush()
+      setDocumentNodeId(null)
+    }
+    setFileView("floating")
+    setFileNodeId(node.id)
   }
 
   async function placeDocument(at: { x: number; y: number }) {
@@ -3046,10 +3121,11 @@ function FlowEditorCanvas({
   // ─── images ───
 
   // Uploads each picture, then adds it centred on `at` (the drop point, or the
-  // middle of the view), several fanned out a little so none hides another.
-  // The canvas stays usable meanwhile; a picture lands once it is stored, as
-  // its own undo step.
-  async function addImages(files: File[], at?: { x: number; y: number }) {
+  // middle of the view) — moved down clear of whatever the same drop or paste
+  // already put there (`landed`, which it adds to), so several stand in a column
+  // rather than hide one another. The canvas stays usable meanwhile; a picture
+  // lands once it is stored, as its own undo step.
+  async function addImages(files: File[], at?: { x: number; y: number }, landed: FlowRect[] = []) {
     const usable = files.filter((file) => {
       const problem = diagramImageProblem(file)
       if (problem) toast({ title: problem, variant: "error" })
@@ -3073,16 +3149,15 @@ function FlowEditorCanvas({
         // Its own undo step: typing carried on straight after it starts the
         // next one, rather than folding into this.
         lastRecordAt.current = 0
-        insertBox(
+        const { rect } = insertBox(
           {
             ...plainBox({ label, shape: "image", tone: "default" }),
             src,
             size: { width, height },
           },
-          {
-            x: snap(centre.x - width / 2 + index * IMAGE_CASCADE),
-            y: snap(centre.y - height / 2 + index * IMAGE_CASCADE),
-          },
+          // Worked out as it lands, not as it was dropped: whatever of the drop
+          // landed first, it lands under.
+          clearOfBoxes({ x: snap(centre.x - width / 2), y: snap(centre.y - height / 2), width, height }, landed),
           // Typing somewhere by the time it lands? It goes in without taking
           // the keyboard, or the selection, away from you.
           {
@@ -3092,6 +3167,7 @@ function FlowEditorCanvas({
               toolRef.current === "hand",
           },
         )
+        landed.push(rect)
       } catch (err) {
         if (uploadsRef.current?.signal.aborted) {
           toast({
@@ -3144,6 +3220,115 @@ function FlowEditorCanvas({
     await addImages([file], at)
   }
 
+  // ─── Switchboard: PDFs and spreadsheets ───
+
+  // Keeps each file — main stores it once, by its content, and makes a PDF's cover —
+  // then adds it centred on `at` (the drop point, or the middle of the view) and moved
+  // down clear of every box there, as a new document is: a file's name runs along one
+  // edge of it, which anything over it would hide. So several stand in a column, the
+  // pictures dropped with them included — and those step off the files in turn, which
+  // go into `landed`, the drop's own. A PDF goes on at its cover's shape, over the
+  // strip with its name; a spreadsheet as its card. Each lands as its own undo step,
+  // quietly when you have moved on to typing, as addImages' pictures do; and the
+  // canvas stays usable meanwhile.
+  async function addFiles(files: File[], at?: { x: number; y: number }, landed: FlowRect[] = []) {
+    const usable = files.filter((file) => {
+      const problem = flowFileProblem(file)
+      if (problem) toast({ title: problem, variant: "error" })
+      return problem === null
+    })
+    if (usable.length === 0) return
+    const centre = at ?? viewCentre()
+    if (!centre) return
+
+    // Counted up front, as pictures are, so "Uploading 3 files…" counts down as they land.
+    setUploading((count) => count + usable.length)
+    setUploadingFiles((count) => count + usable.length)
+    for (const [index, file] of usable.entries()) {
+      try {
+        const saved = await uploadDiagramFile(file, uploadsRef.current?.signal)
+        const label = flowFileLabel(file.name, saved.kind)
+        const box: FlowBoxNodeData =
+          saved.kind === "pdf"
+            ? {
+                ...plainBox({ label, shape: "pdf", tone: "default" }),
+                file: saved.src,
+                ...(saved.cover ? { src: saved.cover.src } : {}),
+                size: flowPdfSize(saved.cover),
+              }
+            : { ...plainBox({ label, shape: "sheet", tone: "default" }), file: saved.src }
+        const { width, height } = boxSize(box)
+        record()
+        // Its own undo step, as a picture's is.
+        lastRecordAt.current = 0
+        // Every box as it is when this one lands — the drop's earlier ones among them,
+        // since insertBox adds each to nodesRef at once.
+        const { rect } = insertBox(
+          box,
+          clearOfBoxes({ x: snap(centre.x - width / 2), y: snap(centre.y - height / 2), width, height }, nodesRef.current.map(rectOf)),
+          {
+            quiet:
+              editingRef.current !== null ||
+              isTextField(document.activeElement) ||
+              toolRef.current === "hand",
+          },
+        )
+        landed.push(rect)
+      } catch (err) {
+        if (uploadsRef.current?.signal.aborted) {
+          toast({
+            title: `${file.name || "A file"} wasn't added`,
+            description: "You left the whiteboard before it finished uploading.",
+          })
+          const left = usable.length - index - 1
+          setUploading((count) => count - left)
+          setUploadingFiles((count) => count - left)
+          return
+        }
+        toast({
+          title: `Couldn't add ${file.name || "the file"}`,
+          description: err instanceof Error ? err.message : undefined,
+          variant: "error",
+        })
+      } finally {
+        setUploading((count) => count - 1)
+        setUploadingFiles((count) => count - 1)
+      }
+    }
+  }
+
+  // Files dropped or pasted on the canvas, each where it goes: pictures to addImages
+  // (one of a kind the canvas can't keep is told so there), PDFs and spreadsheets to
+  // addFiles, and anything else refused in one word, not one each. The two upload side
+  // by side, so either may land first; `landed` is where the drop's own have, for the
+  // next to land clear of.
+  function addDroppedFiles(files: File[], at: { x: number; y: number } | undefined, how: "drop" | "paste") {
+    const images: File[] = []
+    const kept: File[] = []
+    const refused: File[] = []
+    for (const file of files) {
+      if (diagramImageProblem(file) === null || file.type.startsWith("image/")) images.push(file)
+      else if (flowFileKind(file.name, file.type) !== null) kept.push(file)
+      else refused.push(file)
+    }
+    if (refused.length > 0) {
+      const what = refused.length === 1 ? refused[0].name || "That file" : `${refused.length} of those files`
+      toast({
+        title: `${what} can't go on a whiteboard`,
+        description: `${how === "drop" ? "Drop" : "Paste"} a picture, a PDF or a spreadsheet`,
+        variant: "error",
+      })
+    }
+    const landed: FlowRect[] = []
+    if (images.length > 0) void addImages(images, at, landed)
+    if (kept.length > 0) void addFiles(kept, at, landed)
+  }
+
+  function pickFiles() {
+    setImageMenu(false)
+    filesInputRef.current?.click()
+  }
+
   function placeAtCentre() {
     const centre = viewCentre()
     if (!centre || !placing) return
@@ -3171,6 +3356,8 @@ function FlowEditorCanvas({
   // own first page. Again while open, it searches again, or takes you to its field.
   function openImages() {
     setDocumentNodeId(null)
+    // Switchboard: the panel takes the canvas's right, where a file's panel would be.
+    setFileNodeId(null)
     setImageMenu(false)
     const chosen = nodesRef.current.filter((node) => node.selected)
     const box = chosen.length === 1 ? (chosen[0].data as FlowBoxNodeData) : null
@@ -3249,13 +3436,16 @@ function FlowEditorCanvas({
     // wide as its own words. Switchboard: a box resized by hand keeps its size too.
     // Switchboard: after a pinned terminal too — there is no second shell to add.
     // Switchboard: and after a teleport, which is a way across the board, not a step,
-    // and after a video, as after a picture.
+    // and after a video, as after a picture — and a PDF or a spreadsheet, as after a
+    // document.
     const box: FlowBoxNodeData =
       from.shape === "image" ||
       from.shape === "document" ||
       from.shape === "terminal" ||
       from.shape === "teleport" ||
-      from.shape === "video"
+      from.shape === "video" ||
+      from.shape === "pdf" ||
+      from.shape === "sheet"
         ? plainBox({ label: "", shape: "rounded", tone: "default" })
         : {
             ...from,
@@ -4613,7 +4803,7 @@ function FlowEditorCanvas({
   // What the canvas accepts dropped on it: a box, note or text dragged off
   // the toolbar, or picture files from the desktop. Switchboard: or a picture's
   // address, dragged out of the Google Images panel or a browser — which a box's
-  // own text field keeps for itself, as words.
+  // own text field keeps for itself, as words — or a PDF or a spreadsheet.
   function onDragOver(event: React.DragEvent) {
     const types = event.dataTransfer.types
     if (!types.includes(DRAG_MIME) && !types.includes("Files") && !isAddressDrag(event)) return
@@ -4672,7 +4862,8 @@ function FlowEditorCanvas({
     const files = [...event.dataTransfer.files]
     if (files.length > 0) {
       event.preventDefault()
-      void addImages(files, at)
+      // Switchboard: pictures, and PDFs and spreadsheets, each their own way.
+      addDroppedFiles(files, at, "drop")
       return
     }
     if (isAddressDrag(event)) {
@@ -5020,6 +5211,8 @@ function FlowEditorCanvas({
     }
   }, [json, nodes])
   const soleNode = selectedNodes.length === 1 && selectedEdges.length === 0 ? selectedNodes[0] : null
+  // Switchboard: the PDF or spreadsheet that node is, for the toolbar's Open.
+  const soleFile = soleNode ? openableFile(soleNode.data as FlowBoxNodeData) : null
   // Each in its own memo, so the context below can depend on a plain string.
   const soleNodeId = useMemo(() => {
     if (edges.some((edge) => edge.selected)) return null
@@ -5098,6 +5291,8 @@ function FlowEditorCanvas({
     }
     if (soleNode) {
       if ((soleNode.data as FlowBoxNodeData).shape === "document") { openDocument(soleNode); return true }
+      // Switchboard: on a PDF or a spreadsheet, it opens as a document does.
+      if (openableFile(soleNode.data as FlowBoxNodeData)) { openFile(soleNode); return true }
       // Switchboard: Enter on a teleport goes where it goes.
       if (isTeleport(soleNode)) { teleport(soleNode); return true }
       // Switchboard: on a video, it plays — or, while it plays, stops.
@@ -5185,12 +5380,14 @@ function FlowEditorCanvas({
         const next = TOOL_KEYS[key]
         if (next === undefined) return false
         if (next === "image") pickImages()
-        // Switchboard: G opens Google Images.
+        // Switchboard: G opens Google Images, and F the picker for a PDF or a spreadsheet.
         else if (next === "images") openImages()
+        else if (next === "files") pickFiles()
         else chooseTool(next)
         return true
       },
-      paste: (files) => void addImages(files),
+      // Switchboard: a PDF or a spreadsheet pasted goes on too.
+      paste: (files) => addDroppedFiles(files, undefined, "paste"),
       copy: copyBoxes,
       cut: () => {
         if (!copyBoxes()) return false
@@ -5343,12 +5540,11 @@ function FlowEditorCanvas({
     }
 
     // A picture pasted while the canvas has the keyboard goes onto it. Text
-    // pasted into a field is the field's.
+    // pasted into a field is the field's. Switchboard: and so does a PDF or a
+    // spreadsheet; any other file is refused with a word (addDroppedFiles).
     function onPaste(event: ClipboardEvent) {
       if (isTextField(event.target) || !onCanvas(event.target)) return
-      const files = [...(event.clipboardData?.files ?? [])].filter((file) =>
-        file.type.startsWith("image/"),
-      )
+      const files = [...(event.clipboardData?.files ?? [])]
       if (files.length === 0) return
       event.preventDefault()
       shortcutsRef.current.paste(files)
@@ -5600,8 +5796,8 @@ function FlowEditorCanvas({
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
               <p className="max-w-xs rounded-lg border border-dashed border-gray-300 bg-white/80 px-5 py-4 text-center text-sm text-gray-500 dark:border-gray-700 dark:bg-gray-950/80 dark:text-gray-400">
                 Pick a shape, a sticky note or text from the toolbar and click
-                the canvas to place it, or drop an image here — then press Tab
-                to add the next box.
+                the canvas to place it, or drop an image, a PDF or a spreadsheet
+                here — then press Tab to add the next box.
               </p>
             </div>
           ) : null}
@@ -5649,6 +5845,8 @@ function FlowEditorCanvas({
             }}
             onNodeDoubleClick={(_, node) => {
               if (tool !== "hand" && (node.data as FlowBoxNodeData).shape === "document") openDocument(node)
+              // Switchboard: and a PDF or a spreadsheet, beside the canvas as a document.
+              if (tool !== "hand" && openableFile(node.data as FlowBoxNodeData)) openFile(node)
               if (tool !== "hand" && hasText(node.data as FlowBoxNodeData)) changeEditing(node.id)
             }}
             onNodeClick={(event, node) => {
@@ -5736,7 +5934,8 @@ function FlowEditorCanvas({
               <ToolRail
                 tool={tool}
                 shape={shapeChoice}
-                uploading={uploading > 0}
+                uploading={uploading > uploadingFiles}
+                uploadingFiles={uploadingFiles > 0}
                 onTool={chooseTool}
                 onShape={(shape) => {
                   setShapeChoice(shape)
@@ -5746,6 +5945,7 @@ function FlowEditorCanvas({
                 onImageMenu={showImageMenu}
                 onImageFile={pickImages}
                 onImageSearch={openImages}
+                onFiles={pickFiles}
               />
             </Panel>
 
@@ -5776,6 +5976,7 @@ function FlowEditorCanvas({
                       : undefined
                   }
                   onOpenDocument={soleNode && (soleNode.data as FlowBoxNodeData).shape === "document" ? () => openDocument(soleNode) : undefined}
+                  openFile={soleNode && soleFile ? { kind: soleFile.kind, onOpen: () => openFile(soleNode) } : undefined}
                   teleport={
                     soleNode && isTeleport(soleNode)
                       ? {
@@ -6036,7 +6237,10 @@ function FlowEditorCanvas({
                 {uploading > 0 ? (
                   <span className="flex items-center gap-1.5 pr-1.5 text-gray-500 dark:text-gray-400" role="status">
                     <RiLoader4Line className="size-3.5 animate-spin" aria-hidden="true" />
-                    Uploading {uploading === 1 ? "image" : `${uploading} images`}…
+                    {/* Switchboard: files once any PDF or spreadsheet is among them. */}
+                    Uploading {uploadingFiles > 0
+                      ? uploading === 1 ? "file" : `${uploading} files`
+                      : uploading === 1 ? "image" : `${uploading} images`}…
                   </span>
                 ) : null}
                 <SaveStatus
@@ -6068,6 +6272,19 @@ function FlowEditorCanvas({
               if (files.length > 0) void addImages(files)
             }}
           />
+          {/* Switchboard: the rail's PDF or spreadsheet (F) picks here. */}
+          <input
+            ref={filesInputRef}
+            type="file"
+            accept={FLOW_FILE_ACCEPT}
+            multiple
+            hidden
+            onChange={(event) => {
+              const files = [...(event.target.files ?? [])]
+              event.target.value = ""
+              if (files.length > 0) void addFiles(files)
+            }}
+          />
 
           {dropping ? (
             // Switchboard: over everything, and transparent to the pointer — a ring,
@@ -6095,6 +6312,28 @@ function FlowEditorCanvas({
             onRetry={() => void documents.retry(documentBox.documentId!, true)}
             onResolve={(overwrite) => void documents.resolve(documentBox.documentId!, overwrite)}
             onClose={() => { void documents.flush(); setDocumentNodeId(null) }}
+          />
+        ) : null}
+        {/* Switchboard: a PDF or a spreadsheet, where a document opens. Its name is the
+            node's label, renamed from the panel's name field once the edit ends (Enter
+            or leaving the field, not each key) — so each rename is its own undo step —
+            trimmed, and "PDF" or "Spreadsheet" when left blank, as the panel and the
+            saved spec both fall back. */}
+        {fileNode && fileBox && openFileOf ? (
+          <FilePanel
+            key={openFileOf.src}
+            kind={openFileOf.kind}
+            src={openFileOf.src}
+            title={fileBox.label}
+            diagramName={diagramName}
+            view={fileView}
+            onView={setFileView}
+            onRename={(label) =>
+              updateNode(fileNode.id, {
+                label: label.trim() || (openFileOf.kind === "pdf" ? PDF_LABEL : SHEET_LABEL),
+              })
+            }
+            onClose={() => setFileNodeId(null)}
           />
         ) : null}
         {imagesOpen ? (
@@ -6437,12 +6676,14 @@ function ToneSwatch({
 // box selected), plus editing its text and duplicating it when there is one.
 // A note or a text has a colour and no shape or outline; an image has
 // neither, only Duplicate and Delete.
+// Switchboard: a PDF or a spreadsheet neither, and Open, as a document has.
 function BoxBar({
   boxes,
   count,
   onChange,
   onEditText,
   onOpenDocument,
+  openFile,
   teleport,
   onDuplicate,
   onDelete,
@@ -6455,6 +6696,8 @@ function BoxBar({
   count: number
   onChange: (patch: Partial<FlowBoxNodeData>) => void
   onOpenDocument?: () => void
+  /** Switchboard: for one PDF or spreadsheet selected on its own — open it beside the canvas. */
+  openFile?: { kind: "pdf" | "sheet"; onOpen: () => void }
   onEditText?: () => void
   /** Switchboard: for one teleport selected on its own — go there, or say where. */
   teleport?: { linked: boolean; onGo: () => void; onPick: () => void }
@@ -6473,14 +6716,17 @@ function BoxBar({
   const dashed = shared(boxes, "dashed")
   const allBoxes = boxes.every((box) => isFlowBoxShape(box.shape))
   // Switchboard: nor a pinned terminal, which is the terminal's colours, nor a
-  // teleport, which is a teleport's, nor a video, which is YouTube's.
+  // teleport, which is a teleport's, nor a video, which is YouTube's, nor a PDF or a
+  // spreadsheet, which are their file's.
   const colourable = boxes.every(
     (box) =>
       box.shape !== "image" &&
       box.shape !== "document" &&
       box.shape !== "terminal" &&
       box.shape !== "teleport" &&
-      box.shape !== "video",
+      box.shape !== "video" &&
+      box.shape !== "pdf" &&
+      box.shape !== "sheet",
   )
   // Swatches drawn as notes or ink only when every node selected is one.
   const swatch: "box" | "note" | "text" =
@@ -6500,6 +6746,15 @@ function BoxBar({
         </>
       ) : null}
       {onOpenDocument ? <BarButton label="Open document · Enter" onClick={onOpenDocument}><RiFileTextLine className="size-4" aria-hidden="true" /></BarButton> : null}
+      {openFile ? (
+        <BarButton label={openFile.kind === "pdf" ? "Open PDF · Enter" : "Open spreadsheet · Enter"} onClick={openFile.onOpen}>
+          {openFile.kind === "pdf" ? (
+            <RiFilePdf2Line className="size-4" aria-hidden="true" />
+          ) : (
+            <RiFileExcel2Line className="size-4" aria-hidden="true" />
+          )}
+        </BarButton>
+      ) : null}
       {teleport ? (
         <>
           {teleport.linked ? (
@@ -7935,16 +8190,20 @@ function ToolRail({
   tool,
   shape,
   uploading,
+  uploadingFiles,
   onTool,
   onShape,
   imageMenu,
   onImageMenu,
   onImageFile,
   onImageSearch,
+  onFiles,
 }: {
   tool: Tool
   shape: FlowBoxShape
   uploading: boolean
+  /** Switchboard: a PDF or a spreadsheet is being kept — its tool spins, as Image does. */
+  uploadingFiles: boolean
   onTool: (tool: Tool) => void
   onShape: (shape: FlowBoxShape) => void
   // Switchboard: the image tool is a menu — a file, or Google Images — where the
@@ -7954,6 +8213,8 @@ function ToolRail({
   onImageMenu: (open: boolean) => void
   onImageFile: () => void
   onImageSearch: () => void
+  /** Switchboard: the picker for a PDF or a spreadsheet. */
+  onFiles: () => void
 }) {
   // The shape menu is open while the shape tool is out, so the box it will
   // place can be swapped before clicking the canvas.
@@ -8068,6 +8329,15 @@ function ToolRail({
             />
           ) : null}
         </div>
+        {/* Switchboard: a PDF or a spreadsheet, from a file picker — or dropped or
+            pasted, as a picture is. */}
+        <RailButton label={uploadingFiles ? "Uploading…" : "PDF or spreadsheet"} shortcut="F" onClick={onFiles}>
+          {uploadingFiles ? (
+            <RiLoader4Line className="size-4 animate-spin" aria-hidden="true" />
+          ) : (
+            <RiAttachment2 className="size-4" aria-hidden="true" />
+          )}
+        </RailButton>
         {/* Switchboard: a teleport — a button that takes the view to another node. */}
         <RailButton label="Teleport" shortcut="P" active={tool === "teleport"} onClick={() => onTool(tool === "teleport" ? "select" : "teleport")} drag="teleport">
           <RiDoorOpenLine className="size-4" aria-hidden="true" />
@@ -8100,10 +8370,10 @@ function ToolRail({
 type RailFit = "full" | "compact" | "columns"
 const RailFitContext = createContext<RailFit>("full")
 // The rail's height in the first two, from the classes above, RailButton's and
-// RailDivider's — 9 tools, 10 gaps, 2 dividers, the padding — with 8px clear above
-// and below. In two columns it is 156px.
-const RAIL_FULL_HEIGHT = 9 * 32 + 10 * 4 + 2 * 5 + 8 + 16
-const RAIL_COMPACT_HEIGHT = 9 * 28 + 10 * 2 + 2 * 1 + 4 + 16
+// RailDivider's — 10 tools, 11 gaps, 2 dividers, the padding — with 8px clear above
+// and below. In two columns it is 186px.
+const RAIL_FULL_HEIGHT = 10 * 32 + 11 * 4 + 2 * 5 + 8 + 16
+const RAIL_COMPACT_HEIGHT = 10 * 28 + 11 * 2 + 2 * 1 + 4 + 16
 function railFit(paneHeight: number): RailFit {
   // Not measured yet: as it always was.
   if (!(paneHeight > 0) || paneHeight >= RAIL_FULL_HEIGHT) return "full"
@@ -8353,7 +8623,7 @@ function ShortcutHelp({ onClose }: { onClose: () => void }) {
       </dl>
       <p className="mt-3 border-t border-white/10 pt-2 leading-4 text-gray-400">
         Drag from a box&apos;s dot to draw an arrow. Double-click the canvas to
-        type anywhere. Drop or paste an image to add it.
+        type anywhere. Drop or paste an image, a PDF or a spreadsheet to add it.
       </p>
     </div>
   )

@@ -17,6 +17,10 @@
 //     documents/<id>.md    every whiteboard's Markdown documents, keyed by document id
 //     images/<sha>.<ext>   pictures, stored once by content and named in a spec as
 //                          sbimg://image/<file> — the scheme index.js serves from here
+//     files/<sha>.<ext>    PDFs and spreadsheets, stored the same way, read-only, and
+//                          named in a spec as sbfile://file/<file> — index.js serves the
+//                          PDFs from here, and sheets.js reads the spreadsheets for the
+//                          panel that shows one
 //
 // Folders exist only in store.json. A board names its folder by id and every board file
 // sits flat in boards/, so moving a board or renaming a folder is one small write and a
@@ -80,6 +84,34 @@ const IMAGE_MAX_BYTES = 25 * 1024 * 1024;
 const DOCUMENT_MAX_BYTES = 10 * 1024 * 1024;
 const IMAGE_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
 const IMAGE_FILE_RE = /^[0-9a-f]{32}\.(png|jpg|webp)$/;
+// PDFs and spreadsheets, by the extension that says which a file is, and the most each
+// may be — lib/diagrams/files.ts FLOW_FILE_EXTENSIONS and its limits, which this mirrors
+// so a file the bundle offers is one main keeps.
+const FILE_EXTENSIONS = {
+  pdf: 'pdf', xlsx: 'sheet', xlsm: 'sheet', xlsb: 'sheet', xls: 'sheet',
+  ods: 'sheet', numbers: 'sheet', csv: 'sheet', tsv: 'sheet',
+};
+const FILE_MAX_BYTES = { pdf: 100 * 1024 * 1024, sheet: 50 * 1024 * 1024 };
+const FILE_NAME_RE = /^[0-9a-f]{32}\.(pdf|xlsx|xlsm|xlsb|xls|ods|numbers|csv|tsv)$/;
+const FILE_SRC_RE = /^sbfile:\/\/file\/([0-9a-f]{32}\.(pdf|xlsx|xlsm|xlsb|xls|ods|numbers|csv|tsv))$/;
+// What each extension is called in a sentence that refuses a file whose bytes say otherwise.
+const FILE_WHAT = {
+  pdf: 'a PDF', xlsx: 'an Excel spreadsheet', xlsm: 'an Excel spreadsheet', xlsb: 'an Excel spreadsheet',
+  xls: 'an Excel spreadsheet', ods: 'an OpenDocument spreadsheet', numbers: 'a Numbers spreadsheet',
+  csv: 'a CSV file', tsv: 'a TSV file',
+};
+// The ones that are zip archives inside, and the signature every zip starts with.
+const ZIP_EXTENSIONS = new Set(['xlsx', 'xlsm', 'xlsb', 'ods', 'numbers']);
+const ZIP_MAGIC = Buffer.from('504b0304', 'hex');
+// An old .xls is an OLE compound file — what every Office 97–2003 document is.
+const OLE_MAGIC = Buffer.from('d0cf11e0a1b11ae1', 'hex');
+// Excel's own zips, which a password turns into an OLE file: the zip, encrypted, is one
+// stream in it (EncryptedPackage), beside how to unlock it.
+const OOXML_EXTENSIONS = new Set(['xlsx', 'xlsm', 'xlsb']);
+// A PDF reader looks for its header this far in, past any junk a mail client put first.
+const PDF_HEADER_WITHIN = 1024;
+// How much of a text file is looked at for a NUL, which no text but UTF-16 has.
+const TEXT_SNIFF_BYTES = 64 * 1024;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BOARD_FILE_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/i;
 const DOCUMENT_FILE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.md$/i;
@@ -99,7 +131,7 @@ const THUMB_STRETCH = 2;
 // What the editor draws a node at, in flow units — lib/diagrams/layout.ts flowNodeSize
 // and the constants beside it, which this mirrors for the preview only. A box is 200
 // wide and as tall as its text until someone resizes it; a box, a note, a text, an
-// image and a video keep the size someone gave them in `size`. Main has no fonts to measure with, so a label's lines are counted
+// image, a video and a PDF keep the size someone gave them in `size`. Main has no fonts to measure with, so a label's lines are counted
 // at an average glyph width: exact for the usual one-line box, and close enough for the
 // rest at a twentieth of the size.
 const FLOW_BOX_WIDTH = 200;
@@ -115,6 +147,11 @@ const FLOW_DOCUMENT_SIZE = { width: 240, height: 76 };
 const FLOW_TELEPORT_SIZE = { width: 200, height: 56 };
 // A video's player at 16:9 under its 30-high bar — types.ts FLOW_VIDEO_DEFAULT_SIZE.
 const FLOW_VIDEO_SIZE = { width: 480, height: 300 };
+// A PDF with no size of its own is a Letter page 240 wide over its 30-high bar — types.ts
+// FLOW_PDF_DEFAULT_SIZE; a spreadsheet is always a card the size of a document's —
+// FLOW_SHEET_SIZE.
+const FLOW_PDF_SIZE = { width: 240, height: 341 };
+const FLOW_SHEET_SIZE = { width: 240, height: 76 };
 const FLOW_TEXT_MAX_WIDTH = 320;
 const FLOW_TEXT_MIN_WIDTH = 40;
 const FLOW_TEXT_PAD_X = 4;
@@ -186,6 +223,10 @@ function documentsDir() {
 
 function imagesDir() {
   return path.join(rootDir(), 'images');
+}
+
+function filesDir() {
+  return path.join(rootDir(), 'files');
 }
 
 function isUuid(value) {
@@ -634,6 +675,8 @@ function flowNodeSize(node) {
   if (shape === 'document') return FLOW_DOCUMENT_SIZE;
   if (shape === 'teleport') return FLOW_TELEPORT_SIZE;
   if (shape === 'video') return size ? { width: size.width, height: size.height } : FLOW_VIDEO_SIZE;
+  if (shape === 'pdf') return size ? { width: size.width, height: size.height } : FLOW_PDF_SIZE;
+  if (shape === 'sheet') return FLOW_SHEET_SIZE;
 
   const label = typeof node.label === 'string' ? node.label : '';
   const detail = typeof node.detail === 'string' ? node.detail : '';
@@ -1621,6 +1664,149 @@ async function getImagePath(src) {
   }
 }
 
+// ── PDFs and spreadsheets ───────────────────────────────────────────────────
+
+/** What an extension is — 'pdf', 'sheet' — or null for one a whiteboard doesn't keep. */
+function fileKind(ext) {
+  return typeof ext === 'string' && Object.prototype.hasOwnProperty.call(FILE_EXTENSIONS, ext) ? FILE_EXTENSIONS[ext] : null;
+}
+
+/** Text, as far as its first 64 KB tell: no NUL — unless it opens with UTF-16's mark. */
+function looksLikeText(buf) {
+  if (buf.length >= 2 && ((buf[0] === 0xff && buf[1] === 0xfe) || (buf[0] === 0xfe && buf[1] === 0xff))) return true;
+  return !buf.subarray(0, TEXT_SNIFF_BYTES).includes(0);
+}
+
+/**
+ * Whether a file's bytes are what its extension says: a PDF's header near the start; a
+ * zip for the formats that are zips, or for Excel's own the OLE file a password makes of
+ * one; an OLE file, or one of Excel's HTML and XML exports, which are text, for .xls;
+ * and text for CSV and TSV. Only the outside is checked; a damaged spreadsheet still goes
+ * on the board, and its panel says it can't be read — or, locked, that it is.
+ */
+function bytesMatch(buf, ext) {
+  if (ext === 'pdf') return buf.subarray(0, PDF_HEADER_WITHIN).includes('%PDF-');
+  if (OOXML_EXTENSIONS.has(ext)) {
+    return buf.subarray(0, ZIP_MAGIC.length).equals(ZIP_MAGIC) || buf.subarray(0, OLE_MAGIC.length).equals(OLE_MAGIC);
+  }
+  if (ZIP_EXTENSIONS.has(ext)) return buf.subarray(0, ZIP_MAGIC.length).equals(ZIP_MAGIC);
+  if (ext === 'xls') return buf.subarray(0, OLE_MAGIC.length).equals(OLE_MAGIC) || looksLikeText(buf);
+  return looksLikeText(buf);
+}
+
+/**
+ * Keep a PDF's or a spreadsheet's bytes and answer the address a spec names it by,
+ * sbfile://file/<name> — with its kind, and the file itself for index.js to make a PDF's
+ * cover from. Stored once by content, as a picture is, so the same file dropped on two
+ * boards is one file and copying a board copies nothing. The copy is read-only: "Open in
+ * Preview" hands the app this very file, and an app that saved over it would change every
+ * board that shows it.
+ */
+async function saveFile(bytes, ext) {
+  const kind = fileKind(ext);
+  if (!kind) return { ok: false, error: "That isn't a PDF or a spreadsheet" };
+  let buf;
+  try {
+    buf = ArrayBuffer.isView(bytes) ? Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength) : Buffer.from(bytes);
+  } catch (_) {
+    return { ok: false, error: 'the file came without its bytes' };
+  }
+  if (!buf.length) return { ok: false, error: 'That file is empty' };
+  if (buf.length > FILE_MAX_BYTES[kind]) {
+    const what = kind === 'pdf' ? 'PDF' : 'spreadsheet';
+    return { ok: false, error: `That ${what} is over ${Math.round(FILE_MAX_BYTES[kind] / 1024 / 1024)} MB` };
+  }
+  if (!bytesMatch(buf, ext)) {
+    return { ok: false, error: `That file isn't really ${FILE_WHAT[ext]} — it may be damaged, or named for something else` };
+  }
+  const name = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 32) + '.' + ext;
+  const file = path.join(filesDir(), name);
+  try {
+    await fs.promises.access(file);
+  } catch (_) {
+    const tmp = `${file}.${process.pid}.${++seq}.tmp`;
+    try {
+      await fs.promises.mkdir(filesDir(), { recursive: true });
+      // Made read-only as it is made; the rename then puts it in place whole.
+      await fs.promises.writeFile(tmp, buf, { mode: 0o444 });
+      await fs.promises.rename(tmp, file);
+    } catch (err) {
+      await fs.promises.unlink(tmp).catch(() => {});
+      return { ok: false, error: `could not keep that file: ${why(err)}` };
+    }
+  }
+  return { ok: true, src: 'sbfile://file/' + name, kind, file };
+}
+
+/**
+ * What a file address names — { name, ext, kind } — or null for anything that is not
+ * exactly sbfile://file/<32 hex>.<an extension we keep>: lib/diagrams/files.ts
+ * parseFlowFileSrc, for main.
+ */
+function parseFileSrc(src) {
+  const match = typeof src === 'string' && FILE_SRC_RE.exec(src);
+  return match ? { name: match[1], ext: match[2], kind: FILE_EXTENSIONS[match[2]] } : null;
+}
+
+/** The file behind `sbfile://file/<name>`, or null for any name we could not have made. */
+function filePath(name) {
+  if (typeof name !== 'string' || !FILE_NAME_RE.test(name)) return null;
+  return path.join(filesDir(), name);
+}
+
+/** A file address → the kept file's path, when it is there: Copy file path, Open, the panel. */
+async function getFilePath(src) {
+  const parsed = parseFileSrc(src);
+  const file = parsed && filePath(parsed.name);
+  if (!file) return { ok: false, error: 'Invalid file address' };
+  try {
+    if (!(await fs.promises.stat(file)).isFile()) return { ok: false, error: 'That file is no longer on this Mac' };
+    return { ok: true, data: file };
+  } catch (err) {
+    return { ok: false, error: err.code === 'ENOENT' ? 'That file is no longer on this Mac' : `Could not read the file: ${why(err)}` };
+  }
+}
+
+// The most files one paste reads, and the pictures it reads by extension — what
+// saveImage keeps, as the bundle's upload.ts names their types.
+const PASTE_MAX_FILES = 20;
+const PASTE_IMAGE_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp' };
+
+/**
+ * Files Finder copied, for Edit ▸ Paste over a canvas (drops.js readCopiedFiles has the
+ * paths): each as { name, type, bytes } for the bundle to take as it takes a file dropped —
+ * a picture's, a PDF's or a spreadsheet's bytes, by extension, within what each may be —
+ * or { name, error } for one too big to be, the sentence the bundle shows. Any other file
+ * comes as its name alone (`bytes` null), which the bundle refuses by name; nothing is
+ * read that would not go on a board. At most PASTE_MAX_FILES, in the order copied.
+ */
+async function readPastedFiles(paths) {
+  const out = [];
+  for (const file of (Array.isArray(paths) ? paths : []).slice(0, PASTE_MAX_FILES)) {
+    if (typeof file !== 'string' || !path.isAbsolute(file)) continue;
+    // Composed, as a dropped file's name is: a path from the pasteboard comes decomposed.
+    const name = path.basename(file).normalize('NFC');
+    const ext = path.extname(name).slice(1).toLowerCase();
+    const type = PASTE_IMAGE_TYPES[ext] || '';
+    const kind = fileKind(ext);
+    const most = type ? IMAGE_MAX_BYTES : kind ? FILE_MAX_BYTES[kind] : 0;
+    if (!most) { out.push({ name, type: '', bytes: null }); continue; }
+    try {
+      const stat = await fs.promises.stat(file);
+      if (!stat.isFile()) continue;
+      if (stat.size > most) {
+        out.push({ name, error: `${name} is over ${Math.round(most / 1024 / 1024)} MB` });
+        continue;
+      }
+      // A Buffer is a Uint8Array, and crosses IPC as one.
+      out.push({ name, type, bytes: await fs.promises.readFile(file) });
+    } catch (err) {
+      out.push({ name, error: `Couldn't read ${name}: ${why(err)}` });
+    }
+  }
+  return out;
+}
+
 // ── migration from the per-workspace diagrams ───────────────────────────────
 
 /**
@@ -2083,11 +2269,18 @@ module.exports = {
   saveImage,
   imagePath,
   getImagePath,
+  saveFile,
+  parseFileSrc,
+  filePath,
+  getFilePath,
+  readPastedFiles,
   migrate,
   settle,
   onChange,
   watch,
   IMAGE_TYPES,
+  FILE_EXTENSIONS,
+  FILE_MAX_BYTES,
   // For the tests, and for a sentence that has to name the folder.
   rootDir,
   legacyKeyFor,

@@ -43,7 +43,7 @@ esbuild.buildSync({
   entryPoints: [path.join(__dirname, '..', 'src', 'diagrams', 'lib', 'diagrams', 'types.ts')],
   outfile: typesFile, bundle: true, format: 'cjs', platform: 'node', logLevel: 'error',
 });
-const { FLOW_VIDEO_DEFAULT_SIZE } = require(typesFile);
+const { FLOW_VIDEO_DEFAULT_SIZE, FLOW_PDF_DEFAULT_SIZE, FLOW_SHEET_SIZE } = require(typesFile);
 
 after(() => {
   if (previousConfig === undefined) delete process.env.SWITCHBOARD_CONFIG;
@@ -453,6 +453,38 @@ test('the thumbnail fits up to 14 positioned boxes inside a 4px margin of 40×30
 
   const terminalOnly = { kind: 'flow', nodes: [{ id: 't', label: 'demo', shape: 'terminal', workspace: 'demo', position: { x: 0, y: 0 }, size: { width: 560, height: 340 } }], edges: [] };
   assert.deepEqual((await wb.create({ folderId: null, name: 'Thumb terminal', spec: terminalOnly })).data.thumb, []);
+});
+
+test('a PDF in the thumbnail is the size it was given, else the editor\'s portrait page, and a spreadsheet a document\'s card', async () => {
+  // The editor's sizes, as main mirrors them: a page 240 wide over its 30px name bar,
+  // and the one card every spreadsheet is.
+  assert.deepEqual(FLOW_PDF_DEFAULT_SIZE, { width: 240, height: 341 });
+  assert.deepEqual(FLOW_SHEET_SIZE, { width: 240, height: 76 });
+  // Made-up file names, 32 hex characters as main's are. Drawn exactly as pictures of
+  // those sizes are — and a spreadsheet's size, if a hand-edited file gives it one, is
+  // never its own.
+  const files = {
+    kind: 'flow',
+    nodes: [
+      { id: 'p', label: 'Example quarterly report', shape: 'pdf', file: 'sbfile://file/0123456789abcdef0123456789abcdef.pdf', position: { x: 0, y: 0 } },
+      { id: 'q', label: 'Example slides', shape: 'pdf', file: 'sbfile://file/0123456789abcdef0123456789abcdef.pdf', size: { width: 240, height: 165 }, position: { x: 400, y: 60 } },
+      { id: 's', label: 'Example figures', shape: 'sheet', file: 'sbfile://file/fedcba9876543210fedcba9876543210.xlsx', size: { width: 600, height: 400 }, position: { x: 0, y: 420 } },
+    ],
+    edges: [],
+  };
+  const picture = (id, size, position) => ({ id, label: 'Picture', shape: 'image', src: 'https://example.com/fictional.png', size, position });
+  const pictures = {
+    kind: 'flow',
+    nodes: [
+      picture('p', FLOW_PDF_DEFAULT_SIZE, { x: 0, y: 0 }),
+      picture('q', { width: 240, height: 165 }, { x: 400, y: 60 }),
+      picture('s', FLOW_SHEET_SIZE, { x: 0, y: 420 }),
+    ],
+    edges: [],
+  };
+  const fileThumb = (await wb.create({ folderId: null, name: 'Thumb files', spec: files })).data.thumb;
+  assert.equal(fileThumb.length, 3);
+  assert.deepEqual(fileThumb, (await wb.create({ folderId: null, name: 'Thumb file pictures', spec: pictures })).data.thumb);
 });
 
 // ---------------------------------------------------------------------------

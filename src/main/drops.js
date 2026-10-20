@@ -32,6 +32,9 @@
 //
 // The Desktop-file-vs-thumbnail distinction the user sees is exactly (1) vs (3): let the
 // thumbnail expire and the screenshot is a real file on the Desktop.
+//
+// One reader here is a whiteboard's, not a terminal's: readCopiedFiles(), the files
+// Finder's Copy put on the clipboard, by the same osascript route (§4.17).
 
 const fs = require('fs');
 const os = require('os');
@@ -175,6 +178,55 @@ function readDragPasteboard() {
   });
 }
 
+// ── the general pasteboard ──────────────────────────────────────────────────────
+
+// Run by /usr/bin/osascript -l JavaScript, with a pasteboard's name as its one argument
+// (the tests' own) or none for the general one, the clipboard. Prints, as JSON, the path
+// of every file on it — what Finder's Copy puts there: a public.file-url per item, a
+// file-reference URL (file:///.file/id=…) that filePathURL turns into the path. The
+// clipboard is only read. Electron's main-process clipboard can't do this: its
+// six-method web API has text and pictures, never files.
+const COPY_READER = `
+ObjC.import('Foundation');
+ObjC.import('AppKit');
+function run(argv) {
+  var pb = argv.length && argv[0] ? $.NSPasteboard.pasteboardWithName(argv[0]) : $.NSPasteboard.generalPasteboard;
+  var items = pb.pasteboardItems;
+  var n = items.isNil() ? 0 : items.count;
+  var out = [];
+  for (var i = 0; i < n; i++) {
+    var s = items.objectAtIndex(i).stringForType('public.file-url');
+    if (s.isNil()) continue;
+    var url = $.NSURL.URLWithString(s);
+    if (url.isNil() || !url.isFileURL) continue;
+    var file = url.filePathURL;
+    if (file.isNil() || file.path.isNil()) continue;
+    out.push(String(ObjC.unwrap(file.path)));
+  }
+  // ASCII only, whatever locale osascript prints in: an app started from Finder has no LANG.
+  return JSON.stringify(out).replace(/[\\u007f-\\uffff]/g, function (c) {
+    return '\\\\u' + ('000' + c.charCodeAt(0).toString(16)).slice(-4);
+  });
+}`;
+
+// The files on the clipboard now — Finder's Copy — as paths of files that exist, in the
+// order they were copied; [] when it holds none, on any failure, and off macOS. A
+// whiteboard's Edit ▸ Paste asks, once the clipboard's words were neither boxes nor a
+// video but files' names (a Finder copy's words). ~70 ms, an osascript run.
+function readCopiedFiles(pasteboard) {
+  if (process.platform !== 'darwin') return Promise.resolve([]);
+  const args = ['-l', 'JavaScript', '-e', COPY_READER];
+  if (typeof pasteboard === 'string' && pasteboard) args.push(pasteboard);
+  return new Promise(resolve => {
+    execFile('/usr/bin/osascript', args, { timeout: 5000, maxBuffer: 1 << 20 }, (err, stdout) => {
+      if (err) { console.error('[switchboard] copied files:', err.message); return resolve([]); }
+      let paths = [];
+      try { paths = JSON.parse(String(stdout || '').trim() || '[]'); } catch (_) { paths = []; }
+      resolve(Array.isArray(paths) ? paths.filter(p => typeof p === 'string' && path.isAbsolute(p) && isFile(p)) : []);
+    });
+  });
+}
+
 // The one snapshot in flight or just taken. dragenter fires again and again as a drag
 // crosses the pane's children — and, in the Grid, once per square it passes — so a
 // snapshot younger than a moment is reused rather than retaken; a fresh drag cannot
@@ -248,4 +300,4 @@ async function droppedFiles(entries) {
   return out.length ? out.join(' ') + ' ' : '';
 }
 
-module.exports = { shellEscapePath, pasteDir, prunePastes, savePaste, dragBegan, droppedFiles, readDragPasteboard };
+module.exports = { shellEscapePath, pasteDir, prunePastes, savePaste, dragBegan, droppedFiles, readDragPasteboard, readCopiedFiles };

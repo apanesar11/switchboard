@@ -77,6 +77,10 @@ export function inspectFlowCondenseSelection(
   if (selected.some((node) => node.shape === "video")) {
     throw new Error("Leave videos out of the selection before condensing.")
   }
+  // Switchboard: nor a PDF or a spreadsheet, whose only words are a file's name.
+  if (selected.some((node) => node.shape === "pdf" || node.shape === "sheet")) {
+    throw new Error("Leave PDFs and spreadsheets out of the selection before condensing.")
+  }
   if (selected.some((node) => !(node.label.trim() || node.detail?.trim()))) {
     throw new Error("Every selected node needs text before it can be condensed.")
   }

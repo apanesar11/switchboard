@@ -189,6 +189,60 @@ test('a video is checked and kept like any node, its id read out of a link, and 
   assert.equal(fs.readFileSync(file(), 'utf8'), before);
 });
 
+test('a PDF and a spreadsheet are checked and kept like any node, a PDF keeps its cover, and each is named when it would go', () => {
+  // Made-up file names, 32 hex characters as main's are (AGENTS.md). The CLI never
+  // reads the files: a spec only names them.
+  const PDF_FILE = 'sbfile://file/0123456789abcdef0123456789abcdef.pdf';
+  const SHEET_FILE = 'sbfile://file/fedcba9876543210fedcba9876543210.xlsx';
+  const COVER = 'sbimg://image/0123456789abcdef0123456789abcdef.png';
+  const FILES = {
+    kind: 'flow',
+    nodes: [
+      { id: 'intro', label: 'Read these first' },
+      { id: 'report', label: 'Example quarterly report', shape: 'pdf', file: PDF_FILE, src: COVER, size: { width: 240, height: 341 } },
+      { id: 'scan', shape: 'pdf', file: PDF_FILE },
+      { id: 'figures', label: 'Example figures', shape: 'sheet', file: SHEET_FILE },
+    ],
+    edges: [{ from: 'intro', to: 'report' }, { from: 'report', to: 'figures' }],
+  };
+  const ok = run(['check', '-'], { input: json(FILES) });
+  assert.equal(ok.code, 0, ok.err);
+  assert.match(ok.out, /^Valid: 4 nodes, 2 arrows, laid out \d+×\d+\./);
+  const wrongKind = { ...FILES, nodes: FILES.nodes.map(n => n.id === 'scan' ? { ...n, file: SHEET_FILE } : n) };
+  const bad = run(['check', '-'], { input: json(wrongKind) });
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /Node 3: "file" must name a PDF/);
+  const noFile = run(['check', '-'], { input: json({ ...FILES, nodes: FILES.nodes.map(n => n.id === 'figures' ? { ...n, file: undefined } : n) }) });
+  assert.match(noFile.err, /Node 4: a "sheet" node needs "file", the sbfile:\/\/ address of a spreadsheet kept on this Mac/);
+
+  const made = run(['create', '-', '--name', 'Example files', '--workspace', 'none'], { input: json(FILES) });
+  assert.equal(made.code, 0, made.err);
+  const id = /id ([0-9a-f-]{36})/.exec(made.out)[1];
+  const file = () => path.join(temp, 'whiteboards', 'boards', id + '.json');
+  const stored = new Map(boardFile(id).spec.nodes.map(n => [n.id, n]));
+  assert.deepEqual([stored.get('report').file, stored.get('report').src, stored.get('report').size], [PDF_FILE, COVER, { width: 240, height: 341 }]);
+  assert.deepEqual([stored.get('scan').label, stored.get('scan').file], ['PDF', PDF_FILE]);
+  assert.deepEqual([stored.get('figures').shape, stored.get('figures').file], ['sheet', SHEET_FILE]);
+
+  // Arranged in the editor, then rewritten from memory — no positions, and no cover: the
+  // PDF keeps its place, its size and the picture of its first page.
+  const arranged = boardFile(id);
+  arranged.spec.nodes = arranged.spec.nodes.map((node, i) => ({ ...node, position: { x: 40 + i * 400, y: 40 } }));
+  fs.writeFileSync(file(), JSON.stringify(arranged));
+  const fromMemory = { ...FILES, nodes: FILES.nodes.map(n => n.id === 'report' ? { id: 'report', label: 'Example quarterly report, final', shape: 'pdf', file: PDF_FILE } : n) };
+  const updated = run(['update', id, '-'], { input: json(fromMemory) });
+  assert.equal(updated.code, 0, updated.err);
+  const report = boardFile(id).spec.nodes.find(n => n.id === 'report');
+  assert.deepEqual([report.label, report.file, report.src, report.position, report.size], ['Example quarterly report, final', PDF_FILE, COVER, { x: 440, y: 40 }, { width: 240, height: 341 }]);
+
+  // Dropping them is refused, each named as the file it is — by its name, when it has one.
+  const before = fs.readFileSync(file(), 'utf8');
+  const refused = run(['update', id, '-'], { input: json({ kind: 'flow', nodes: [FILES.nodes[0]], edges: [] }) });
+  assert.equal(refused.code, 1);
+  assert.match(refused.err, /would remove 3 of "Example files"'s nodes: report \(a PDF "Example quarterly report, final"\), scan \(a PDF\), figures \(a spreadsheet "Example figures"\)\./);
+  assert.equal(fs.readFileSync(file(), 'utf8'), before);
+});
+
 test('new-document stores Markdown a document box can show', async () => {
   const made = run(['new-document', '-'], { input: '# Example brief\n\nWhy the card is charged first.\n' });
   assert.equal(made.code, 0, made.err);

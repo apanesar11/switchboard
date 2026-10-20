@@ -261,3 +261,17 @@ test('a video in the selection is refused, as a teleport is', () => {
   const spec = flow([node('a', 0, 0), node('b', 300, 0), node('talk', 600, 0, { label: 'An example talk', shape: 'video', videoId: 'exampleVid1' })], [edge('a', 'b'), edge('b', 'talk')]);
   assert.throws(() => inspectFlowCondenseSelection(spec, ['a', 'b', 'talk']), /^Error: Leave videos out of the selection before condensing\.$/);
 });
+
+test('a PDF or a spreadsheet in the selection is refused, as a video is, and left as it was', () => {
+  // Made-up file names, 32 hex characters as main's are (AGENTS.md).
+  const report = node('report', 600, 0, { label: 'Example quarterly report', shape: 'pdf', file: 'sbfile://file/0123456789abcdef0123456789abcdef.pdf' });
+  const figures = node('figures', 900, 0, { label: 'Example figures', shape: 'sheet', file: 'sbfile://file/fedcba9876543210fedcba9876543210.xlsx' });
+  const spec = flow([node('a', 0, 0), node('b', 300, 0), report, figures], [edge('a', 'b'), edge('b', 'report'), edge('report', 'figures')]);
+  for (const ids of [['a', 'b', 'report'], ['b', 'figures'], ['report', 'figures']]) {
+    assert.throws(() => inspectFlowCondenseSelection(spec, ids), /^Error: Leave PDFs and spreadsheets out of the selection before condensing\.$/, ids.join());
+  }
+  // Condensing the boxes before them keeps both, each still showing its file.
+  const { spec: condensed } = replaceFlowSelection(spec, ['a', 'b'], [{ label: 'One concept' }]);
+  assert.equal(condensed.nodes.find(n => n.id === 'report').file, report.file);
+  assert.equal(condensed.nodes.find(n => n.id === 'figures').file, figures.file);
+});

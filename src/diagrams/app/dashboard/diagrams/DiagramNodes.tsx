@@ -20,12 +20,18 @@
 // editor's VideoNode (FlowEditor.tsx) keeps what is playing in the editor's state.
 // Where each video left off is kept here (video places), by board and node, so a
 // video back on its poster — the board left the screen — plays on from there.
+// A PDF draws here for both canvases too, as the picture of its first page over a
+// strip with its name (PdfFace), and a spreadsheet as a card, as a document is. Either
+// opens beside the canvas on a double-click: the editor's FilePanel, or the read-only
+// canvas's, which can't rename it.
 
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { Handle, Position, getViewportForBounds, useReactFlow, useStore, useStoreApi, type NodeProps, type Viewport } from "@xyflow/react"
 import {
   RiDoorOpenLine,
   RiExternalLinkLine,
+  RiFileExcel2Line,
+  RiFilePdf2Line,
   RiImageLine,
   RiPlayFill,
   RiSparkling2Fill,
@@ -45,6 +51,9 @@ import {
 import { installFlowTextMeasure } from "@/lib/diagrams/measure"
 import {
   FLOW_SIDES,
+  PDF_BAR,
+  PDF_LABEL,
+  SHEET_LABEL,
   TELEPORT_LABEL,
   TERMINAL_HEADER,
   VIDEO_BAR,
@@ -70,6 +79,7 @@ import {
   youTubeWatchUrl,
   type YouTubePlayerInfo,
 } from "@/lib/diagrams/youtube"
+import { parseFlowFileSrc, sheetFormatName } from "@/lib/diagrams/files"
 import { DiagramFileCopy } from "./DiagramFileCopy"
 
 // Every box is sized from its text; in the browser, measure that text for
@@ -306,11 +316,25 @@ export function teleportDestinationName(box: FlowBoxNodeData | undefined): strin
     ? "Image"
     : box.shape === "video"
       ? "Video"
-      : box.shape === "note"
-        ? "Note"
-        : box.shape === "text"
-          ? "Text"
-          : "Untitled"
+      : box.shape === "pdf"
+        ? PDF_LABEL
+        : box.shape === "sheet"
+          ? SHEET_LABEL
+          : box.shape === "note"
+            ? "Note"
+            : box.shape === "text"
+              ? "Text"
+              : "Untitled"
+}
+
+/**
+ * Switchboard: the PDF or spreadsheet a node opens beside the canvas — what it is and
+ * its sbfile:// address — or null for any other node, or one whose file doesn't name
+ * what the node is (the validator never lets one through; a canvas mid-undo might).
+ */
+export function openableFile(box: FlowBoxNodeData | undefined): { kind: "pdf" | "sheet"; src: string } | null {
+  if (!box || (box.shape !== "pdf" && box.shape !== "sheet") || !box.file) return null
+  return parseFlowFileSrc(box.file)?.kind === box.shape ? { kind: box.shape, src: box.file } : null
 }
 
 /**
@@ -740,6 +764,34 @@ export function FlowBox({
       </div>
     )
   }
+  // Switchboard: a PDF — the picture of its first page over its name — and a
+  // spreadsheet, a card like a document's. Both open beside the canvas.
+  if (shape === "pdf") {
+    const name = label.replace(/\s+/g, " ").trim() || PDF_LABEL
+    return (
+      <div className={cx("flow-file-node relative size-full", className)} title={`${name} · Double-click to open`}>
+        <PdfFace cover={box.src} name={name} />
+        <DiagramFileCopy box={box} />
+        {children}
+      </div>
+    )
+  }
+  if (shape === "sheet") {
+    const name = label.replace(/\s+/g, " ").trim() || SHEET_LABEL
+    return (
+      <div className={cx("flow-file-node relative flex size-full items-center gap-3 rounded-xl border border-gray-300 bg-white px-4 shadow-sm dark:border-gray-700 dark:bg-gray-900", className)} title={`${name} · Double-click to open`}>
+        <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400">
+          <RiFileExcel2Line className="size-6" aria-hidden="true" />
+        </div>
+        <div className="min-w-0 text-left">
+          <div className="truncate text-sm font-medium text-gray-900 dark:text-gray-50">{name}</div>
+          <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{sheetFormatName(parseFlowFileSrc(box.file)?.ext ?? "xlsx")}</div>
+        </div>
+        <DiagramFileCopy box={box} />
+        {children}
+      </div>
+    )
+  }
   // Switchboard: a pinned terminal on a whiteboard that can't be edited — its
   // header, and where the shell would be, a word on how to get it back.
   if (shape === "terminal") {
@@ -859,6 +911,47 @@ function FlowImage({ src, alt }: { src?: string; alt: string }) {
       onError={() => setFailed(src)}
       className="size-full select-none rounded-md object-contain shadow-sm ring-1 ring-black/5 dark:ring-white/10"
     />
+  )
+}
+
+/**
+ * Switchboard: a PDF's face — a page, on a card, over a strip with a PDF glyph and the
+ * file's name. The page is the picture main made of the first page when the file was
+ * kept (its cover, sbimg://image/<file>), shown whole and from the top on white — paper
+ * in dark mode too. With no cover (Quick Look made none: an encrypted PDF), or one that
+ * won't load, a placeholder page with a large glyph stands in, so the node is still
+ * plainly a PDF to open. The node's size keeps the cover's shape (files.ts flowPdfSize);
+ * a hand resize keeps its proportions, and whatever is left over stays white.
+ */
+function PdfFace({ cover, name }: { cover?: string; name: string }) {
+  const [failed, setFailed] = useState<string | null>(null)
+  const pictured = cover !== undefined && cover !== "" && failed !== cover
+  return (
+    <div className="flex size-full flex-col overflow-hidden rounded-lg border border-gray-300 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-900">
+      <div className="relative min-h-0 flex-1 bg-white">
+        {pictured ? (
+          // eslint-disable-next-line @next/next/no-img-element -- the cover main kept on this Mac, sized by the node rather than by next/image
+          <img
+            src={cover}
+            alt=""
+            draggable={false}
+            onError={() => setFailed(cover)}
+            className="size-full select-none object-contain object-top"
+          />
+        ) : (
+          <div className="flex size-full items-center justify-center bg-gray-50 dark:bg-gray-800">
+            <RiFilePdf2Line className="size-12 text-red-500/80 dark:text-red-400/80" aria-hidden="true" />
+          </div>
+        )}
+      </div>
+      <div
+        className="flex shrink-0 items-center gap-1.5 border-t border-gray-200 px-2.5 dark:border-gray-700"
+        style={{ height: PDF_BAR }}
+      >
+        <RiFilePdf2Line className="size-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-gray-900 dark:text-gray-50">{name}</span>
+      </div>
+    </div>
   )
 }
 

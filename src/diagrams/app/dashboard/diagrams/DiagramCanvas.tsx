@@ -13,6 +13,8 @@
 // while reading a whiteboard — Switchboard draws an ARCHIVED board with it, and
 // documents are one store for every board, so an archived one opens its
 // documents like any other.
+// Switchboard: and its PDFs and spreadsheets, kept on this Mac by their content for
+// every board alike — opened as the editor opens them, but with their names read-only.
 
 import { useMemo, useState } from "react"
 import {
@@ -26,11 +28,12 @@ import {
 } from "@xyflow/react"
 import { layoutDiagram, type FlowBoxNodeData } from "@/lib/diagrams/layout"
 import { DocumentPanel, type DocumentView } from "./DocumentPanel"
+import { FilePanel } from "./FilePanel"
 import { useFlowDocuments } from "./useFlowDocuments"
 import { DiagramFileCopyContext } from "./DiagramFileCopy"
 import { cx } from "@/lib/utils"
 import type { DiagramSpec } from "@/lib/diagrams/types"
-import { VideoBoardContext, VideoShownContext, diagramNodeTypes } from "./DiagramNodes"
+import { VideoBoardContext, VideoShownContext, diagramNodeTypes, openableFile } from "./DiagramNodes"
 import { FLOW_EDGE_THEME } from "./DiagramEdges"
 
 // React Flow's own stylesheet. `style.css` (rather than `base.css`) because the
@@ -75,7 +78,12 @@ type Props = {
 export function DiagramCanvas({ spec, resetKey, diagramName, shown = true, boardId }: Props) {
   const layout = useMemo(() => layoutDiagram(spec), [spec])
   const [document, setDocument] = useState<FlowBoxNodeData | null>(null)
+  // Switchboard: the PDF or spreadsheet open beside the canvas. One panel at a time:
+  // opening a file puts the document away, and opening a document the file; they share
+  // the view, which each opens floating.
+  const [file, setFile] = useState<FlowBoxNodeData | null>(null)
   const [view, setView] = useState<DocumentView>("floating")
+  const opened = openableFile(file ?? undefined)
   const documents = useFlowDocuments(document?.documentId)
 
   return (
@@ -101,7 +109,8 @@ export function DiagramCanvas({ spec, resetKey, diagramName, shown = true, board
         nodesFocusable={false}
         onNodeDoubleClick={(_, node) => {
           const box = node.data as FlowBoxNodeData
-          if (box.shape === "document") { setDocument(box); setView("floating") }
+          if (box.shape === "document") { setFile(null); setDocument(box); setView("floating") }
+          else if (openableFile(box)) { setDocument(null); setFile(box); setView("floating") }
         }}
         edgesFocusable={false}
         elementsSelectable={false}
@@ -158,6 +167,7 @@ export function DiagramCanvas({ spec, resetKey, diagramName, shown = true, board
       </ReactFlow>
       </div>
       {document?.documentId ? <DocumentPanel key={document.documentId} title={document.label} diagramName={diagramName} buffer={documents.active} view={view} onView={setView} readOnly onRename={() => {}} onEdit={() => {}} onSave={() => {}} onCopyPath={() => documents.getPath(document.documentId!)} onResolve={() => {}} onRetry={() => void documents.retry(document.documentId!, true)} onClose={() => setDocument(null)} /> : null}
+      {file && opened ? <FilePanel key={opened.src} kind={opened.kind} src={opened.src} title={file.label} diagramName={diagramName} view={view} onView={setView} onClose={() => setFile(null)} /> : null}
     </div>
     </VideoBoardContext.Provider>
     </VideoShownContext.Provider>

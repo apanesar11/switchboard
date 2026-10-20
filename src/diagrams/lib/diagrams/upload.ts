@@ -4,7 +4,8 @@
 // points at it as sbimg://image/<file> — a scheme index.js serves from that folder
 // and nothing else (src/main/whiteboards.js). The checks and the sizing are the admin's.
 
-import { call } from "../bridge"
+import { call, type SavedFlowFile } from "../bridge"
+import { flowFileExtension, flowFileProblem } from "./files"
 
 // lib/social/constants.ts in the admin.
 export const ALLOWED_IMAGE_MIME = ["image/jpeg", "image/png", "image/webp"] as const
@@ -79,4 +80,41 @@ export async function clipboardImageFile(): Promise<File | null> {
   if (!result.ok) return null
   const ext = result.type === "image/jpeg" ? "jpg" : result.type === "image/webp" ? "webp" : "png"
   return new File([result.bytes as BlobPart], `Pasted image.${ext}`, { type: result.type })
+}
+
+/**
+ * Switchboard: the files Finder copied, for the same Edit ▸ Paste — asked once the
+ * clipboard's words (a copied file's are only its name) were neither boxes nor a video.
+ * `files` are Files the canvas takes as it takes the same files dropped: pictures, PDFs
+ * and spreadsheets with their bytes, anything else as its name alone, for the canvas to
+ * refuse by name. `problems` are main's sentences for files it wouldn't read (too big).
+ */
+export async function clipboardFiles(): Promise<{ files: File[]; problems: string[] }> {
+  const result = await call("diagramsClipboardFiles")
+  if (!result.ok) return { files: [], problems: [] }
+  const files: File[] = []
+  const problems: string[] = []
+  for (const entry of result.data) {
+    if ("error" in entry) problems.push(entry.error)
+    else files.push(new File(entry.bytes ? [entry.bytes as BlobPart] : [], entry.name, { type: entry.type }))
+  }
+  return { files, problems }
+}
+
+/**
+ * Switchboard: a PDF or a spreadsheet for a whiteboard, kept by main as a picture is —
+ * once, by its content, in ~/.switchboard/whiteboards/files/ — and answered with its
+ * sbfile://file/<name> address and, for a PDF, a picture of its first page. What the
+ * file is, by its name or else its type, goes with the bytes: main checks them against it.
+ */
+export async function uploadDiagramFile(file: File, abortSignal?: AbortSignal): Promise<SavedFlowFile> {
+  const problem = flowFileProblem(file)
+  if (problem) throw new Error(problem)
+  const ext = flowFileExtension(file.name, file.type)!
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  if (abortSignal?.aborted) throw new DOMException("Aborted", "AbortError")
+  const result = await call("diagramsSaveFile", bytes, ext)
+  if (abortSignal?.aborted) throw new DOMException("Aborted", "AbortError")
+  if (!result.ok) throw new Error(result.error)
+  return result.data
 }

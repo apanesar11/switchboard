@@ -188,6 +188,116 @@
   .flow-document-actions button:hover:where([data-term-theme="dark"] *), .flow-document-actions button[aria-pressed=true]:where([data-term-theme="dark"] *), .flow-document-format button:hover:where([data-term-theme="dark"] *) { background: #1e3a5f; color: #60a5fa; }
   .flow-document-error:where([data-term-theme="dark"] *) { background: #450a0a; color: #fca5a5; }
   .flow-document-empty h3:where([data-term-theme="dark"] *) { color: #e5e7eb; }
+  /* Switchboard: a PDF's or a spreadsheet's panel (FilePanel.tsx) — a document panel's
+     chrome, wider, with a viewer or a grid for its body. */
+  .flow-document-focus .flow-file-panel { width: 1180px; }
+  .flow-file-panel[data-kind=pdf] .flow-document-kind svg { color: #dc2626; }
+  .flow-file-panel[data-kind=sheet] .flow-document-kind svg { color: #16a34a; }
+  .flow-file-panel .flow-document-heading { padding: 14px 20px 14px 24px; }
+  .flow-file-panel .flow-document-heading input { font-size: 20px; }
+  .flow-file-panel .flow-document-footer em { display: flex; align-items: center; gap: 6px; font-style: normal; color: #b45309; }
+  .flow-file-panel .flow-document-footer em::before { content: "·"; color: #9ca3af; }
+  .flow-file-divider { align-self: center; width: 1px; height: 18px; margin: 0 4px; background: #e5e7eb; }
+  /* The viewer is a page of its own, which would take the pointer from the resize
+     handle the moment it passed over it. */
+  .flow-file-panel[data-resizing] { cursor: ew-resize; -webkit-user-select: none; user-select: none; }
+  .flow-file-panel[data-resizing] .flow-file-frame { pointer-events: none; }
+  .flow-file-pdf { flex: 1; min-height: 0; background: #525659; border-top: 1px solid #e5e7eb; }
+  .flow-file-frame { display: block; width: 100%; height: 100%; border: 0; }
+  .flow-file-loading { flex: 1; }
+  .flow-file-problem { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 32px; text-align: center; color: #6b7280; font-size: 13px; line-height: 1.6; }
+  .flow-file-problem svg { color: #dc2626; }
+  .flow-file-problem p { max-width: 380px; color: #374151; }
+  .flow-file-problem div { display: flex; gap: 10px; margin-top: 4px; }
+  .flow-file-problem button { padding: 6px 12px; border: 1px solid #d1d5db; border-radius: 7px; color: #374151; font-size: 12px; }
+  .flow-file-problem button:hover { background: #f3f4f6; }
+  .flow-file-problem .flow-file-primary { border-color: #0969da; background: #0969da; color: #fff; }
+  .flow-file-problem .flow-file-primary:hover { background: #0860c4; }
+  .flow-sheet { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  .flow-sheet-tools { flex-shrink: 0; display: flex; align-items: flex-start; gap: 6px; padding: 8px 12px 8px 16px; border-top: 1px solid #e5e7eb; border-bottom: 1px solid #e5e7eb; }
+  .flow-sheet-inspector { flex: 1; display: flex; align-items: flex-start; gap: 10px; min-width: 0; font-size: 12px; line-height: 20px; }
+  .flow-sheet-ref { flex: none; min-width: 52px; padding: 0 6px; border: 1px solid #e5e7eb; border-radius: 5px; background: #f8fafc; color: #374151; font: 600 11px/18px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; }
+  .flow-sheet-value { flex: 1; min-width: 0; max-height: 80px; overflow: auto; overscroll-behavior: contain; color: #1f2937; white-space: pre-wrap; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+  .flow-sheet-value em { font-style: normal; color: #9ca3af; }
+  .flow-sheet-toggle { flex: none; height: 22px; padding: 0 8px; border: 1px solid #e5e7eb; border-radius: 5px; color: #6b7280; font-size: 11px; }
+  .flow-sheet-toggle:hover { color: #374151; }
+  .flow-sheet-toggle[aria-pressed=true] { border-color: #bfdbfe; background: #eff6ff; color: #0969da; }
+  .flow-sheet-tool, .flow-sheet-find button { flex: none; display: grid; place-items: center; width: 24px; height: 22px; border-radius: 5px; color: #6b7280; }
+  .flow-sheet-tool:hover, .flow-sheet-tool[aria-pressed=true], .flow-sheet-find button:hover:not(:disabled) { background: #eff6ff; color: #0969da; }
+  .flow-sheet-find button:disabled { opacity: .4; }
+  .flow-sheet-find { flex-shrink: 0; display: flex; align-items: center; gap: 4px; padding: 6px 12px 6px 16px; border-bottom: 1px solid #e5e7eb; background: #fafbfc; color: #6b7280; font-size: 11px; }
+  .flow-sheet-find > svg { flex: none; margin-right: 2px; }
+  .flow-sheet-find input { flex: 1; min-width: 0; height: 26px; padding: 0 8px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; color: #111827; font-size: 12px; box-shadow: none; -webkit-user-select: text; user-select: text; }
+  .flow-sheet-find input:focus { border-color: #0969da; box-shadow: 0 0 0 2px #0969da33; outline: none; }
+  .flow-sheet-find span { flex: none; min-width: 64px; padding: 0 4px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .flow-sheet-body { position: relative; flex: 1; display: flex; min-height: 0; min-width: 0; }
+  /* The grid: one scroller, a sizer as big as the whole sheet, and in it only the rows
+     and columns in view, placed absolutely. The letters (with the header row) and the
+     row numbers are sticky, over the cells. */
+  .flow-sheet-grid { flex: 1; min-width: 0; overflow: auto; overscroll-behavior: contain; outline: none; background: #fff; color: #1f2937; font-size: 12px; }
+  .flow-sheet-sizer { position: relative; }
+  .flow-sheet-band { position: sticky; top: 0; z-index: 3; background: #fff; }
+  .flow-sheet-corner { position: sticky; left: 0; z-index: 2; background: #f8fafc; border-right: 1px solid #e5e7eb; border-bottom: 1px solid #e5e7eb; }
+  .flow-sheet-letter { position: absolute; top: 0; height: 24px; overflow: hidden; border-right: 1px solid #e5e7eb; border-bottom: 1px solid #e5e7eb; background: #f8fafc; color: #6b7280; font-size: 11px; line-height: 23px; text-align: center; cursor: default; }
+  .flow-sheet-gutter { position: sticky; left: 0; z-index: 2; background: #f8fafc; border-right: 1px solid #e5e7eb; }
+  .flow-sheet-rownum { position: absolute; left: 0; right: 0; height: 26px; padding-right: 8px; border-bottom: 1px solid #edf0f3; color: #9ca3af; font-size: 11px; line-height: 25px; text-align: right; font-variant-numeric: tabular-nums; cursor: default; }
+  .flow-sheet-letter[data-selected], .flow-sheet-rownum[data-selected] { background: #e7f0fd; color: #0969da; font-weight: 600; }
+  .flow-sheet-row { position: absolute; height: 26px; }
+  .flow-sheet-row[data-loading] { background: #f9fafb; }
+  .flow-sheet-cell { position: absolute; top: 0; height: 100%; padding: 0 8px; overflow: hidden; border-right: 1px solid #edf0f3; border-bottom: 1px solid #edf0f3; line-height: 25px; white-space: nowrap; text-overflow: ellipsis; cursor: cell; }
+  .flow-sheet-cell[data-num] { text-align: right; font-variant-numeric: tabular-nums; }
+  .flow-sheet-head .flow-sheet-cell { border-bottom-color: #d1d5db; background: #fff; font-weight: 600; }
+  .flow-sheet-cell[data-match] { background: #fef3c7; }
+  .flow-sheet-cell[data-current] { background: #fcd34d; }
+  /* The selected cell is the grid's focus ring: blue while it has the keyboard, grey
+     while find or the name has it, as a spreadsheet greys a selection it isn't using. */
+  .flow-sheet-cell[data-selected] { box-shadow: inset 0 0 0 2px #0969da; }
+  .flow-sheet-grid:not(:focus) .flow-sheet-cell[data-selected] { box-shadow: inset 0 0 0 2px #9ca3af; }
+  .flow-sheet-blank { position: absolute; inset: 72px 0 auto; color: #9ca3af; font-size: 12px; text-align: center; pointer-events: none; }
+  /* A sheet the workbook's limit left out whole, over its empty grid. */
+  .flow-sheet-skipped { position: absolute; inset: 0; }
+  /* What ⌘C copies while the grid has the keyboard (FilePanel.tsx armCopy): selected,
+     so selectable, and never seen. */
+  .flow-sheet-copy { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: hidden; opacity: 0; white-space: pre; pointer-events: none; -webkit-user-select: text; user-select: text; }
+  .flow-sheet-tabs { flex-shrink: 0; display: flex; gap: 2px; padding: 0 10px; overflow-x: auto; border-top: 1px solid #e5e7eb; background: #f8fafc; scrollbar-width: thin; }
+  .flow-sheet-tabs button { flex: none; max-width: 180px; margin-top: -1px; padding: 6px 12px 5px; overflow: hidden; border-bottom: 2px solid transparent; color: #6b7280; font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
+  .flow-sheet-tabs button:hover { color: #374151; }
+  .flow-sheet-tabs button[aria-selected=true] { border-bottom-color: #0969da; background: #fff; color: #111827; font-weight: 500; }
+  .flow-file-panel[data-kind=pdf] .flow-document-kind svg:where([data-term-theme="dark"] *) { color: #f87171; }
+  .flow-file-panel[data-kind=sheet] .flow-document-kind svg:where([data-term-theme="dark"] *) { color: #4ade80; }
+  .flow-file-panel .flow-document-footer em:where([data-term-theme="dark"] *) { color: #fbbf24; }
+  .flow-file-divider:where([data-term-theme="dark"] *) { background: #374151; }
+  .flow-file-pdf:where([data-term-theme="dark"] *) { background: #3b3e42; border-color: #374151; }
+  .flow-file-problem p:where([data-term-theme="dark"] *) { color: #e5e7eb; }
+  .flow-file-problem button:where([data-term-theme="dark"] *) { border-color: #4b5563; color: #e5e7eb; }
+  .flow-file-problem button:hover:where([data-term-theme="dark"] *) { background: #1f2937; }
+  .flow-file-problem .flow-file-primary:where([data-term-theme="dark"] *) { border-color: #2f81f7; background: #1f6feb; color: #fff; }
+  .flow-sheet-tools:where([data-term-theme="dark"] *), .flow-sheet-find:where([data-term-theme="dark"] *), .flow-sheet-tabs:where([data-term-theme="dark"] *) { border-color: #374151; }
+  .flow-sheet-ref:where([data-term-theme="dark"] *) { border-color: #374151; background: #1f2937; color: #e5e7eb; }
+  .flow-sheet-value:where([data-term-theme="dark"] *) { color: #e5e7eb; }
+  .flow-sheet-value em:where([data-term-theme="dark"] *), .flow-sheet-blank:where([data-term-theme="dark"] *) { color: #6b7280; }
+  .flow-sheet-toggle:where([data-term-theme="dark"] *) { border-color: #374151; color: #9ca3af; }
+  .flow-sheet-toggle:hover:where([data-term-theme="dark"] *) { color: #e5e7eb; }
+  .flow-sheet-toggle[aria-pressed=true]:where([data-term-theme="dark"] *) { border-color: #1e40af; background: #1e3a5f; color: #93c5fd; }
+  .flow-sheet-tool:where([data-term-theme="dark"] *), .flow-sheet-find button:where([data-term-theme="dark"] *) { color: #9ca3af; }
+  .flow-sheet-tool:hover:where([data-term-theme="dark"] *), .flow-sheet-tool[aria-pressed=true]:where([data-term-theme="dark"] *), .flow-sheet-find button:hover:not(:disabled):where([data-term-theme="dark"] *) { background: #1e3a5f; color: #60a5fa; }
+  .flow-sheet-find:where([data-term-theme="dark"] *) { background: #0d1422; color: #9ca3af; }
+  .flow-sheet-find input:where([data-term-theme="dark"] *) { border-color: #4b5563; background: #111827; color: #f3f4f6; }
+  .flow-sheet-find input:focus:where([data-term-theme="dark"] *) { border-color: #60a5fa; box-shadow: 0 0 0 2px #60a5fa33; }
+  .flow-sheet-grid:where([data-term-theme="dark"] *), .flow-sheet-band:where([data-term-theme="dark"] *), .flow-sheet-head .flow-sheet-cell:where([data-term-theme="dark"] *) { background: #111827; color: #e5e7eb; }
+  .flow-sheet-corner:where([data-term-theme="dark"] *), .flow-sheet-letter:where([data-term-theme="dark"] *), .flow-sheet-gutter:where([data-term-theme="dark"] *) { border-color: #374151; background: #182131; color: #9ca3af; }
+  .flow-sheet-rownum:where([data-term-theme="dark"] *) { border-color: #263042; color: #6b7280; }
+  .flow-sheet-cell:where([data-term-theme="dark"] *) { border-color: #263042; }
+  .flow-sheet-head .flow-sheet-cell:where([data-term-theme="dark"] *) { border-bottom-color: #4b5563; }
+  .flow-sheet-letter[data-selected]:where([data-term-theme="dark"] *), .flow-sheet-rownum[data-selected]:where([data-term-theme="dark"] *) { background: #1e3a5f; color: #93c5fd; }
+  .flow-sheet-row[data-loading]:where([data-term-theme="dark"] *) { background: #141c2b; }
+  .flow-sheet-cell[data-match]:where([data-term-theme="dark"] *) { background: #713f12; }
+  .flow-sheet-cell[data-current]:where([data-term-theme="dark"] *) { background: #a16207; color: #fff; }
+  .flow-sheet-cell[data-selected]:where([data-term-theme="dark"] *) { box-shadow: inset 0 0 0 2px #60a5fa; }
+  .flow-sheet-grid:not(:focus) .flow-sheet-cell[data-selected]:where([data-term-theme="dark"] *) { box-shadow: inset 0 0 0 2px #6b7280; }
+  .flow-sheet-tabs:where([data-term-theme="dark"] *) { background: #0d1422; }
+  .flow-sheet-tabs button:hover:where([data-term-theme="dark"] *) { color: #e5e7eb; }
+  .flow-sheet-tabs button[aria-selected=true]:where([data-term-theme="dark"] *) { border-bottom-color: #60a5fa; background: #111827; color: #f3f4f6; }
   /* Switchboard: the workspace an answer read, as a tag under the box's bottom-right
      edge (the mock-up's .wtag) — absolutely placed, so the box keeps the size it was
      measured at. Dashed on the placeholder of an answer still on its way. */

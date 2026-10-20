@@ -26,6 +26,7 @@ import {
   DIAGRAM_TEXT_MAX_LENGTH,
   FLOW_BOX_TEXT_MAX_LENGTH,
   FLOW_COORDINATE_LIMIT,
+  FLOW_FILE_SRC_MAX_LENGTH,
   FLOW_IMAGE_SRC_MAX_LENGTH,
   FLOW_SHAPES,
   FLOW_SIDES,
@@ -36,6 +37,8 @@ import {
   FLOW_TONES,
   FLOW_VIDEO_PORTRAIT_SIZE,
   FLOW_WORKSPACE_ID_MAX_LENGTH,
+  PDF_LABEL,
+  SHEET_LABEL,
   TELEPORT_LABEL,
   TERMINAL_FONT_MAX,
   TERMINAL_FONT_MIN,
@@ -55,6 +58,7 @@ import {
   type FlowTextSize,
   type FlowTone,
 } from "./types"
+import { parseFlowFileSrc } from "./files"
 import { parseFlowRichText } from "./rich-text"
 import { isYouTubeVideoId, youTubeVideoFromText, type YouTubeVideo } from "./youtube"
 
@@ -320,6 +324,14 @@ function imageSrc(raw: unknown, where: string): string {
   return value
 }
 
+// Switchboard: the picture of a "pdf" node's first page, by the image's rule. Optional,
+// where an image's is not: a PDF none could be made for (an encrypted one, Quick Look
+// failing) is drawn without one, and is no less a PDF for it.
+function pdfCover(raw: unknown, where: string): string | undefined {
+  if (raw === undefined || raw === null || raw === "") return undefined
+  return imageSrc(raw, where)
+}
+
 // Switchboard: the YouTube video a "video" node plays. Its id is kept exactly as
 // given — case matters, so unlike a documentId it is never lowercased — and a whole
 // link to the video is read down to its id, with the link's time and whether it is a
@@ -347,6 +359,29 @@ function videoStart(raw: unknown): number | undefined {
   return seconds > 0 && seconds <= VIDEO_START_MAX ? seconds : undefined
 }
 
+// Switchboard: the file a "pdf" or a "sheet" node shows — sbfile://file/<name>, a copy
+// main keeps on this Mac by its content (files.ts). The name is the file's own hash and
+// its extension what it is, which has to be the node's kind: a pdf naming a spreadsheet
+// would point Chromium's PDF viewer at a file main never serves it. Either is nothing
+// without its file, as a video is nothing without its id.
+function flowFile(raw: unknown, where: string, shape: "pdf" | "sheet"): string {
+  const what = shape === "pdf" ? "a PDF" : "a spreadsheet"
+  if (raw === undefined || raw === null || raw === "") {
+    fail(where, `a "${shape}" node needs "file", the sbfile:// address of ${what} kept on this Mac`)
+  }
+  if (typeof raw !== "string") fail(where, '"file" must be text')
+  const value = raw.trim()
+  if (value.length > FLOW_FILE_SRC_MAX_LENGTH) {
+    fail(where, `"file" must be ${FLOW_FILE_SRC_MAX_LENGTH} characters or fewer`)
+  }
+  const file = parseFlowFileSrc(value)
+  if (file === null) {
+    fail(where, `"file" must be the sbfile://file/<name> address the app gave ${what} it keeps`)
+  }
+  if (file.kind !== shape) fail(where, `"file" must name ${what}`)
+  return value
+}
+
 // A flow with no nodes is allowed: it is what a brand-new diagram is before
 // anything has been put on it, and what is left after deleting every box to
 // start over.
@@ -367,16 +402,23 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
     const shape = optionalEnum<FlowShape>(entry.shape, FLOW_SHAPES, where, "shape")
     // Switchboard: the video a video plays, from its id or its link.
     const linked = shape === "video" ? video(entry.videoId, where) : undefined
+    // Switchboard: the file a PDF or a spreadsheet shows.
+    const file = shape === "pdf" || shape === "sheet" ? flowFile(entry.file, where, shape) : undefined
     // Switchboard: a terminal is labelled with its workspace's id, whatever it says.
     const workspace = shape === "terminal" ? terminalWorkspace(entry.workspace, where) : undefined
     // Switchboard: and a teleport always says "Teleport", and a video with no title
-    // says "YouTube video" — never its link.
+    // says "YouTube video" — never its link. A PDF or a spreadsheet whose file's name
+    // gave nothing says "PDF" or "Spreadsheet", as the editor names one.
     const label = workspace !== undefined
       ? workspace
       : shape === "teleport"
       ? TELEPORT_LABEL
       : shape === "video"
       ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? VIDEO_LABEL)
+      : shape === "pdf"
+      ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? PDF_LABEL)
+      : shape === "sheet"
+      ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? SHEET_LABEL)
       : shape === "note"
       ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? "")
       : text(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText)
@@ -420,7 +462,8 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       position: optionalPosition(entry.position, where),
       // Each kept only on the shapes it means something for, so a box turned
       // from an image doesn't carry a dead URL around.
-      src: shape === "image" ? imageSrc(entry.src, where) : undefined,
+      // Switchboard: and a PDF's picture of its first page, when it has one.
+      src: shape === "image" ? imageSrc(entry.src, where) : shape === "pdf" ? pdfCover(entry.src, where) : undefined,
       documentId: shape === "document" ? documentId(entry.documentId, where) : undefined,
       // Switchboard: a box's outline is left out when it is the default one, and a
       // box keeps its size too. A video given as a Short's link with no size of its
@@ -437,6 +480,9 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       // Switchboard: a video's id, and where it starts — as stated, else the link's time.
       videoId: linked?.videoId,
       videoStart: linked ? (videoStart(entry.videoStart) ?? linked.start) : undefined,
+      // Switchboard: a PDF's or a spreadsheet's file. A PDF's size is kept above, as an
+      // image's is; a spreadsheet's card is the one size, as a document's is.
+      file,
     }
   })
 
