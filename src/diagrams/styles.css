@@ -93,15 +93,17 @@
 
 /* Markdown documents share the canvas, but own their scrolling and keyboard. */
 @layer components {
-  /* One camera preview for the whole window, independent of canvas zoom or tabs. */
-  .sb-recording-panel { position: fixed; right: 20px; bottom: 20px; z-index: 100; width: 256px; max-width: calc(100vw - 16px); overflow: hidden; border: 1px solid #d1d5db; border-radius: 13px; background: #fff; color: #1f2937; box-shadow: 0 12px 48px #11182730, 0 2px 8px #11182714; font-family: var(--font-sans); font-size: 12px; line-height: 1.4; }
+  /* A camera preview stays inside its owning board, independent of canvas zoom. */
+  .sb-recording-panel { position: absolute; right: 16px; bottom: 16px; z-index: 45; width: 360px; max-width: calc(100% - 16px); max-height: calc(100% - 16px); overflow: hidden; border: 1px solid #d1d5db; border-radius: 13px; background: #fff; color: #1f2937; box-shadow: 0 12px 48px #11182730, 0 2px 8px #11182714; font-family: var(--font-sans); font-size: 12px; line-height: 1.4; }
   .sb-recording-head { display: flex; align-items: center; gap: 7px; height: 37px; padding: 0 10px; border-bottom: 1px solid #e5e7eb; cursor: grab; touch-action: none; user-select: none; }
   .sb-recording-head b { flex: 1; min-width: 0; font-weight: 600; }
   .sb-recording-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #9ca3af; }
   .sb-recording-dot.is-recording { background: #ef4444; }
   .sb-recording-time { font-variant-numeric: tabular-nums; color: #6b7280; }
   .sb-recording-preview { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: #111827; transform: scaleX(-1); }
-  .sb-recording-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; }
+  .sb-recording-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 25px 9px 10px; }
+  .sb-recording-resize { position: absolute; right: 1px; bottom: 1px; display: grid; place-items: center; width: 20px; height: 20px; color: #9ca3af; cursor: nwse-resize; touch-action: none; }
+  .sb-recording-resize:hover { color: #0969da; }
   .sb-recording-mic, .sb-recording-stop { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 29px; padding: 0 9px; border: 1px solid #d1d5db; border-radius: 7px; font-size: 12px; font-weight: 500; cursor: pointer; }
   .sb-recording-mic:hover { background: #f3f4f6; }
   .sb-recording-mic[aria-pressed=true] { color: #b91c1c; }
@@ -436,6 +438,7 @@
   .flow-video-seen i { display: block; height: 100%; background: #ff0033; }
   .flow-video-player { position: absolute; inset: 0; }
   .flow-video-frame { display: block; width: 100%; height: 100%; border: 0; }
+  .flow-video-still .flow-local-video-player { pointer-events: none; }
   /* No player takes the pointer while the canvas has a gesture under way (FlowEditor.tsx
      marks its wrapper), nor while the hand tool is out. */
   [data-flow-gesture] .flow-video-frame, .flow-video-still .flow-video-frame { pointer-events: none; }

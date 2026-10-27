@@ -5,7 +5,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
-const { createRecordingStore, recordingExtension, MAX_RECORDING_CHUNK_BYTES } = require('../src/main/recordings');
+const { createRecordingStore, createRecordingVideoHandler, recordingSrc, recordingExtension, MAX_RECORDING_CHUNK_BYTES } = require('../src/main/recordings');
 
 async function fixture(t, options = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'switchboard-recordings-'));
@@ -50,6 +50,7 @@ test('chunks reach disk in order and finish yields one local video', async t => 
   assert.equal(result.data.chunks, 2);
   assert.equal(result.data.mimeType, 'video/webm;codecs=vp8,opus');
   assert.equal(result.data.path.includes('.partial.'), false);
+  assert.equal(result.data.src, 'sbvideo://recording/' + path.basename(result.data.path));
   assert.deepEqual(await fs.readFile(result.data.path), Buffer.concat([first, second]));
   assert.deepEqual(await fs.readdir(directory), [path.basename(result.data.path)]);
   assert.deepEqual(await store.finish(id), result, 'a second Stop receives the saved result');
@@ -204,4 +205,73 @@ test('rename failure preserves the completed partial file', async t => {
   assert.match(finished.recoveryPath, /\.partial\.webm$/);
   assert.deepEqual(await fs.readFile(finished.recoveryPath), Buffer.from([1, 2, 3]));
   assert.equal(store.isActive(), false);
+});
+
+test('only canonical finished recording filenames get persisted video addresses', () => {
+  const name = 'Recording-2025-01-01T00-00-00-000Z-12345678-1234-4123-8123-123456789abc.webm';
+  assert.equal(recordingSrc('/fictional/recordings/' + name), 'sbvideo://recording/' + name);
+  assert.equal(recordingSrc('/fictional/recordings/' + name.replace('.webm', '.mp4')), 'sbvideo://recording/' + name.replace('.webm', '.mp4'));
+  for (const bad of [undefined, '', 'example.webm', name.replace('.webm', '.partial.webm'), name + '\n']) {
+    assert.equal(recordingSrc(bad), null);
+  }
+});
+
+test('local video handler serves only finished recordings and supplies native seeking headers', async t => {
+  const { directory, store } = await fixture(t, { now: () => new Date('2025-01-01T00:00:00Z') });
+  const started = await store.start({ mimeType: 'video/webm' });
+  await store.append(started.data.id, 0, Buffer.from('0123456789'));
+  const saved = (await store.finish(started.data.id)).data;
+  const fetched = [];
+  const handle = createRecordingVideoHandler({ directory, net: {
+    async fetch(url, options) {
+      fetched.push({ url, options });
+      const range = options.headers.get('range');
+      const bytes = await fs.readFile(new URL(url));
+      const match = range && /^bytes=(\d+)-(\d+)$/.exec(range);
+      // Electron's actual file loader returns 200 even when it honors a Range.
+      return new Response(match ? bytes.subarray(Number(match[1]), Number(match[2]) + 1) : bytes);
+    },
+  } });
+  const request = (url = saved.src, options) => handle(new Request(url, options));
+  const full = await request();
+  assert.equal(full.status, 200);
+  assert.equal(full.headers.get('Content-Type'), 'video/webm');
+  assert.equal(full.headers.get('Accept-Ranges'), 'bytes');
+  assert.equal(full.headers.get('Content-Length'), '10');
+  assert.equal(full.headers.get('X-Content-Type-Options'), 'nosniff');
+  assert.equal(await full.text(), '0123456789');
+  const thumbnail = await request(saved.src + '#t=0.01');
+  assert.equal(thumbnail.status, 200, 'Electron retains a video thumbnail media fragment');
+  assert.equal(await thumbnail.text(), '0123456789');
+  const part = await request(saved.src, { headers: { Range: 'bytes=2-4' } });
+  assert.equal(part.status, 206);
+  assert.equal(part.headers.get('Content-Range'), 'bytes 2-4/10');
+  assert.equal(part.headers.get('Content-Length'), '3');
+  assert.equal(await part.text(), '234');
+  const suffix = await request(saved.src, { headers: { Range: 'bytes=-3' } });
+  assert.equal(suffix.headers.get('Content-Range'), 'bytes 7-9/10');
+  assert.equal(await suffix.text(), '789');
+  const remaining = await request(saved.src, { headers: { Range: 'bytes=8-' } });
+  assert.equal(await remaining.text(), '89');
+  const head = await request(saved.src, { method: 'HEAD' });
+  assert.equal(head.headers.get('Content-Length'), '10');
+  assert.equal(await head.text(), '');
+  const expectedCalls = fetched.length;
+  for (const range of ['bytes=20-', 'bytes=-0', 'bytes=4-2', 'bytes=0-1,4-5', 'bytes=-']) {
+    const invalid = await request(saved.src, { headers: { Range: range } });
+    assert.equal(invalid.status, 416, range);
+    assert.equal(invalid.headers.get('Content-Range'), 'bytes */10');
+  }
+  for (const url of [saved.src + '?path=other', saved.src + '#other', saved.src + '#t=-1', saved.src + '#t=0&path=other', saved.src.replace('recording/', 'other/'),
+    saved.src.replace('Recording-', '%52ecording-'), saved.src.replace('.webm', '.partial.webm'),
+    'sbvideo://recording/../../other.webm', saved.src.replace('sbvideo:', 'https:')]) {
+    assert.equal((await request(url)).status, 404, url);
+  }
+  assert.equal(fetched.length, expectedCalls, 'invalid requests never read a file');
+  assert.equal((await request(saved.src, { method: 'POST' })).status, 405);
+  await fs.unlink(saved.path);
+  assert.equal((await request()).status, 404, 'deleted files are missing');
+  await fs.writeFile(path.join(directory, 'fictional-outside'), 'private fixture');
+  await fs.symlink(path.join(directory, 'fictional-outside'), saved.path);
+  assert.equal((await request()).status, 404, 'symlinks cannot expose an arbitrary file');
 });

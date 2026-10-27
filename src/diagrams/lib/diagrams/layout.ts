@@ -241,6 +241,7 @@ export type FlowBoxNodeData = {
   teleportTo?: string
   /** Switchboard: the YouTube video a video plays, and where it starts. */
   videoId?: string
+  videoSrc?: string
   videoStart?: number
   /** Switchboard: the PDF or spreadsheet a "pdf" or "sheet" shows — see FlowNodeSpec.file. */
   file?: string
@@ -731,6 +732,7 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
       minimized: node.minimized === true ? true : undefined,
       teleportTo: node.teleportTo,
       videoId: node.videoId,
+      videoSrc: node.videoSrc,
       videoStart: node.videoStart,
       file: node.file,
     } satisfies FlowBoxNodeData,

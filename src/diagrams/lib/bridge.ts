@@ -232,7 +232,7 @@ type Bridge = {
   recordingPermissions(): Promise<Result<null>>
   recordingStart(mimeType: string): Promise<Result<{ id: string; path: string; mimeType: string }>>
   recordingAppend(id: string, sequence: number, bytes: Uint8Array): Promise<Result<unknown>>
-  recordingFinish(id: string): Promise<Result<{ path: string; bytes: number }>>
+  recordingFinish(id: string): Promise<Result<{ path: string; src: string; bytes: number }>>
   recordingReveal(): Promise<Result<null>>
   onRecordingFlush(cb: (id: number) => void): () => void
   recordingFlushed(id: number, result: { ok: boolean; error?: string }): Promise<unknown>

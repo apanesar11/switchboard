@@ -59,6 +59,7 @@ import {
   type FlowTone,
 } from "./types"
 import { parseFlowFileSrc } from "./files"
+import { parseLocalVideoSrc } from "./local-video"
 import { parseFlowRichText } from "./rich-text"
 import { isYouTubeVideoId, youTubeVideoFromText, type YouTubeVideo } from "./youtube"
 
@@ -401,7 +402,15 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
 
     const shape = optionalEnum<FlowShape>(entry.shape, FLOW_SHAPES, where, "shape")
     // Switchboard: the video a video plays, from its id or its link.
-    const linked = shape === "video" ? video(entry.videoId, where) : undefined
+    let localVideo: string | undefined
+    if (shape === "video" && entry.videoSrc !== undefined) {
+      if (!parseLocalVideoSrc(entry.videoSrc)) fail(where, '"videoSrc" must name a saved local recording')
+      if (entry.videoId !== undefined && entry.videoId !== null && entry.videoId !== "") {
+        fail(where, 'a "video" node uses either "videoId" or "videoSrc", not both')
+      }
+      localVideo = entry.videoSrc as string
+    }
+    const linked = shape === "video" && !localVideo ? video(entry.videoId, where) : undefined
     // Switchboard: the file a PDF or a spreadsheet shows.
     const file = shape === "pdf" || shape === "sheet" ? flowFile(entry.file, where, shape) : undefined
     // Switchboard: a terminal is labelled with its workspace's id, whatever it says.
@@ -414,7 +423,7 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       : shape === "teleport"
       ? TELEPORT_LABEL
       : shape === "video"
-      ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? VIDEO_LABEL)
+      ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? (localVideo ? "Camera recording" : VIDEO_LABEL))
       : shape === "pdf"
       ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? PDF_LABEL)
       : shape === "sheet"
@@ -479,6 +488,7 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       teleportTo: shape === "teleport" && typeof entry.teleportTo === "string" ? entry.teleportTo : undefined,
       // Switchboard: a video's id, and where it starts — as stated, else the link's time.
       videoId: linked?.videoId,
+      videoSrc: localVideo,
       videoStart: linked ? (videoStart(entry.videoStart) ?? linked.start) : undefined,
       // Switchboard: a PDF's or a spreadsheet's file. A PDF's size is kept above, as an
       // image's is; a spreadsheet's card is the one size, as a document's is.

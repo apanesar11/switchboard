@@ -7,9 +7,75 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
+const { pathToFileURL } = require('node:url');
 
 const MAX_RECORDING_CHUNK_BYTES = 16 * 1024 * 1024;
 const MAX_PENDING_BYTES = 2 * MAX_RECORDING_CHUNK_BYTES;
+const RECORDING_FILE = /^Recording-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(webm|mp4)$/;
+
+/** A finished recording's persisted address; no local path goes into a board. */
+function recordingSrc(filePath) {
+  if (typeof filePath !== 'string') return null;
+  const name = path.basename(filePath);
+  const match = RECORDING_FILE.exec(name);
+  return match && match[0] === name ? 'sbvideo://recording/' + name : null;
+}
+
+/** Only finished files made by this recorder are playable through sbvideo://. */
+function createRecordingVideoHandler({ directory, net }) {
+  return async request => {
+    const missing = () => new Response('not found', { status: 404 });
+    if (typeof directory !== 'string' || !path.isAbsolute(directory)) return missing();
+    let name;
+    try {
+      const url = new URL(request.url);
+      name = url.pathname.slice(1);
+      if (url.protocol !== 'sbvideo:' || url.host !== 'recording' || url.username || url.password ||
+          url.search || (url.hash && !/^#t=\d+(?:\.\d+)?$/.test(url.hash)) ||
+          recordingSrc(name) !== 'sbvideo://recording/' + name ||
+          request.url.split('#')[0] !== 'sbvideo://recording/' + name) return missing();
+    } catch (_) { return missing(); }
+    if (request.method !== 'GET' && request.method !== 'HEAD') return new Response(null, { status: 405, headers: { Allow: 'GET, HEAD' } });
+    const file = path.join(directory, name);
+    try {
+      // A link with a plausible filename must not expose a file outside this folder.
+      const stat = await fs.lstat(file);
+      if (!stat.isFile()) return missing();
+      const resultHeaders = new Headers({
+        'Content-Type': name.endsWith('.mp4') ? 'video/mp4' : 'video/webm',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Disposition': 'inline',
+        'Accept-Ranges': 'bytes',
+        'Content-Length': String(stat.size),
+      });
+      const headers = new Headers();
+      const range = request.headers.get('range');
+      let status = 200;
+      if (range) {
+        const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+        const suffix = match && !match[1];
+        const start = match && (suffix ? Math.max(0, stat.size - Number(match[2])) : Number(match[1]));
+        const end = match && (suffix || !match[2] ? stat.size - 1 : Math.min(Number(match[2]), stat.size - 1));
+        if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) ||
+            start < 0 || end < start || start >= stat.size) {
+          resultHeaders.set('Content-Range', `bytes */${stat.size}`);
+          resultHeaders.set('Content-Length', '0');
+          return new Response(null, { status: 416, headers: resultHeaders });
+        }
+        status = 206;
+        headers.set('Range', `bytes=${start}-${end}`);
+        resultHeaders.set('Content-Range', `bytes ${start}-${end}/${stat.size}`);
+        resultHeaders.set('Content-Length', String(end - start + 1));
+      }
+      if (request.method === 'HEAD') return new Response(null, { status, headers: resultHeaders });
+      const response = await net.fetch(pathToFileURL(file).href, { headers, signal: request.signal });
+      if (response.status !== 200 && response.status !== 206) return missing();
+      // Electron's file loader honors Range but answers 200 without range headers.
+      // Supply the standard 206/Content-Range contract so native video can seek.
+      return new Response(response.body, { status, headers: resultHeaders });
+    } catch (_) { return missing(); }
+  };
+}
 
 function recordingExtension(mimeType) {
   if (typeof mimeType !== 'string' || mimeType.length > 160) return null;
@@ -150,7 +216,7 @@ function createRecordingStore({ directory, fileSystem = fs, now = () => new Date
           await close(recording);
           if (recording.failed) return remember({ ...recording.failed, recoveryPath: recording.partialPath });
           await fileSystem.rename(recording.partialPath, recording.finalPath);
-          return remember({ ok: true, data: details(recording, recording.finalPath) });
+          return remember({ ok: true, data: { ...details(recording, recording.finalPath), src: recordingSrc(recording.finalPath) } });
         } catch (error) {
           try { await close(recording); } catch (_) { /* The partial file is retained. */ }
           return remember({ ...failure(error), recoveryPath: recording.partialPath });
@@ -184,4 +250,4 @@ function createRecordingStore({ directory, fileSystem = fs, now = () => new Date
   };
 }
 
-module.exports = { createRecordingStore, recordingExtension, MAX_RECORDING_CHUNK_BYTES };
+module.exports = { createRecordingStore, createRecordingVideoHandler, recordingSrc, recordingExtension, MAX_RECORDING_CHUNK_BYTES };

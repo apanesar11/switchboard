@@ -115,7 +115,7 @@ export function flowSpecFromCanvas(
   const kept = new Set(nodes.filter((node) => !blank.has(node.id)).map((node) => node.id))
 
   const specNodes: FlowNodeSpec[] = nodes.filter((node) => !blank.has(node.id)).map((node) => {
-    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, answeredIn, detached, workspace, font, minimized, teleportTo, videoId, videoStart, file } =
+    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, answeredIn, detached, workspace, font, minimized, teleportTo, videoId, videoSrc, videoStart, file } =
       node.data
     // Switchboard: a pinned terminal is labelled with its workspace, as the
     // validator labels it — a teleport "Teleport", a video with no title
@@ -174,9 +174,10 @@ export function flowSpecFromCanvas(
           ? teleportTo
           : undefined,
       // Switchboard: the video a video plays, and where it starts.
-      videoId: shape === "video" ? videoId : undefined,
+      videoId: shape === "video" && !videoSrc ? videoId : undefined,
+      videoSrc: shape === "video" ? videoSrc : undefined,
       videoStart:
-        shape === "video" && videoStart !== undefined && Number.isInteger(videoStart) && videoStart > 0
+        shape === "video" && !videoSrc && videoStart !== undefined && Number.isInteger(videoStart) && videoStart > 0
           ? videoStart
           : undefined,
       // Switchboard: the file a PDF or a spreadsheet shows.

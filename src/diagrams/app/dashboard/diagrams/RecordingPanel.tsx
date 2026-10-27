@@ -1,13 +1,10 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type PointerEvent } from "react"
-import { createRoot } from "react-dom/client"
-import { RiCloseLine, RiMicLine, RiMicOffLine, RiVideoLine } from "@remixicon/react"
-import { Button } from "@/components/Button"
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type PointerEvent } from "react"
+import { RiCloseLine, RiMicLine, RiMicOffLine } from "@remixicon/react"
 import { call } from "@/lib/bridge"
 import { cx } from "@/lib/utils"
 import {
   dismissRecording,
   getRecordingSnapshot,
-  startRecording,
   stopRecording,
   subscribeRecording,
   toggleRecordingMicrophone,
@@ -17,40 +14,29 @@ function useRecording() {
   return useSyncExternalStore(subscribeRecording, getRecordingSnapshot)
 }
 
-/** A single entry point in the whiteboard bar, including while in full screen. */
-export function RecordingButton({ className }: { className?: string }) {
-  const { phase } = useRecording()
-  const recording = phase === "recording"
-  return (
-    <Button
-      variant="secondary"
-      className={cx(className, recording && "text-red-600 dark:text-red-400")}
-      disabled={phase === "starting" || phase === "saving"}
-      data-recording-start
-      aria-label={recording ? "Stop recording" : "Record camera and microphone"}
-      title={recording ? "Stop and save recording" : "Record your camera and microphone to this laptop"}
-      onClick={() => void (recording ? stopRecording() : startRecording())}
-    >
-      {recording ? <span className="size-2 rounded-sm bg-red-500" aria-hidden="true" /> : <RiVideoLine className="size-4" aria-hidden="true" />}
-      {recording ? "Stop recording" : phase === "starting" ? "Starting…" : phase === "saving" ? "Saving…" : "Record"}
-    </Button>
-  )
-}
-
 function elapsed(startedAt: number | null, now: number): string {
   const seconds = Math.max(0, Math.floor((now - (startedAt ?? now)) / 1000))
   const minutes = Math.floor(seconds / 60)
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`
 }
 
-function RecordingPanel() {
+type PanelGeometry = { left: number; top: number; width: number }
+type Gesture = PanelGeometry & { kind: "move" | "resize"; x: number; y: number }
+const MARGIN = 8
+const DEFAULT_WIDTH = 360
+const MIN_WIDTH = 240
+const CHROME_HEIGHT = 86
+
+/** This board owns its preview; canvas zoom never changes its screen size. */
+export function RecordingPanel({ boardId, shown }: { boardId: string; shown: boolean }) {
   const state = useRecording()
   const panel = useRef<HTMLElement>(null)
   const video = useRef<HTMLVideoElement>(null)
-  const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null)
-  const [position, setPosition] = useState<{ left: number; top: number } | null>(null)
+  const gesture = useRef<Gesture | null>(null)
+  const [geometry, setGeometry] = useState<PanelGeometry | null>(null)
   const [now, setNow] = useState(Date.now)
   const [revealError, setRevealError] = useState<string | null>(null)
+  const visible = shown && state.boardId === boardId && state.phase !== "idle"
   const recording = state.phase === "recording"
   const busy = state.phase === "starting" || state.phase === "saving"
 
@@ -60,60 +46,93 @@ function RecordingPanel() {
     element.srcObject = state.stream
     if (state.stream) void element.play().catch(() => {})
     return () => { element.srcObject = null }
-  }, [state.stream])
+  }, [state.stream, visible])
 
   useEffect(() => {
     setNow(Date.now())
-    if (!recording) return
+    if (!recording || !visible) return
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [recording])
+  }, [recording, visible])
 
   useEffect(() => { setRevealError(null) }, [state.phase])
 
-  function clamp(left: number, top: number) {
-    const rect = panel.current?.getBoundingClientRect()
+  function fit(next: PanelGeometry | null): PanelGeometry {
+    const host = panel.current?.parentElement
+    const hostWidth = host?.clientWidth ?? DEFAULT_WIDTH + MARGIN * 2
+    const hostHeight = host?.clientHeight ?? 400
+    const maxWidth = Math.max(1, Math.min(hostWidth - MARGIN * 2,
+      recording ? (hostHeight - MARGIN * 2 - CHROME_HEIGHT) * 16 / 9 + 2 : Infinity))
+    const width = Math.min(maxWidth, Math.max(Math.min(MIN_WIDTH, maxWidth), next?.width ?? DEFAULT_WIDTH))
+    const height = recording ? (width - 2) * 9 / 16 + CHROME_HEIGHT : panel.current?.offsetHeight ?? 110
+    const maxLeft = Math.max(MARGIN, hostWidth - width - MARGIN)
+    const maxTop = Math.max(MARGIN, hostHeight - height - MARGIN)
     return {
-      left: Math.max(8, Math.min(left, window.innerWidth - (rect?.width ?? 256) - 8)),
-      top: Math.max(52, Math.min(top, window.innerHeight - (rect?.height ?? 240) - 8)),
+      width,
+      left: Math.max(MARGIN, Math.min(next?.left ?? maxLeft, maxLeft)),
+      top: Math.max(MARGIN, Math.min(next?.top ?? maxTop, maxTop)),
     }
   }
 
-  useEffect(() => {
-    const resize = () => setPosition(value => value ? clamp(value.left, value.top) : null)
-    window.addEventListener("resize", resize)
-    return () => window.removeEventListener("resize", resize)
-  }, [])
+  useLayoutEffect(() => {
+    if (!visible) return
+    const host = panel.current?.parentElement
+    if (!host) return
+    const adjust = () => setGeometry(previous => {
+      const next = fit(previous)
+      return previous && next.left === previous.left && next.top === previous.top && next.width === previous.width ? previous : next
+    })
+    adjust()
+    const observer = new ResizeObserver(adjust)
+    observer.observe(host)
+    observer.observe(panel.current!)
+    return () => observer.disconnect()
+  }, [visible, recording])
 
-  function startDrag(event: PointerEvent<HTMLElement>) {
-    if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return
-    const rect = panel.current!.getBoundingClientRect()
-    drag.current = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top }
+  function startGesture(event: PointerEvent<HTMLElement>, kind: Gesture["kind"]) {
+    if (event.button !== 0 || (kind === "move" && (event.target as HTMLElement).closest("button"))) return
+    const element = panel.current!
+    gesture.current = { kind, x: event.clientX, y: event.clientY,
+      left: element.offsetLeft, top: element.offsetTop, width: element.getBoundingClientRect().width }
     event.currentTarget.setPointerCapture(event.pointerId)
+    event.stopPropagation()
     event.preventDefault()
   }
 
-  if (state.phase === "idle") return null
+  function resize(next: PanelGeometry, width: number) {
+    // Growing at a board edge moves the panel inward rather than making its
+    // default bottom-right placement impossible to enlarge.
+    setGeometry(fit({ ...next, width }))
+  }
+
+  function moveGesture(event: PointerEvent<HTMLElement>) {
+    const start = gesture.current
+    if (!start) return
+    const dx = event.clientX - start.x
+    const dy = event.clientY - start.y
+    if (start.kind === "move") setGeometry(fit({ ...start, left: start.left + dx, top: start.top + dy }))
+    else resize(start, start.width + (Math.abs(dx) > Math.abs(dy * 16 / 9) ? dx : dy * 16 / 9))
+    event.stopPropagation()
+  }
+
+  if (!visible) return null
 
   return (
     <section
       ref={panel}
-      className="sb-recording-panel"
+      className="sb-recording-panel nodrag nopan nowheel"
       data-recording-panel
       data-phase={state.phase}
       aria-label="Camera recording"
-      style={position ? { left: position.left, top: position.top, right: "auto", bottom: "auto" } : undefined}
+      style={geometry ? { left: geometry.left, top: geometry.top, width: geometry.width, right: "auto", bottom: "auto" } : undefined}
       onKeyDown={event => event.stopPropagation()}
     >
       <header
         className="sb-recording-head"
-        onPointerDown={startDrag}
-        onPointerMove={event => {
-          if (!drag.current) return
-          setPosition(clamp(drag.current.left + event.clientX - drag.current.x, drag.current.top + event.clientY - drag.current.y))
-        }}
-        onPointerUp={() => { drag.current = null }}
-        onLostPointerCapture={() => { drag.current = null }}
+        onPointerDown={event => startGesture(event, "move")}
+        onPointerMove={moveGesture}
+        onPointerUp={() => { gesture.current = null }}
+        onLostPointerCapture={() => { gesture.current = null }}
       >
         <span className={cx("sb-recording-dot", recording && "is-recording")} aria-hidden="true" />
         <b>{recording ? "Camera recording" : state.phase === "saved" ? "Recording saved" : state.phase === "error" ? "Recording stopped" : state.phase === "saving" ? "Saving recording…" : "Starting camera…"}</b>
@@ -145,6 +164,26 @@ function RecordingPanel() {
               <span aria-hidden="true" /> Stop & save
             </button>
           </div>
+          <button
+            type="button"
+            className="sb-recording-resize"
+            aria-label="Resize camera preview"
+            title="Drag to resize; arrow keys also resize"
+            data-recording-resize
+            onPointerDown={event => startGesture(event, "resize")}
+            onPointerMove={moveGesture}
+            onPointerUp={() => { gesture.current = null }}
+            onLostPointerCapture={() => { gesture.current = null }}
+            onKeyDown={event => {
+              if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return
+              event.preventDefault()
+              event.stopPropagation()
+              const current = geometry ?? fit(null)
+              resize(current, current.width + (["ArrowRight", "ArrowDown"].includes(event.key) ? 24 : -24))
+            }}
+          >
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m6 13 7-7m-3 7 3-3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
+          </button>
         </>
       ) : (
         <div className="sb-recording-message" role="status">
@@ -166,14 +205,4 @@ function RecordingPanel() {
       )}
     </section>
   )
-}
-
-/** The preview outlives every board and stays reachable when another screen opens. */
-export function installRecordingOverlay() {
-  if (document.getElementById("sb-recording-overlay")) return
-  const host = document.createElement("div")
-  host.id = "sb-recording-overlay"
-  host.className = "sbdg sbdg-portal-root"
-  document.body.appendChild(host)
-  createRoot(host).render(<RecordingPanel />)
 }

@@ -81,6 +81,7 @@ import {
 } from "@/lib/diagrams/youtube"
 import { parseFlowFileSrc, sheetFormatName } from "@/lib/diagrams/files"
 import { DiagramFileCopy } from "./DiagramFileCopy"
+import { LocalVideoFace } from "./LocalVideoFace"
 
 // Every box is sized from its text; in the browser, measure that text for
 // real rather than estimate it, so a box is as tall as its text really wraps.
@@ -692,13 +693,14 @@ function VideoPoster({
  * remounts that canvas — DiagramsPage's resetKey — which does the same.) Back on
  * screen, Play takes up where it left off (VideoFace); Stop forgets where that was.
  */
-function ReadOnlyVideo({ id, videoId, videoStart, label }: { id?: string } & Pick<FlowBoxNodeData, "videoId" | "videoStart" | "label">) {
+function ReadOnlyVideo({ id, videoId, videoSrc, videoStart, label }: { id?: string } & Pick<FlowBoxNodeData, "videoId" | "videoSrc" | "videoStart" | "label">) {
   const shown = useContext(VideoShownContext)
   const boardId = useContext(VideoBoardContext)
   const [playing, setPlaying] = useState(false)
   useEffect(() => {
     if (!shown) setPlaying(false)
   }, [shown])
+  if (videoSrc) return <LocalVideoFace src={videoSrc} label={label} shown={shown} />
   return (
     <VideoFace
       videoId={videoId}
@@ -828,7 +830,7 @@ export function FlowBox({
   if (shape === "video") {
     return (
       <div className={cx("relative size-full", className)}>
-        <ReadOnlyVideo id={nodeId} videoId={box.videoId} videoStart={box.videoStart} label={label} />
+        <ReadOnlyVideo id={nodeId} videoId={box.videoId} videoSrc={box.videoSrc} videoStart={box.videoStart} label={label} />
         {children}
       </div>
     )

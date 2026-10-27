@@ -89,10 +89,11 @@ let diagramDirty = 0;
 // every sb:wb:* handler waits for that. Set in the single-instance branch at the bottom:
 // a second instance quits without ever touching the store.
 let whiteboardsReady = null;
+const recordingDirectory = path.join(app.getPath('videos'), 'Switchboard');
 const recording = require('./recording-session.js').createRecordingSession({
   ipcMain,
   getWindow: () => mainWindow,
-  directory: path.join(app.getPath('videos'), 'Switchboard'),
+  directory: recordingDirectory,
   rendererUrl: pathToFileURL(path.join(__dirname, '..', 'renderer', 'index.html')).href,
   systemPreferences,
   shell,
@@ -1937,10 +1938,12 @@ async function stopEverything() {
 // sbfile://file/<file> — a PDF or a spreadsheet on a whiteboard, kept beside the pictures.
 // Only a PDF is ever served, for its panel's <iframe>, and streamed: Chromium's own viewer
 // reads it as it comes. A spreadsheet is read over IPC (sheets.js), never loaded as a page.
-// Electron takes this list once, so both schemes are in the one call.
+// sbvideo://recording/<file> streams finished local camera recordings.
+// Electron takes this list once, so all schemes are in the one call.
 protocol.registerSchemesAsPrivileged([
   { scheme: 'sbimg', privileges: { standard: true, secure: true, supportFetchAPI: true } },
   { scheme: 'sbfile', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+  { scheme: 'sbvideo', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
 ]);
 
 function serveDiagramImage(request) {
@@ -2011,6 +2014,7 @@ if (!app.requestSingleInstanceLock()) {
     buildMenu();
     protocol.handle('sbimg', serveDiagramImage);
     protocol.handle('sbfile', serveDiagramFile);
+    protocol.handle('sbvideo', require('./recordings.js').createRecordingVideoHandler({ directory: recordingDirectory, net }));
     // Before the window, so the panel's first page already goes out as Chrome would ask
     // for it, with no permission to grant and nowhere to download to.
     images.setupImagesSession();

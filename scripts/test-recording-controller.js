@@ -97,7 +97,7 @@ function harness(options = {}) {
       calls.push(['finish', id]);
       if (options.finish) return options.finish(id);
       const bytes = parts.reduce((total, part) => total + part.length, 0);
-      return bytes ? { ok: true, data: { path: FILE, bytes } } : { ok: false, error: 'The recording contained no video.' };
+      return bytes ? { ok: true, data: { path: FILE, src: 'sbvideo://recording/example.webm', bytes } } : { ok: false, error: 'The recording contained no video.' };
     },
     onRecordingFlush(listener) { flush = listener; return () => {}; },
     async recordingFlushed(id, result) { calls.push(['flushed', id, result]); return { ok: true }; },
@@ -314,4 +314,30 @@ test('shutdown flush reports disk failures instead of acknowledging a complete s
   assert.equal(ack[2].ok, false);
   assert.match(ack[2].error, /renamed/);
   assert.equal(state(h).saved.path, FILE + '.partial.webm');
+});
+
+test('a recording belongs to its starting board and close waits for the card to be saved', async () => {
+  const added = deferred();
+  const h = harness();
+  let received;
+  await h.api.startRecording('example-board', async file => { received = file; await added.promise; });
+  assert.equal(state(h).boardId, 'example-board');
+  h.flush(8);
+  await until(() => received);
+  assert.equal(received.path, FILE);
+  assert.equal(received.src, 'sbvideo://recording/example.webm');
+  assert.equal(count(h, 'flushed'), 0);
+  added.resolve();
+  await until(() => count(h, 'flushed') === 1);
+  assert.equal(state(h).phase, 'idle');
+  assert.equal(h.calls.at(-1)[2].ok, true);
+});
+
+test('a board save failure keeps the completed video available for recovery', async () => {
+  const h = harness();
+  await h.api.startRecording('example-board', async () => { throw new Error('Whiteboard save failed.'); });
+  await h.api.stopRecording();
+  assert.equal(state(h).phase, 'error');
+  assert.equal(state(h).saved.path, FILE);
+  assert.match(state(h).error, /could not be added to the whiteboard/);
 });

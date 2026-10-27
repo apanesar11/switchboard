@@ -52,7 +52,7 @@ export type DiagramSpec = FlowSpec
 // Switchboard: and a "teleport" — a button that, clicked, takes the view to
 // another node on the same board (`teleportTo`). Its label is always "Teleport".
 // Switchboard: and a "video" — a YouTube video that plays in its box (it needs
-// `videoId`). Its label is the video's title, or "YouTube video" until one is known.
+// `videoId`), or a local camera recording (`videoSrc`).
 // Switchboard: and a "pdf" and a "sheet" — a PDF or a spreadsheet kept on this Mac
 // (they need `file`). A PDF is drawn as a picture of its first page (`src`, when one
 // could be made) over its name; a spreadsheet as a card with its name, as a document
@@ -244,6 +244,8 @@ export type FlowNodeSpec = {
    * it, so a video has no `src`.
    */
   videoId?: string
+  /** A local recording: sbvideo://recording/<generated filename>, instead of videoId. */
+  videoSrc?: string
   /**
    * Switchboard: where a video starts playing, in whole seconds. Only kept on a
    * video; absent means from the beginning.

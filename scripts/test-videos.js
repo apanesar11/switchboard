@@ -32,12 +32,59 @@ esbuild.buildSync({
   logLevel: 'error',
 });
 const { isYouTubeVideoId, youTubeEmbedUrl, youTubeWatchUrl } = require(outfile);
+const localOutfile = path.join(temp, 'local-videos.js');
+esbuild.buildSync({
+  stdin: {
+    contents: 'export { parseDiagramSpec } from "./validate"; export { layoutDiagram } from "./layout"; export { flowSpecFromCanvas } from "./flow-editor"; export { parseLocalVideoSrc } from "./local-video";',
+    resolveDir: path.join(__dirname, '..', 'src', 'diagrams', 'lib', 'diagrams'),
+  },
+  outfile: localOutfile, bundle: true, format: 'cjs', platform: 'node', logLevel: 'error',
+});
+const { parseDiagramSpec, layoutDiagram, flowSpecFromCanvas, parseLocalVideoSrc } = require(localOutfile);
 after(() => fs.rmSync(temp, { recursive: true, force: true }));
 
 const A = 'exampleVid1';
 const B = 'exampleVid2';
 const PLAYER = 'https://www.youtube-nocookie.com/embed/' + A + '?autoplay=1&rel=0&playsinline=1';
 const APP_PAGE = pathToFileURL(path.join(__dirname, '..', 'src', 'renderer', 'index.html')).href;
+const LOCAL_NAME = 'Recording-2026-01-02T03-04-05-006Z-01234567-89ab-cdef-0123-456789abcdef.webm';
+const LOCAL_SRC = 'sbvideo://recording/' + LOCAL_NAME;
+
+test('a local recording uses only a generated filename, never a path or arbitrary URL', () => {
+  assert.equal(parseLocalVideoSrc(LOCAL_SRC), LOCAL_NAME);
+  assert.equal(parseLocalVideoSrc(LOCAL_SRC.replace('.webm', '.mp4')), LOCAL_NAME.replace('.webm', '.mp4'));
+  for (const value of [undefined, null, '', 'file:///Users/example/recording.webm', 'https://example.com/recording.webm',
+    LOCAL_SRC + '\n', LOCAL_SRC + '#t=1', LOCAL_SRC + '?download', LOCAL_SRC.replace('.webm', '.partial.webm'),
+    LOCAL_SRC.replace('recording/', 'recording/../'), LOCAL_SRC.replace('Recording-', '%52ecording-')]) {
+    assert.equal(parseLocalVideoSrc(value), null, String(value));
+  }
+});
+
+test('local recording cards keep their source and size through layout and canvas serialization', () => {
+  const parsed = parseDiagramSpec({ kind: 'flow', nodes: [{ id: 'recording', shape: 'video', videoSrc: LOCAL_SRC,
+    position: { x: 120, y: 140 }, size: { width: 640, height: 390 } }], edges: [] });
+  assert.equal(parsed.ok, true, parsed.error);
+  const layout = layoutDiagram(parsed.value);
+  assert.equal(layout.nodes[0].data.videoSrc, LOCAL_SRC);
+  assert.equal(layout.nodes[0].width, 640);
+  const saved = flowSpecFromCanvas({}, layout.nodes, layout.edges);
+  assert.equal(saved.nodes[0].videoSrc, LOCAL_SRC);
+  assert.equal(saved.nodes[0].videoId, undefined);
+  assert.equal(saved.nodes[0].label, 'Camera recording');
+  assert.deepEqual(saved.nodes[0].size, { width: 640, height: 390 });
+  assert.equal(parseDiagramSpec(JSON.parse(JSON.stringify(saved))).ok, true);
+});
+
+test('a video names either YouTube or a saved local recording', () => {
+  const parse = node => parseDiagramSpec({ kind: 'flow', nodes: [{ id: 'video', shape: 'video', ...node }], edges: [] });
+  assert.equal(parse({ videoId: A }).ok, true);
+  for (const node of [{ videoSrc: 'file:///Users/example/recording.webm' }, { videoSrc: LOCAL_SRC, videoId: A }, {}]) {
+    assert.equal(parse(node).ok, false, JSON.stringify(node));
+  }
+  const box = parseDiagramSpec({ kind: 'flow', nodes: [{ id: 'box', label: 'Example', videoSrc: LOCAL_SRC }], edges: [] });
+  assert.equal(box.ok, true);
+  assert.equal(box.value.nodes[0].videoSrc, undefined);
+});
 
 // ---------------------------------------------------------------------------
 // the id, and the player's address

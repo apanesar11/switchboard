@@ -28,7 +28,7 @@ if (!process.versions.electron) {
     process.exitCode = 1;
   });
 } else {
-  const { app, BrowserWindow, ipcMain, protocol, session } = require('electron');
+  const { app, BrowserWindow, ipcMain, net, protocol, session } = require('electron');
   const temp = process.argv[2];
   const directory = path.join(temp, 'recordings');
   const rendererFile = path.join(repo, 'src/renderer/index.html');
@@ -39,6 +39,8 @@ if (!process.versions.electron) {
   const whiteboards = require('../src/main/whiteboards');
   const { createRecordingSession } = require('../src/main/recording-session');
   const { setupVideoEmbeds } = require('../src/main/videos');
+  const { createRecordingVideoHandler } = require('../src/main/recordings');
+  protocol.registerSchemesAsPrivileged([{ scheme: 'sbvideo', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
   let window;
   const revealed = [];
   const recording = createRecordingSession({
@@ -68,6 +70,7 @@ if (!process.versions.electron) {
 
   app.whenReady().then(async () => {
     setupVideoEmbeds(session.defaultSession);
+    protocol.handle('sbvideo', createRecordingVideoHandler({ directory, net }));
     protocol.handle('https', () => new Response('No network in recording tests', { status: 404 }));
     protocol.handle('http', () => new Response('No network in recording tests', { status: 404 }));
     window = new BrowserWindow({
@@ -90,7 +93,7 @@ if (!process.versions.electron) {
         if (await run(code)) return;
         await sleep(25);
       }
-      const panel = await run('document.querySelector("[data-recording-panel]")?.textContent || "No recording panel"');
+      const panel = await run(`JSON.stringify({panel:document.querySelector('[data-recording-panel]')?.textContent, card:document.querySelector('[data-local-video]')?.innerHTML, media:Array.from(document.querySelectorAll('[data-local-video] video')).map(v=>({src:v.currentSrc,readyState:v.readyState,networkState:v.networkState,error:v.error?.message}))})`);
       throw new Error('Timed out: ' + code + '\n' + panel + '\n' + errors.join('\n'));
     };
     const click = selector => run(`document.querySelector(${JSON.stringify(selector)}).click()`);
@@ -114,6 +117,12 @@ if (!process.versions.electron) {
       await until('SB.state.booted');
       await run(`SB.go({ view: 'whiteboard', board: ${JSON.stringify(board.data.id)} })`);
       await until('document.querySelector("[data-recording-start]")');
+      assert.equal(await run(`(() => {
+        const image = document.querySelector('[aria-label="Image (I)"]');
+        const record = document.querySelector('[data-recording-start]');
+        const buttons = Array.from(document.querySelectorAll('button'));
+        return buttons.indexOf(record) === buttons.indexOf(image) + 1;
+      })()`), true, 'Record sits immediately after Image in the side toolbar');
       await click('[data-recording-start]');
       await until(phase('recording'));
       await until('document.querySelector("[data-recording-panel] video")?.videoWidth > 0');
@@ -127,26 +136,31 @@ if (!process.versions.electron) {
       await click('[data-recording-mute]');
       assert.equal(await run(`document.querySelector('[data-recording-panel] video').srcObject.getAudioTracks()[0].enabled`), true);
 
-      // A recording belongs to the window: its preview and Stop survive navigation.
-      await run('SB.go({ view: "whiteboards", folder: "all" })');
-      assert.equal(await run(`!!${phase('recording')}`), true);
-      await run(`SB.go({ view: 'whiteboard', board: ${JSON.stringify(board.data.id)} })`);
-      await until(`document.querySelector('[aria-label="Full screen"]')`);
-      await click('[aria-label="Full screen"]');
-      assert.equal(await run(`!!${phase('recording')}`), true);
-      const visible = await run(`(() => {
+      // The preview grows without leaving its board, then follows that board only.
+      const bounds = () => run(`(() => {
         const panel = document.querySelector('[data-recording-panel]');
-        const rect = panel.getBoundingClientRect();
-        const style = getComputedStyle(panel);
-        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-        return { visible: !!hit?.closest('[data-recording-panel]'), rect: rect.toJSON(), position: style.position, zIndex: style.zIndex,
-          parents: [panel.parentElement, panel.parentElement.parentElement].map(el => {
-            const cs = getComputedStyle(el); return { tag: el.tagName, id: el.id, className: el.className,
-              position: cs.position, zIndex: cs.zIndex, isolation: cs.isolation, opacity: cs.opacity, transform: cs.transform,
-              display: cs.display, overflow: cs.overflow, pointerEvents: cs.pointerEvents, order: cs.order, width: cs.width, height: cs.height };
-          }), hit: hit?.outerHTML.slice(0, 300) };
+        const rect = panel.getBoundingClientRect(), host = panel.parentElement.getBoundingClientRect();
+        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width,
+          inside: rect.left >= host.left && rect.top >= host.top && rect.right <= host.right + 1 && rect.bottom <= host.bottom + 1 };
       })()`);
-      assert.equal(visible.visible, true, 'Camera preview is visible above fullscreen: ' + JSON.stringify(visible));
+      const beforePreview = await bounds();
+      await run(`document.querySelector('[data-recording-resize]').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowRight', bubbles:true}))`);
+      await until(`document.querySelector('[data-recording-panel]').getBoundingClientRect().width > ${beforePreview.width + 10}`);
+      assert.equal((await bounds()).inside, true, 'Enlarged preview remains inside its board');
+      const header = await run(`document.querySelector('[data-recording-panel] header').getBoundingClientRect().toJSON()`);
+      const x = Math.round(header.left + header.width / 2), y = Math.round(header.top + header.height / 2);
+      window.webContents.sendInputEvent({ type:'mouseMove', x, y });
+      window.webContents.sendInputEvent({ type:'mouseDown', x, y, button:'left', clickCount:1 });
+      window.webContents.sendInputEvent({ type:'mouseMove', x:1, y:1, button:'left' });
+      window.webContents.sendInputEvent({ type:'mouseUp', x:1, y:1, button:'left', clickCount:1 });
+      await sleep(50);
+      assert.equal((await bounds()).inside, true, 'Dragging beyond the board clamps the preview');
+      await run('SB.go({ view: "whiteboards", folder: "all" })');
+      await until('!document.querySelector("[data-recording-panel]")');
+      await run(`SB.go({ view: 'whiteboard', board: ${JSON.stringify(board.data.id)} })`);
+      await until(phase('recording'));
+      await click('[aria-label="Full screen"]');
+      assert.equal((await bounds()).inside, true, 'Preview stays inside the board in fullscreen');
       await sleep(1300);
       if (process.env.SWITCHBOARD_RECORDING_CAPTURE) {
         fs.mkdirSync(process.env.SWITCHBOARD_RECORDING_CAPTURE, { recursive: true });
@@ -154,42 +168,57 @@ if (!process.versions.electron) {
         fs.writeFileSync(path.join(process.env.SWITCHBOARD_RECORDING_CAPTURE, 'recording.png'), screenshot.toPNG());
       }
       await click('[data-recording-stop]');
-      await until(phase('saved'));
+      await until('!document.querySelector("[data-recording-panel]") && document.querySelector("[data-local-video]")');
       assert.deepEqual(await run('window.recordingTestTracks.map(track => track.readyState)'), ['ended', 'ended']);
       assert.equal(completed().length, 1);
       checkWebM(completed()[0]);
-      const media = await run(`new Promise((resolve, reject) => {
-        const video = document.createElement('video');
-        video.muted = true;
-        video.onloadeddata = () => {
-          const result = { width: video.videoWidth, height: video.videoHeight, duration: video.duration, readyState: video.readyState };
-          video.removeAttribute('src'); video.load(); resolve(result);
-        };
-        video.onerror = () => reject(new Error('The saved recording did not decode: ' + video.error?.message));
-        video.src = ${JSON.stringify(pathToFileURL(path.join(directory, completed()[0])).href)};
-        video.load();
-      })`);
-      assert.ok(media.width > 0 && media.height > 0 && media.readyState >= 2, 'The saved file decodes as a video');
+      await until('document.querySelector("[data-local-video] video")?.readyState >= 2');
+      assert.equal(await run(`(() => {
+        const video = document.querySelector('[data-local-video] video');
+        return video.controls && video.videoWidth > 0 && video.paused;
+      })()`), true, 'Local card starts paused on its first frame with native playback controls');
+      assert.equal(await run(`(() => { const video = document.querySelector('[data-local-video] video'); return Number.isFinite(video.duration) && video.duration > 0 && video.seekable.length > 0; })()`), true, 'Native player knows the duration and seekable range');
+      await run(`(() => { const video = document.querySelector('[data-local-video] video'); video.currentTime = video.duration / 2; })()`);
+      await until(`(() => { const video = document.querySelector('[data-local-video] video'); return !video.seeking && Math.abs(video.currentTime - video.duration / 2) < .05; })()`);
+      assert.equal(await run(`(async () => {
+        const video = document.querySelector('[data-local-video] video');
+        video.muted = true; await video.play(); const played = !video.paused; video.pause();
+        return played && video.paused;
+      })()`), true, 'Local card can play and pause');
       assert.equal(files().filter(file => file.includes('.partial.')).length, 0);
-      await click('[data-recording-reveal]');
-      for (let attempt = 0; attempt < 100 && revealed.length === 0; attempt++) await sleep(20);
-      assert.equal(revealed.length, 1);
-      assert.equal(revealed[0], path.join(directory, completed()[0]));
-      await click('[data-recording-dismiss]');
-      await until('!document.querySelector("[data-recording-panel]")');
+      const node = '.react-flow__node:has([data-local-video])';
+      await run(`document.querySelector(${JSON.stringify(node + ' .flow-video-head')}).click()`);
+      const grip = node + ' .react-flow__resize-control.handle.bottom.right';
+      await until(`document.querySelector(${JSON.stringify(grip)})`);
+      const beforeCard = await run(`document.querySelector(${JSON.stringify(node)}).getBoundingClientRect().toJSON()`);
+      const corner = await run(`document.querySelector(${JSON.stringify(grip)}).getBoundingClientRect().toJSON()`);
+      const gx = Math.round(corner.left + corner.width / 2), gy = Math.round(corner.top + corner.height / 2);
+      window.webContents.sendInputEvent({ type:'mouseMove', x:gx, y:gy });
+      window.webContents.sendInputEvent({ type:'mouseDown', x:gx, y:gy, button:'left', clickCount:1 });
+      for (let step = 1; step <= 5; step++) window.webContents.sendInputEvent({ type:'mouseMove', x:gx + step * 12, y:gy + step * 7, button:'left' });
+      window.webContents.sendInputEvent({ type:'mouseUp', x:gx + 60, y:gy + 35, button:'left', clickCount:1 });
+      await until(`document.querySelector(${JSON.stringify(node)}).getBoundingClientRect().width > ${beforeCard.width + 20}`);
+      await run('window.SBDiagrams.flush()');
+      if (process.env.SWITCHBOARD_RECORDING_CAPTURE) fs.writeFileSync(path.join(process.env.SWITCHBOARD_RECORDING_CAPTURE, 'recording-card.png'), (await window.webContents.capturePage()).toPNG());
+      const savedNode = (await whiteboards.get(board.data.id)).data.spec.nodes.find(node => node.videoSrc);
+      assert.ok(savedNode && savedNode.shape === 'video' && savedNode.size.width > 320, 'Recording and resized card are persisted in the board');
+      assert.match(savedNode.videoSrc, /^sbvideo:\/\/recording\/Recording-/);
+      await new Promise(resolve => { window.webContents.once('did-finish-load', resolve); window.reload(); });
+      await until('SB.state.booted && document.querySelector("[data-local-video] video")?.readyState >= 2');
+      assert.equal((await whiteboards.get(board.data.id)).data.spec.nodes.find(node => node.videoSrc).size.width, savedNode.size.width);
 
-      await click('[aria-label="Exit full screen"]');
+      if (await run(`!!document.querySelector('[aria-label="Exit full screen"]')`)) await click('[aria-label="Exit full screen"]');
       await click('[data-recording-start]');
       await until(phase('recording'));
       await sleep(1300);
       assert.equal((await recording.flush()).ok, true, 'Close flush waits for final recorder bytes and disk writes');
-      await until(phase('saved'));
+      await until('!document.querySelector("[data-recording-panel]") && document.querySelectorAll("[data-local-video]").length === 2');
       assert.equal(completed().length, 2);
       for (const file of completed()) checkWebM(file);
       assert.equal(files().filter(file => file.includes('.partial.')).length, 0);
       recording.resume();
       assert.deepEqual(errors, [], 'No renderer errors');
-      console.log('PASS — camera preview, microphone toggle, navigation, full screen, local WebM, Finder and close flush');
+      console.log('PASS — side toolbar Record, confined/resizable preview, microphone, local playable video cards, resize persistence and close flush');
     } catch (error) {
       code = 1;
       console.error(error.stack || error);

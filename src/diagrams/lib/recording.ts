@@ -1,6 +1,7 @@
 import { call, listen, type Result } from "./bridge"
 
 export type RecordingSnapshot = {
+  boardId: string | null
   phase: "idle" | "starting" | "recording" | "saving" | "saved" | "error"
   stream: MediaStream | null
   startedAt: number | null
@@ -10,8 +11,9 @@ export type RecordingSnapshot = {
 }
 
 type RecordingFile = { id: string; path: string; mimeType: string }
-type FinishedFile = Result<{ path: string; bytes: number }> | { ok: false; error: string; recoveryPath?: string }
+type FinishedFile = Result<{ path: string; src: string; bytes: number }> | { ok: false; error: string; recoveryPath?: string }
 type Session = {
+  onSaved?: (file: { path: string; src: string }) => Promise<void>
   canceled: boolean
   started: boolean
   stream: MediaStream | null
@@ -36,7 +38,7 @@ type Session = {
 // end it. Bytes are written in order as they arrive instead of keeping a video in
 // React state or waiting for Stop to allocate the whole recording in memory.
 const EMPTY: RecordingSnapshot = {
-  phase: "idle", stream: null, startedAt: null, saved: null, error: null, micMuted: false,
+  boardId: null, phase: "idle", stream: null, startedAt: null, saved: null, error: null, micMuted: false,
 }
 const WRITE_CHUNK = 4 * 1024 * 1024
 const MAX_PENDING = 32 * 1024 * 1024
@@ -104,10 +106,20 @@ function stopSession(session: Session, failure?: string): Promise<void> {
     await session.pending
     const finished = await finishFile(session)
     if (!finished.ok && !session.failure) session.failure = finished.error
+    let addedToBoard = false
+    if (finished.ok && session.onSaved) {
+      try {
+        if (typeof finished.data.src !== "string") throw new Error("The saved video has no local address.")
+        await session.onSaved({ path: finished.data.path, src: finished.data.src })
+        addedToBoard = true
+      } catch (error) {
+        session.failure = `The video was saved, but could not be added to the whiteboard. ${errorMessage(error)}`
+      }
+    }
     if (active !== session) return
     active = null
     update({
-      phase: session.failure ? "error" : "saved",
+      phase: session.failure ? "error" : addedToBoard ? "idle" : "saved",
       stream: null,
       saved: keptFile(finished),
       error: session.failure,
@@ -213,11 +225,12 @@ async function begin(session: Session): Promise<void> {
   }
 }
 
-export function startRecording(): Promise<void> {
+export function startRecording(boardId: string | null = null, onSaved?: Session["onSaved"]): Promise<void> {
   if (active) return Promise.resolve()
   let markStopped!: () => void
   const stopped = new Promise<void>(resolve => { markStopped = resolve })
   const session: Session = {
+    onSaved,
     canceled: false, started: false, stream: null, recorder: null, file: null,
     fileRequest: null, finishPromise: null, startPromise: null, stopPromise: null,
     stopped, markStopped, removeTrackListeners: () => {},
@@ -225,7 +238,7 @@ export function startRecording(): Promise<void> {
     acceptsData: true, writerFailed: false,
   }
   active = session
-  update({ ...EMPTY, phase: "starting" })
+  update({ ...EMPTY, boardId, phase: "starting" })
   session.startPromise = begin(session)
   return session.startPromise
 }

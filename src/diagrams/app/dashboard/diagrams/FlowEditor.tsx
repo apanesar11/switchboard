@@ -104,6 +104,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react"
 import {
   Background,
@@ -176,6 +177,7 @@ import {
   RiFolderImageLine,
   RiHand,
   RiImageAddLine,
+  RiVideoLine,
   RiItalic,
   RiKeyboardLine,
   RiLinkM,
@@ -331,6 +333,10 @@ import {
 } from "@/lib/diagrams/youtube"
 import { FIT_VIEW_OPTIONS } from "./DiagramCanvas"
 import { ImageSearchPanel, type ImageSearchAsk } from "./ImageSearchPanel"
+import { LocalVideoFace } from "./LocalVideoFace"
+import { RecordingPanel } from "./RecordingPanel"
+import { getRecordingSnapshot, startRecording, stopRecording, subscribeRecording } from "@/lib/recording"
+import { parseLocalVideoSrc } from "@/lib/diagrams/local-video"
 import { DocumentPanel, type DocumentView } from "./DocumentPanel"
 import { FilePanel } from "./FilePanel"
 import { useFlowDocuments } from "./useFlowDocuments"
@@ -1050,6 +1056,7 @@ type EditorContextValue = {
   soleNodeId: string | null
   /** False while the hand tool is out: nothing reacts to hovering then. */
   interactive: boolean
+  shown: boolean
   /** Switchboard: the boxes whose ✦ Answers are being waited for. */
   answeringIds: ReadonlySet<string>
   /** Collapsed nodes keep their hidden-node count visible on the canvas. */
@@ -1577,15 +1584,19 @@ function VideoNode({ id, box, selected }: { id: string; box: FlowBoxNodeData; se
 
   return (
     <div className={cx("relative size-full", interactive && "group")}>
-      <VideoFace
-        videoId={box.videoId}
-        videoStart={box.videoStart}
-        label={box.label}
-        playing={playing}
-        interactive={interactive}
-        nodeId={id}
-        onStop={() => editor?.stopVideo(id)}
-      />
+      {box.videoSrc ? (
+        <LocalVideoFace src={box.videoSrc} label={box.label} shown={editor?.shown} interactive={interactive} />
+      ) : (
+        <VideoFace
+          videoId={box.videoId}
+          videoStart={box.videoStart}
+          label={box.label}
+          playing={playing}
+          interactive={interactive}
+          nodeId={id}
+          onStop={() => editor?.stopVideo(id)}
+        />
+      )}
       {resizable ? <VideoResizer id={id} size={box.size} editor={editor} /> : null}
       <div
         aria-hidden="true"
@@ -1978,6 +1989,8 @@ function FlowEditorCanvas({
   // Switchboard: the whole editor — the canvas and the panels beside or over it —
   // where the canvas's own floating UI is looked for (TerminalSlot.covered).
   const rootRef = useRef<HTMLDivElement | null>(null)
+  const shownRef = useRef(shown)
+  shownRef.current = shown
   // Switchboard: the rail's workspaces. The rail may have changed since the host last
   // asked, so each picker that opens asks main again — and what main said stands
   // until the host hands over something newer.
@@ -3806,6 +3819,32 @@ function FlowEditorCanvas({
     void nameVideo(inserted.id, video.videoId)
   }
 
+  function recordCamera() {
+    const at = viewCentre()
+    if (!at) return
+    setImageMenu(false)
+    void startRecording(boardId, async file => {
+      if (!parseLocalVideoSrc(file.src)) throw new Error("The saved recording address is invalid.")
+      record()
+      lastRecordAt.current = 0
+      const box: FlowBoxNodeData = {
+        ...plainBox({ label: "Camera recording", shape: "video", tone: "default" }),
+        videoSrc: file.src,
+        size: FLOW_VIDEO_DEFAULT_SIZE,
+      }
+      const { width, height } = boxSize(box)
+      const position = clearOfBoxes({ x: snap(at.x - width / 2), y: snap(at.y - height / 2), width, height }, nodesRef.current.map(rectOf))
+      const inserted = insertBox(box, position, { quiet: !shownRef.current })
+      // Write immediately, including when stopping for a tab close or app quit.
+      // The final video and its board reference are both saved before Stop resolves.
+      latestRef.current = canvasJson(metaRef.current, nodesRef.current, edgesRef.current)
+      const next = latestRef.current
+      await enqueueSave(next)
+      if (savedRef.current !== next) throw new Error("The whiteboard could not be saved. The video file is kept locally.")
+      if (shownRef.current) reveal(inserted.rect)
+    })
+  }
+
   // ⌘V of text that is one YouTube link, and not a copy of boxes (pasteBoxes is
   // asked first): the video, centred where pasted boxes would be.
   function pasteVideo(text: string): boolean {
@@ -5297,6 +5336,14 @@ function FlowEditorCanvas({
       if (isTeleport(soleNode)) { teleport(soleNode); return true }
       // Switchboard: on a video, it plays — or, while it plays, stops.
       if (isVideo(soleNode)) {
+        if ((soleNode.data as FlowBoxNodeData).videoSrc) {
+          const video = wrapperRef.current?.querySelector<HTMLVideoElement>(`[data-id="${CSS.escape(soleNode.id)}"] video`)
+          if (video) {
+            if (video.paused) void video.play().catch(() => {})
+            else video.pause()
+          }
+          return true
+        }
         if (playingVideos.has(soleNode.id)) stopVideo(soleNode.id)
         else playVideo(soleNode.id)
         return true
@@ -5711,6 +5758,7 @@ function FlowEditorCanvas({
       resize,
       soleNodeId,
       interactive: tool !== "hand",
+      shown,
       answeringIds,
       folds,
       expandFold,
@@ -5734,6 +5782,7 @@ function FlowEditorCanvas({
       resize,
       soleNodeId,
       tool,
+      shown,
       answeringIds,
       folds,
       expandFold,
@@ -5946,6 +5995,7 @@ function FlowEditorCanvas({
                 onImageFile={pickImages}
                 onImageSearch={openImages}
                 onFiles={pickFiles}
+                recordingTool={<RecordingTool boardId={boardId} onStart={recordCamera} />}
               />
             </Panel>
 
@@ -6257,7 +6307,7 @@ function FlowEditorCanvas({
               </div>
             </Panel>
           </ReactFlow>
-
+          <RecordingPanel boardId={boardId} shown={shown} />
 
           <input
             ref={fileInputRef}
@@ -8198,6 +8248,7 @@ function ToolRail({
   onImageFile,
   onImageSearch,
   onFiles,
+  recordingTool,
 }: {
   tool: Tool
   shape: FlowBoxShape
@@ -8215,6 +8266,7 @@ function ToolRail({
   onImageSearch: () => void
   /** Switchboard: the picker for a PDF or a spreadsheet. */
   onFiles: () => void
+  recordingTool: React.ReactNode
 }) {
   // The shape menu is open while the shape tool is out, so the box it will
   // place can be swapped before clicking the canvas.
@@ -8329,6 +8381,7 @@ function ToolRail({
             />
           ) : null}
         </div>
+        {recordingTool}
         {/* Switchboard: a PDF or a spreadsheet, from a file picker — or dropped or
             pasted, as a picture is. */}
         <RailButton label={uploadingFiles ? "Uploading…" : "PDF or spreadsheet"} shortcut="F" onClick={onFiles}>
@@ -8370,10 +8423,10 @@ function ToolRail({
 type RailFit = "full" | "compact" | "columns"
 const RailFitContext = createContext<RailFit>("full")
 // The rail's height in the first two, from the classes above, RailButton's and
-// RailDivider's — 10 tools, 11 gaps, 2 dividers, the padding — with 8px clear above
+// RailDivider's — 11 tools, 12 gaps, 2 dividers, the padding — with 8px clear above
 // and below. In two columns it is 186px.
-const RAIL_FULL_HEIGHT = 10 * 32 + 11 * 4 + 2 * 5 + 8 + 16
-const RAIL_COMPACT_HEIGHT = 10 * 28 + 11 * 2 + 2 * 1 + 4 + 16
+const RAIL_FULL_HEIGHT = 11 * 32 + 12 * 4 + 2 * 5 + 8 + 16
+const RAIL_COMPACT_HEIGHT = 11 * 28 + 12 * 2 + 2 * 1 + 4 + 16
 function railFit(paneHeight: number): RailFit {
   // Not measured yet: as it always was.
   if (!(paneHeight > 0) || paneHeight >= RAIL_FULL_HEIGHT) return "full"
@@ -8492,6 +8545,23 @@ function ImageMenuItem({
 
 // A tool: an icon with its name and key in a tip beside it. `drag` makes it
 // one you can also drag onto the canvas.
+function RecordingTool({ boardId, onStart }: { boardId: string; onStart: () => void }) {
+  const state = useSyncExternalStore(subscribeRecording, getRecordingSnapshot)
+  const busy = state.phase === "starting" || state.phase === "recording" || state.phase === "saving"
+  const recording = state.boardId === boardId && state.phase === "recording"
+  return (
+    <RailButton
+      label={recording ? "Stop recording" : "Record"}
+      active={recording}
+      disabled={busy && !recording}
+      recording
+      onClick={() => void (recording ? stopRecording() : onStart())}
+    >
+      {recording ? <span className="size-2.5 rounded-sm bg-red-500" aria-hidden="true" /> : <RiVideoLine className="size-4" aria-hidden="true" />}
+    </RailButton>
+  )
+}
+
 function RailButton({
   label,
   shortcut,
@@ -8500,6 +8570,8 @@ function RailButton({
   onClick,
   drag,
   tip = true,
+  disabled,
+  recording,
   children,
 }: {
   label: string
@@ -8514,6 +8586,8 @@ function RailButton({
   drag?: FlowBoxShape | "note" | "text" | "document" | "teleport"
   /** False while something it opened is showing where the tip would go. */
   tip?: boolean
+  disabled?: boolean
+  recording?: boolean
   children: React.ReactNode
 }) {
   const fit = useContext(RailFitContext)
@@ -8523,6 +8597,8 @@ function RailButton({
       aria-label={shortcut ? `${label} (${shortcut})` : label}
       aria-pressed={expanded === undefined ? active : undefined}
       aria-expanded={expanded}
+      disabled={disabled}
+      data-recording-start={recording ? "" : undefined}
       onClick={onClick}
       draggable={drag !== undefined}
       onDragStart={

@@ -8,7 +8,7 @@ import { createRoot, type Root } from "react-dom/client"
 import { createPortal } from "react-dom"
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { DiagramsPage, type ClientRect, type FullscreenHandle } from "./app/dashboard/diagrams/DiagramsPage"
-import { installRecordingOverlay } from "./app/dashboard/diagrams/RecordingPanel"
+import { getRecordingSnapshot, stopRecording } from "./lib/recording"
 import type { FlowEditorHandle } from "./app/dashboard/diagrams/FlowEditor"
 import { WorkspacePicker } from "./app/dashboard/diagrams/WorkspacePicker"
 import { Toaster, toast } from "./components/Toast"
@@ -418,7 +418,8 @@ function create(element: HTMLElement, initial: Props) {
       // board that is going away.
       finishPick(instance, null)
       instance.wantFullscreen = false
-      instance.destroying = flush().then(() => {
+      instance.destroying = (getRecordingSnapshot().boardId === instance.props.boardId
+        ? stopRecording() : Promise.resolve()).then(flush).then(() => {
         instance.dead = true
         try {
           instance.root.unmount()
@@ -576,4 +577,3 @@ declare global {
 }
 
 window.SBDiagrams = api
-installRecordingOverlay()
