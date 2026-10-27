@@ -10,6 +10,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const desktop = require('../src/main/desktop-install.js');
 const { Publisher } = require('../src/main/publisher.js');
+const { MEDIA_USAGE_DESCRIPTIONS } = require('./package.js');
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'switchboard-publish-test-'));
 after(() => fs.rmSync(temp, { recursive: true, force: true }));
@@ -23,6 +24,7 @@ function app(name, revision) {
     <key>CFBundleIdentifier</key><string>local.switchboard.app</string>
     <key>CFBundleExecutable</key><string>Switchboard</string>
     <key>CFBundlePackageType</key><string>APPL</string>
+    ${Object.entries(MEDIA_USAGE_DESCRIPTIONS).map(([key, value]) => `<key>${key}</key><string>${value}</string>`).join('\n')}
     </dict></plist>`);
   fs.writeFileSync(path.join(bundle, 'Contents', 'Resources', 'revision'), revision);
   execFileSync('/usr/bin/codesign', ['--force', '--sign', '-', bundle], { stdio: 'pipe' });
@@ -38,6 +40,11 @@ test('prepare leaves the running bundle intact; commit swaps the complete app', 
   desktop.commit(plan);
   assert.equal(revision(target), 'new');
   assert.equal(fs.existsSync(plan.staging), false);
+  for (const key of ['NSCameraUsageDescription', 'NSMicrophoneUsageDescription']) {
+    const description = execFileSync('/usr/bin/plutil', ['-extract', key, 'raw', path.join(target, 'Contents', 'Info.plist')], { encoding: 'utf8' }).trim();
+    assert.match(description, /record/i, key + ' explains recording in the macOS permission prompt');
+    assert.match(description, /local/i, key + ' explains that capture stays local');
+  }
 });
 
 test('a failed final rename restores the old app and allows a retry', t => {

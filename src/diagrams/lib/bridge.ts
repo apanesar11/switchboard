@@ -229,6 +229,13 @@ export type SheetMatches = { matches: { row: number; col: number }[]; more: bool
 export type PastedFile = { name: string; type: string; bytes: Uint8Array | null } | { name: string; error: string }
 
 type Bridge = {
+  recordingPermissions(): Promise<Result<null>>
+  recordingStart(mimeType: string): Promise<Result<{ id: string; path: string; mimeType: string }>>
+  recordingAppend(id: string, sequence: number, bytes: Uint8Array): Promise<Result<unknown>>
+  recordingFinish(id: string): Promise<Result<{ path: string; bytes: number }>>
+  recordingReveal(): Promise<Result<null>>
+  onRecordingFlush(cb: (id: number) => void): () => void
+  recordingFlushed(id: number, result: { ok: boolean; error?: string }): Promise<unknown>
   whiteboardsList(): Promise<Result<WhiteboardsIndex>>
   whiteboardsGet(id: string): Promise<Result<WhiteboardDetail>>
   /** `workspace` left out: main gives the board the workspace used last. */
@@ -369,7 +376,7 @@ export function writeClipboard(text: string): void {
 
 /** A push event's subscription, or a no-op when the preload has none. */
 export function listen<
-  K extends "onAnswerStep" | "onAnswerStatus" | "onDiagramsImageOffer" | "onWhiteboardsChanged",
+  K extends "onAnswerStep" | "onAnswerStatus" | "onDiagramsImageOffer" | "onWhiteboardsChanged" | "onRecordingFlush",
 >(
   name: K,
   cb: Parameters<Bridge[K]>[0],

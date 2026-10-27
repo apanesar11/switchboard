@@ -227,6 +227,16 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   destination yet** until you pick another (⌘Z brings both back). Arrows can still point
   at a teleport, so it works as a flowchart's off-page connector.
 
+  **Record** in the whiteboard's top bar records your laptop camera and microphone.
+  Allow access when macOS asks; a small, movable preview shows your camera, elapsed
+  time, microphone mute, and **Stop & save**. The preview stays visible across tabs,
+  other screens, and full screen. Recordings save directly to `~/Movies/Switchboard/`
+  as video files; **Show in Finder** reveals the saved file. Closing or quitting stops
+  and saves the recording. This records your camera and voice; whiteboard activity
+  is not included in the video. Interrupted recordings keep any bytes already written
+  as `.partial.webm` or `.partial.mp4` files in the same folder. Recording needs no
+  account, server, or upload.
+
   **Videos** are YouTube's, played in a box on the whiteboard. Paste a YouTube link (⌘V)
   and its video lands at the pointer; drop one — or a video's picture dragged off
   YouTube — and it lands where you let go. Type or paste a link into a box and, when you

@@ -16,6 +16,8 @@
     "test:config": "node --test scripts/test-config.js scripts/test-workspaces.js",
     "test:editor": "node --test scripts/test-editor.js",
     "test:databases": "node --test scripts/test-databases.js",
+    "test:recordings": "node --test scripts/test-recordings.js scripts/test-recording-session.js scripts/test-recording-controller.js",
+    "test:recording:browser": "node scripts/test-recording-browser.js",
     "build:diagrams": "node scripts/build-diagrams.js",
     "check:diagrams": "tsc -p src/diagrams/tsconfig.json",
     "test:diagrams": "node --test scripts/test-whiteboards.js scripts/test-whiteboard-cli.js scripts/test-answer.js scripts/test-flow-layout.js scripts/test-condense.js scripts/test-images.js scripts/test-image-search.js scripts/test-youtube.js scripts/test-videos.js scripts/test-rich-text.js scripts/test-flow-files.js scripts/test-files.js scripts/test-sheets.js",

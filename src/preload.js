@@ -135,6 +135,15 @@ contextBridge.exposeInMainWorld('sb', {
   // Flush the whiteboard editor's pending autosave while the page is still live.
   onDiagramsFlush: cb => subscribe('sb:evt:diagramsFlush', cb),
   diagramsFlushed: id => ipcRenderer.invoke('sb:diagrams:flushed', id),
+  // Camera recording: only main chooses the local folder and filenames. Chunks are
+  // acknowledged after writing, and the final chunk is flushed before window close.
+  recordingPermissions: () => ipcRenderer.invoke('sb:recording:permissions'),
+  recordingStart: mimeType => ipcRenderer.invoke('sb:recording:start', mimeType),
+  recordingAppend: (id, sequence, bytes) => ipcRenderer.invoke('sb:recording:append', id, sequence, bytes),
+  recordingFinish: id => ipcRenderer.invoke('sb:recording:finish', id),
+  recordingReveal: () => ipcRenderer.invoke('sb:recording:reveal'),
+  onRecordingFlush: cb => subscribe('sb:evt:recordingFlush', cb),
+  recordingFlushed: (id, result) => ipcRenderer.invoke('sb:recording:flushed', id, result),
   // Google Images beside the canvas. A picture dragged out of the panel's <webview>, or
   // added from its right-click menu, arrives as an address, never a File; main fetches
   // it through the panel's own session and answers { ok, bytes, type, name } — PNG, JPEG

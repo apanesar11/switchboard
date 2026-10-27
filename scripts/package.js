@@ -8,6 +8,10 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const root = path.resolve(__dirname, '..');
+const MEDIA_USAGE_DESCRIPTIONS = Object.freeze({
+  NSCameraUsageDescription: 'Switchboard uses your camera to record videos locally from the whiteboard.',
+  NSMicrophoneUsageDescription: 'Switchboard uses your microphone to add audio to local whiteboard recordings.',
+});
 
 function buildIcon() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'switchboard-icon-'));
@@ -45,6 +49,7 @@ async function packageApp(options = {}) {
     executableName: 'Switchboard',
     appBundleId: 'local.switchboard.app',
     appCategoryType: 'public.app-category.developer-tools',
+    extendInfo: MEDIA_USAGE_DESCRIPTIONS,
     platform: 'darwin',
     arch: process.arch,
     out: options.out || path.join(root, 'dist'),
@@ -82,7 +87,7 @@ async function packageApp(options = {}) {
   return bundle;
 }
 
-module.exports = { packageApp };
+module.exports = { packageApp, MEDIA_USAGE_DESCRIPTIONS };
 
 if (require.main === module) {
   packageApp().then(bundle => console.log(`Built ${bundle}`)).catch(err => {

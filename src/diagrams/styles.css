@@ -93,6 +93,36 @@
 
 /* Markdown documents share the canvas, but own their scrolling and keyboard. */
 @layer components {
+  /* One camera preview for the whole window, independent of canvas zoom or tabs. */
+  .sb-recording-panel { position: fixed; right: 20px; bottom: 20px; z-index: 100; width: 256px; max-width: calc(100vw - 16px); overflow: hidden; border: 1px solid #d1d5db; border-radius: 13px; background: #fff; color: #1f2937; box-shadow: 0 12px 48px #11182730, 0 2px 8px #11182714; font-family: var(--font-sans); font-size: 12px; line-height: 1.4; }
+  .sb-recording-head { display: flex; align-items: center; gap: 7px; height: 37px; padding: 0 10px; border-bottom: 1px solid #e5e7eb; cursor: grab; touch-action: none; user-select: none; }
+  .sb-recording-head b { flex: 1; min-width: 0; font-weight: 600; }
+  .sb-recording-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #9ca3af; }
+  .sb-recording-dot.is-recording { background: #ef4444; }
+  .sb-recording-time { font-variant-numeric: tabular-nums; color: #6b7280; }
+  .sb-recording-preview { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: #111827; transform: scaleX(-1); }
+  .sb-recording-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; }
+  .sb-recording-mic, .sb-recording-stop { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 29px; padding: 0 9px; border: 1px solid #d1d5db; border-radius: 7px; font-size: 12px; font-weight: 500; cursor: pointer; }
+  .sb-recording-mic:hover { background: #f3f4f6; }
+  .sb-recording-mic[aria-pressed=true] { color: #b91c1c; }
+  .sb-recording-stop { border-color: #ef4444; background: #ef4444; color: #fff; }
+  .sb-recording-stop:hover { border-color: #dc2626; background: #dc2626; }
+  .sb-recording-stop span { width: 7px; height: 7px; border-radius: 1px; background: currentColor; }
+  .sb-recording-icon { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 5px; color: #6b7280; cursor: pointer; }
+  .sb-recording-icon:hover { background: #f3f4f6; color: #111827; }
+  .sb-recording-message { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; padding: 12px; }
+  .sb-recording-message p { margin: 0; }
+  .sb-recording-error { color: #b91c1c; }
+  .sb-recording-reveal { color: #0969da; font-weight: 500; cursor: pointer; }
+  .sb-recording-reveal:hover { text-decoration: underline; }
+  .sb-recording-panel button:focus-visible { outline: 2px solid #0969da; outline-offset: 2px; }
+  .sb-recording-panel:where([data-term-theme="dark"] *) { border-color: #374151; background: #111827; color: #f3f4f6; }
+  .sb-recording-head:where([data-term-theme="dark"] *) { border-color: #374151; }
+  .sb-recording-time:where([data-term-theme="dark"] *) { color: #9ca3af; }
+  .sb-recording-mic:where([data-term-theme="dark"] *) { border-color: #4b5563; }
+  .sb-recording-mic:hover:where([data-term-theme="dark"] *), .sb-recording-icon:hover:where([data-term-theme="dark"] *) { background: #1f2937; color: #f3f4f6; }
+  .sb-recording-mic[aria-pressed=true]:where([data-term-theme="dark"] *), .sb-recording-error:where([data-term-theme="dark"] *) { color: #fca5a5; }
+  .sb-recording-reveal:where([data-term-theme="dark"] *) { color: #93c5fd; }
   /* React Flow disables pointer events on read-only nodes; file actions stay usable. */
   .flow-file-node { pointer-events: auto; }
   .flow-file-copy { position: absolute; right: 6px; bottom: 6px; z-index: 5; display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid #d1d5db; border-radius: 6px; background: #ffffffed; color: #4b5563; box-shadow: 0 1px 4px #1118271a; opacity: 0; pointer-events: none; cursor: pointer; transition: opacity .12s; }

@@ -15,6 +15,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const { test, after } = require('node:test');
 const esbuild = require('esbuild');
 
@@ -36,6 +37,7 @@ after(() => fs.rmSync(temp, { recursive: true, force: true }));
 const A = 'exampleVid1';
 const B = 'exampleVid2';
 const PLAYER = 'https://www.youtube-nocookie.com/embed/' + A + '?autoplay=1&rel=0&playsinline=1';
+const APP_PAGE = pathToFileURL(path.join(__dirname, '..', 'src', 'renderer', 'index.html')).href;
 
 // ---------------------------------------------------------------------------
 // the id, and the player's address
@@ -280,9 +282,29 @@ test('any other page from the web in the window gets nothing at all', () => {
 test("the app's own page is answered yes, as a session with no handler answers it", () => {
   for (const url of ['file:///Applications/Switchboard.app/Contents/Resources/app/src/renderer/index.html', 'file:///',
     'devtools://devtools/bundled/devtools_app.html', '', undefined]) {
-    for (const permission of ['clipboard-sanitized-write', 'clipboard-read', 'fullscreen', 'notifications', 'media', 'openExternal']) {
+    for (const permission of ['clipboard-sanitized-write', 'clipboard-read', 'fullscreen', 'notifications', 'openExternal']) {
       assert.equal(videos.permissionAllowed(permission, url), true, permission + ' from ' + url);
     }
+  }
+});
+
+test('camera and microphone access needs the exact app main document and explicit audio/video types', () => {
+  for (const mediaTypes of [['video'], ['audio'], ['audio', 'video']]) {
+    assert.equal(videos.permissionAllowed('media', APP_PAGE, { isMainFrame: true, mediaTypes }), true);
+  }
+  for (const mediaType of ['video', 'audio']) {
+    assert.equal(videos.permissionAllowed('media', APP_PAGE, { isMainFrame: true, mediaType }), true);
+    assert.equal(videos.permissionAllowed('media', APP_PAGE + '#whiteboard', { isMainFrame: true, mediaType }), true);
+  }
+  for (const details of [undefined, null, {}, { mediaTypes: ['video'] }, { isMainFrame: false, mediaTypes: ['video'] },
+    { isMainFrame: true }, { isMainFrame: true, mediaTypes: [] }, { isMainFrame: true, mediaType: 'unknown' },
+    { isMainFrame: true, mediaTypes: ['video', 'screen'] }, { isMainFrame: true, mediaType: 'display' }]) {
+    assert.equal(videos.permissionAllowed('media', APP_PAGE, details), false, JSON.stringify(details));
+  }
+  for (const url of [undefined, '', 'file:///', 'file:///other/index.html', 'about:blank',
+    'devtools://devtools/bundled/devtools_app.html', PLAYER, 'https://www.google.com/',
+    APP_PAGE + '?other-document', APP_PAGE + '/extra']) {
+    assert.equal(videos.permissionAllowed('media', url, { isMainFrame: true, mediaTypes: ['audio', 'video'] }), false, String(url));
   }
 });
 
@@ -302,9 +324,9 @@ test('setupVideoEmbeds installs the Referer and both permission handlers on the 
   assert.deepEqual(answer, { requestHeaders: { Accept: '*/*' } });
 
   // A request: the player's fullscreen button, then the app's own clipboard fallback.
-  const asked = (permission, requestingUrl) => {
+  const asked = (permission, requestingUrl, details = {}) => {
     let granted = null;
-    installed.request({}, permission, ok => { granted = ok; }, { requestingUrl, isMainFrame: false });
+    installed.request({}, permission, ok => { granted = ok; }, { requestingUrl, isMainFrame: false, ...details });
     return granted;
   };
   assert.equal(asked('fullscreen', PLAYER), true);
@@ -315,6 +337,15 @@ test('setupVideoEmbeds installs the Referer and both permission handlers on the 
   assert.equal(installed.check({}, 'fullscreen', 'https://www.youtube-nocookie.com/', {}), true);
   assert.equal(installed.check({}, 'clipboard-read', 'file:///', { requestingUrl: 'file:///index.html' }), true);
   assert.equal(installed.check({}, 'geolocation', '', { requestingUrl: 'https://googleads.example/' }), false);
+  assert.equal(asked('media', APP_PAGE, { isMainFrame: true, mediaTypes: ['audio', 'video'] }), true);
+  assert.equal(asked('media', APP_PAGE, { mediaTypes: ['video'] }), false, 'a file iframe gets no capture');
+  assert.equal(asked('media', PLAYER, { isMainFrame: true, mediaTypes: ['video'] }), false);
+  assert.equal(installed.check({}, 'media', 'file:///', { requestingUrl: APP_PAGE, isMainFrame: true, mediaType: 'video' }), true);
+  assert.equal(installed.check({}, 'media', 'file:///', { requestingUrl: APP_PAGE, isMainFrame: true, mediaType: 'audio' }), true);
+  assert.equal(installed.check({}, 'media', 'file:///', { isMainFrame: true, mediaType: 'video' }), false, 'an origin alone is insufficient');
+  assert.equal(installed.check({}, 'media', 'https://www.youtube-nocookie.com/', {
+    requestingUrl: PLAYER, embeddingOrigin: 'file:///', isMainFrame: false, mediaType: 'audio',
+  }), false);
 });
 
 // ---------------------------------------------------------------------------

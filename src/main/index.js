@@ -6,7 +6,7 @@
 // the work to git.js / github.js / runner.js, then shape the result into the
 // exact payload §4 promises.  Nothing here throws across IPC.
 
-const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeImage, nativeTheme, net, protocol, safeStorage, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeImage, nativeTheme, net, protocol, safeStorage, session, shell, systemPreferences } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -74,9 +74,11 @@ let discardOk = false;
 // to flush it while the page is live, then wait for its acknowledgment.
 let diagramFlush = null;
 let diagramFlushId = 0;
-// Set once the renderer has been asked to flush for a close that is not a quit, so
-// the second pass through 'close' lets the window go.
+// Set after the renderer has finished flushing for a close that is not a quit, so
+// the second pass through 'close' lets the window go. Repeated clicks while that
+// flush is in flight must not tear the renderer down early.
 let diagramClose = false;
+let windowClosing = false;
 // How many whiteboards hold edits the renderer has not written yet (sb:diagrams:dirty) —
 // 0 or 1, as the renderer reports it across every open canvas. This is usually just the
 // editor's 700 ms autosave in flight, so it is FLUSHED before anything is asked: a close
@@ -87,6 +89,14 @@ let diagramDirty = 0;
 // every sb:wb:* handler waits for that. Set in the single-instance branch at the bottom:
 // a second instance quits without ever touching the store.
 let whiteboardsReady = null;
+const recording = require('./recording-session.js').createRecordingSession({
+  ipcMain,
+  getWindow: () => mainWindow,
+  directory: path.join(app.getPath('videos'), 'Switchboard'),
+  rendererUrl: pathToFileURL(path.join(__dirname, '..', 'renderer', 'index.html')).href,
+  systemPreferences,
+  shell,
+});
 function wbReady() {
   return whiteboardsReady || Promise.resolve();
 }
@@ -350,21 +360,34 @@ function createWindow() {
       // itself; asking here as well would put the same question up twice.
       return;
     }
-    // Closing WITHOUT quitting — ⌘W, the red button — can interrupt a whiteboard's
-    // autosave. Hold the close for one round trip while the renderer writes it.
-    if (!quitting && !diagramClose && diagramDirty > 0) {
+    // Keep the renderer alive for the camera's final chunk as well as autosave.
+    // Flush even with no dirty board: the recorder belongs to the whole window.
+    if (!quitting && !diagramClose) {
       event.preventDefault();
-      diagramClose = true;
-      flushDiagrams().then(() => {
+      if (windowClosing) return;
+      windowClosing = true;
+      Promise.all([flushDiagrams(), recording.flush()]).then(async ([, result]) => {
+        if (quitting) { windowClosing = false; return; }
+        if (!result.ok && !await confirmRecordingClose(result.error)) {
+          windowClosing = false;
+          recording.resume();
+          return;
+        }
+        windowClosing = false;
+        diagramClose = true;
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
-      }, () => {
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+      }).catch(err => {
+        windowClosing = false;
+        diagramClose = false;
+        recording.resume();
+        console.error('[switchboard] could not finish closing:', err);
       });
       return;
     }
     if (!quitting && !discardOk && (editorDirty + diagramDirty) > 0 && !confirmDiscard()) {
       event.preventDefault();
       diagramClose = false;             // a cancelled close must flush again next time
+      recording.resume();
       return;
     }
   });
@@ -375,12 +398,19 @@ function createWindow() {
     editorDirty = 0;                      // the renderer, and every buffer in it, is gone
     diagramDirty = 0;
     diagramClose = false;
+    windowClosing = false;
+    void recording.interrupt();
   });
   // Likewise when the page itself goes — a reload from DevTools, a crashed renderer: the
   // buffers are gone and the count main holds would ask about files nobody has any more.
   // The page that comes back starts at 0 and reports again from its first edit.
-  mainWindow.webContents.on('did-navigate', () => { editorDirty = 0; diagramDirty = 0; });
-  mainWindow.webContents.on('render-process-gone', () => { editorDirty = 0; diagramDirty = 0; });
+  const rendererGone = () => {
+    editorDirty = 0;
+    diagramDirty = 0;
+    void recording.interrupt();
+  };
+  mainWindow.webContents.on('did-navigate', rendererGone);
+  mainWindow.webContents.on('render-process-gone', rendererGone);
 
   // Every http(s) link in the app — the ports on a repo row, Open on GitHub —
   // belongs in the user's browser, never in this window. A whiteboard's video player is
@@ -599,7 +629,7 @@ function smokeTest(win) {
       // purpose: teardown must run even when the capture failed.  stopEverything() never
       // rejects, and app.exit(0) still guarantees a deterministic exit. Flush the
       // whiteboard before teardown while the window is still live.
-      await flushDiagrams();
+      await Promise.all([flushDiagrams(), recording.flush()]);
       await stopEverything();
       app.exit(0);
     }, wait);
@@ -1679,6 +1709,21 @@ function flushDiagrams() {
   }).then(() => whiteboards.settle());
 }
 
+async function confirmRecordingClose(error) {
+  const options = {
+    type: 'warning',
+    buttons: ['Keep Switchboard Open', 'Close Anyway'],
+    defaultId: 0,
+    cancelId: 0,
+    message: 'The recording could not finish saving.',
+    detail: `${error || 'The recorder did not respond.'}\nAny video already written is kept in Movies / Switchboard.`,
+  };
+  const result = mainWindow && !mainWindow.isDestroyed()
+    ? await dialog.showMessageBox(mainWindow, options)
+    : await dialog.showMessageBox(options);
+  return result.response === 1;
+}
+
 // ⌘W anywhere the Editor does not want it (File ▸ Close is an item now — buildMenu says
 // why). close(), never destroy(): the window's `close` handler still runs, so the bounds
 // are saved, a pending publish still turns the close into a quit, and unsaved Editor
@@ -2017,7 +2062,15 @@ if (!app.requestSingleInstanceLock()) {
       await stopEverything();
       // A publish build can take a minute; flush after it completes while the
       // renderer is still live so its last whiteboard edit is saved.
-      await flushDiagrams();
+      const [, recorded] = await Promise.all([flushDiagrams(), recording.flush()]);
+      if (!recorded.ok && !await confirmRecordingClose(recorded.error)) {
+        quitting = false;
+        discardOk = false;
+        windowClosing = false;
+        recording.resume();
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+        return;
+      }
       // Again, now: that wait can be a whole publish build, and the window stayed live
       // through it — an edit made meanwhile was never asked about, and neither the second
       // before-quit (`quitting`) nor the window's close would ask. Before applyOnQuit(),
@@ -2027,6 +2080,8 @@ if (!app.requestSingleInstanceLock()) {
       // is the editor's autosave in flight, not something to ask about.
       if (!discardOk && (editorDirty + diagramDirty) > 0 && !confirmDiscard()) {
         quitting = false;
+        windowClosing = false;
+        recording.resume();
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
         return;
       }
@@ -2034,6 +2089,8 @@ if (!app.requestSingleInstanceLock()) {
       if (!installed.ok) {
         quitting = false;
         discardOk = false;                // the window stays, and so do its unsaved files
+        windowClosing = false;
+        recording.resume();
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
         return;
       }
@@ -2042,6 +2099,8 @@ if (!app.requestSingleInstanceLock()) {
       console.error('[switchboard] could not finish quitting:', err);
       quitting = false;
       discardOk = false;
+      windowClosing = false;
+      recording.resume();
     });
   });
 }

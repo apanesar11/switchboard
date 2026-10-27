@@ -80,6 +80,7 @@ import { DiagramCanvas } from "./DiagramCanvas"
 import { DeleteDiagramDialog } from "./DeleteDiagramDialog"
 import { FlowEditor, type FlowEditorHandle } from "./FlowEditor"
 import { RenameDiagramDialog } from "./RenameDiagramDialog"
+import { RecordingButton } from "./RecordingPanel"
 import { WorkspacePicker } from "./WorkspacePicker"
 
 // The bar's quiet buttons, drawn the way Switchboard draws its own (styles.css .btn
@@ -804,6 +805,7 @@ export function DiagramsPage({
             the board you can see, rather than from a row in a list or a tab. */}
         <div className="flex shrink-0 items-center justify-end gap-1.5 border-b border-black/[.08] bg-white px-3 py-[9px] dark:border-white/10 dark:bg-gray-950">
           <div className="flex shrink-0 items-center gap-1.5">
+            <RecordingButton className={BAR_BUTTON} />
             <Button
               variant="secondary"
               className={cx(BAR_BUTTON, "size-[30px] px-0")}
@@ -1041,16 +1043,19 @@ export function DiagramsPage({
                 {board.name}
                 {folderLabel ? <span className="font-normal text-gray-500"> · {folderLabel}</span> : null}
               </p>
-              <Button
-                variant="ghost"
-                className="size-[26px] shrink-0 rounded-md p-0 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-50"
-                style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-                aria-label="Exit full screen"
-                title="Exit full screen"
-                onClick={() => setFullscreen(false)}
-              >
-                <RiFullscreenExitLine className="size-4" aria-hidden="true" />
-              </Button>
+              <div className="flex shrink-0 items-center gap-2" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+                <RecordingButton className={BAR_BUTTON} />
+                <Button
+                  variant="ghost"
+                  className="size-[26px] shrink-0 rounded-md p-0 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-50"
+                  style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+                  aria-label="Exit full screen"
+                  title="Exit full screen"
+                  onClick={() => setFullscreen(false)}
+                >
+                  <RiFullscreenExitLine className="size-4" aria-hidden="true" />
+                </Button>
+              </div>
             </div>
           ) : null}
 

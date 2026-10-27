@@ -17,8 +17,8 @@
 //     it, the player may set top.location whenever it likes — and the player's own frame
 //     stays on the player (leavesThePlayer).
 //   * A page from the web in the app's window is granted one permission: fullscreen, to
-//     the player (permissionAllowed). The app's own page is answered as Electron answers
-//     a session with no handler at all: yes.
+//     the player (permissionAllowed). Camera and microphone access belong only to the
+//     app's own top-level document, for its local recording controls.
 //   * A video's title is asked of YouTube's oEmbed endpoint once, when the video is made
 //     (videoInfo).
 //
@@ -58,6 +58,9 @@ const INFO_TIMEOUT_MS = 10 * 1000;
 const INFO_MAX_BYTES = 64 * 1024;
 // YouTube stops a title at 100 characters; twice that is still one line of a label.
 const INFO_TEXT_MAX = 200;
+const APP_RENDERER_URL = require('node:url').pathToFileURL(
+  require('node:path').join(__dirname, '..', 'renderer', 'index.html')).href;
+const CAMERA_MEDIA_TYPES = new Set(['audio', 'video']);
 
 // ── pure helpers ────────────────────────────────────────────────────────────
 
@@ -186,11 +189,25 @@ function leavesThePlayer(event, wc) {
  * A page from the web in the app's window — the player, or a frame it brought — gets
  * PLAYER_PERMISSIONS, from the player's host, and nothing else: not a notification, not
  * a camera, not 'openExternal' (an address in another app's scheme, which Electron
- * otherwise opens in that app). Everything else — the app's own file:// page, DevTools —
- * is answered yes, as Electron answers a session with no handler: the app's
+ * otherwise opens in that app). Media needs the exact app document in the main frame
+ * and an explicit audio/video type; an opaque file:// origin or a missing URL is never
+ * enough. Other permissions for local pages keep Electron's default answer: the app's
  * navigator.clipboard fallbacks ask for clipboard-sanitized-write.
  */
-function permissionAllowed(permission, requestingUrl) {
+function permissionAllowed(permission, requestingUrl, details = {}) {
+  if (permission === 'media') {
+    details = details || {};
+    const page = parseUrl(requestingUrl);
+    if (!page || details.isMainFrame !== true) return false;
+    page.hash = '';
+    if (page.href !== APP_RENDERER_URL) return false;
+    // Requests carry mediaTypes; checks carry mediaType. Unknown/empty requests
+    // cannot grant a different capture capability by accident.
+    if (Array.isArray(details.mediaTypes)) {
+      return details.mediaTypes.length > 0 && details.mediaTypes.every(type => CAMERA_MEDIA_TYPES.has(type));
+    }
+    return CAMERA_MEDIA_TYPES.has(details.mediaType);
+  }
   const u = parseUrl(requestingUrl);
   if (!u || (u.protocol !== 'https:' && u.protocol !== 'http:')) return true;
   return u.origin === PLAYER_ORIGIN && PLAYER_PERMISSIONS.has(permission);
@@ -235,11 +252,14 @@ function setupVideoEmbeds(ses) {
     callback({ requestHeaders: embedRequestHeaders(details) });
   });
   ses.setPermissionRequestHandler((_wc, permission, callback, details) => {
-    callback(permissionAllowed(permission, details && details.requestingUrl));
+    callback(permissionAllowed(permission, details && details.requestingUrl, details));
   });
   // A check from a cross-origin frame comes with no requestingUrl; its origin is enough.
+  // Media checks also need the document URL, because every file:// page shares an origin.
   ses.setPermissionCheckHandler((_wc, permission, requestingOrigin, details) =>
-    permissionAllowed(permission, requestingOrigin || (details && details.requestingUrl)));
+    permissionAllowed(permission, permission === 'media'
+      ? details && details.requestingUrl
+      : requestingOrigin || (details && details.requestingUrl), details));
 }
 
 /**
