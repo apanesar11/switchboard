@@ -187,9 +187,40 @@ if (!process.versions.electron) {
       })()`), true, 'Local card can play and pause');
       assert.equal(files().filter(file => file.includes('.partial.')).length, 0);
       const node = '.react-flow__node:has([data-local-video])';
+      const originalRecordingSrc = (await whiteboards.get(board.data.id)).data.spec.nodes.find(node => node.videoSrc).videoSrc;
+      const title = node + ' .flow-video-head b';
+      const setName = value => run(`(() => {
+        const input = document.querySelector('[aria-label="Video name"]');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(value)});
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`);
+      const nameKey = key => run(`document.querySelector('[aria-label="Video name"]').dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true }))`);
+      await click(node + ' [aria-label="Rename video"]');
+      await until(`document.querySelector('[aria-label="Video name"]')`);
+      await setName('  Example   introduction  ');
+      await nameKey('Enter');
+      await until(`document.querySelector(${JSON.stringify(title)})?.textContent === 'Example introduction'`);
+      await click(node + ' [aria-label="Rename video"]');
+      await setName('Discarded title');
+      await nameKey('Escape');
+      assert.equal(await run(`document.querySelector(${JSON.stringify(title)}).textContent`), 'Example introduction', 'Escape cancels renaming');
+      await click(node + ' [aria-label="Rename video"]');
+      await setName('   ');
+      await nameKey('Enter');
+      assert.equal(await run(`document.querySelector(${JSON.stringify(title)}).textContent`), 'Example introduction', 'Blank titles keep the current name');
+      await click('[aria-label="Undo · ⌘Z"]');
+      await until(`document.querySelector(${JSON.stringify(title)})?.textContent === 'Camera recording'`);
+      await click('[aria-label="Redo · ⇧⌘Z"]');
+      await until(`document.querySelector(${JSON.stringify(title)})?.textContent === 'Example introduction'`);
+      await run('window.SBDiagrams.flush()');
+      const renamed = (await whiteboards.get(board.data.id)).data.spec.nodes.find(node => node.videoSrc);
+      assert.equal(renamed.label, 'Example introduction', 'The custom video name is saved on the board');
+      assert.equal(renamed.videoSrc, originalRecordingSrc, 'Renaming preserves the recording source');
       await run(`document.querySelector(${JSON.stringify(node + ' .flow-video-head')}).click()`);
       const grip = node + ' .react-flow__resize-control.handle.bottom.right';
       await until(`document.querySelector(${JSON.stringify(grip)})`);
+      // Paint the recreated nodes before native hit testing in this hidden window.
+      await window.webContents.capturePage();
       const beforeCard = await run(`document.querySelector(${JSON.stringify(node)}).getBoundingClientRect().toJSON()`);
       const corner = await run(`document.querySelector(${JSON.stringify(grip)}).getBoundingClientRect().toJSON()`);
       const gx = Math.round(corner.left + corner.width / 2), gy = Math.round(corner.top + corner.height / 2);
@@ -206,6 +237,7 @@ if (!process.versions.electron) {
       await new Promise(resolve => { window.webContents.once('did-finish-load', resolve); window.reload(); });
       await until('SB.state.booted && document.querySelector("[data-local-video] video")?.readyState >= 2');
       assert.equal((await whiteboards.get(board.data.id)).data.spec.nodes.find(node => node.videoSrc).size.width, savedNode.size.width);
+      assert.equal(await run(`document.querySelector(${JSON.stringify(title)}).textContent`), 'Example introduction', 'The video name survives reopening');
 
       if (await run(`!!document.querySelector('[aria-label="Exit full screen"]')`)) await click('[aria-label="Exit full screen"]');
       await click('[data-recording-start]');
@@ -218,7 +250,7 @@ if (!process.versions.electron) {
       assert.equal(files().filter(file => file.includes('.partial.')).length, 0);
       recording.resume();
       assert.deepEqual(errors, [], 'No renderer errors');
-      console.log('PASS — side toolbar Record, confined/resizable preview, microphone, local playable video cards, resize persistence and close flush');
+      console.log('PASS — side toolbar Record, confined/resizable preview, microphone, local playable video cards, rename/undo/reopen, resize persistence and close flush');
     } catch (error) {
       code = 1;
       console.error(error.stack || error);

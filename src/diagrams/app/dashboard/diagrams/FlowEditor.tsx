@@ -1585,7 +1585,13 @@ function VideoNode({ id, box, selected }: { id: string; box: FlowBoxNodeData; se
   return (
     <div className={cx("relative size-full", interactive && "group")}>
       {box.videoSrc ? (
-        <LocalVideoFace src={box.videoSrc} label={box.label} shown={editor?.shown} interactive={interactive} />
+        <LocalVideoFace
+          src={box.videoSrc}
+          label={box.label}
+          shown={editor?.shown}
+          interactive={interactive}
+          onRename={editor ? label => editor.updateNode(id, { label }) : undefined}
+        />
       ) : (
         <VideoFace
           videoId={box.videoId}

@@ -232,7 +232,9 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   stays within that whiteboard and shows elapsed time, microphone mute, and **Stop & save**.
   Drag its corner to make it larger. Stopping adds the saved recording to that board
   as a video card with a first-frame thumbnail, play/pause, seeking, volume, and the
-  same resize handles as YouTube videos. The files stay in `~/Movies/Switchboard/`;
+  same resize handles as YouTube videos. Click the pencil beside its title (or
+  double-click the title) to rename it; Enter or a click away saves, and Escape cancels.
+  The files stay in `~/Movies/Switchboard/`;
   the board keeps a local reference and plays them again after reopening. Closing a
   recording's tab or quitting stops, saves, and adds its video before closing. This
   records your camera and voice; whiteboard activity is not included in the video.
