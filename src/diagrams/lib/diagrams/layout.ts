@@ -21,6 +21,8 @@ import {
   DEFAULT_FLOW_TONE,
   FLOW_PDF_DEFAULT_SIZE,
   FLOW_SHEET_SIZE,
+  FLOW_TIMER_DEFAULT_SIZE,
+  FLOW_TIMER_MIN_SIZE,
   FLOW_TELEPORT_SIZE,
   FLOW_TERMINAL_DEFAULT_SIZE,
   FLOW_TERMINAL_FLOOR,
@@ -37,7 +39,9 @@ import {
   type FlowTextSize,
   type FlowTone,
   type FlowRichText,
+  type FlowTimer,
 } from "./types"
+import { createFlowTimer } from "./timers"
 import { FLOW_BULLET_INDENT, FLOW_CHECKLIST_INDENT, plainTextParagraphs, richTextVisualLines } from "./rich-text"
 
 // ─────────────────────────────────────────────────────────────────────
@@ -245,6 +249,7 @@ export type FlowBoxNodeData = {
   videoStart?: number
   /** Switchboard: the PDF or spreadsheet a "pdf" or "sheet" shows — see FlowNodeSpec.file. */
   file?: string
+  timer?: FlowTimer
 }
 
 /** What a flow edge carries, so the editor can read an edge back into a spec. */
@@ -453,6 +458,10 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
   // document's is.
   if (shape === "pdf") return node.size ?? FLOW_PDF_DEFAULT_SIZE
   if (shape === "sheet") return FLOW_SHEET_SIZE
+  if (shape === "timer") return {
+    width: Math.max(FLOW_TIMER_MIN_SIZE.width, node.size?.width ?? FLOW_TIMER_DEFAULT_SIZE.width),
+    height: Math.max(FLOW_TIMER_MIN_SIZE.height, node.size?.height ?? FLOW_TIMER_DEFAULT_SIZE.height),
+  }
   // Switchboard: a pinned terminal is the size it was given — pinned at a high zoom,
   // that can be less than its resize handles allow, so only the floor of a header
   // and a sliver of body binds here — and folded, only its header, in place.
@@ -735,6 +744,7 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
       videoSrc: node.videoSrc,
       videoStart: node.videoStart,
       file: node.file,
+      timer: node.shape === "timer" ? { ...(node.timer ?? createFlowTimer()) } : undefined,
     } satisfies FlowBoxNodeData,
     draggable: false,
     selectable: false,

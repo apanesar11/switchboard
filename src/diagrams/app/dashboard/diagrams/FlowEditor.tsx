@@ -171,6 +171,7 @@ import {
   RiCrosshair2Line,
   RiCursorLine,
   RiDeleteBinLine,
+  RiTimerLine,
   RiDoorOpenLine,
   RiErrorWarningLine,
   RiFileCopyLine,
@@ -250,6 +251,7 @@ import {
   FLOW_TERMINAL_DEFAULT_SIZE,
   FLOW_TERMINAL_FLOOR,
   FLOW_TERMINAL_MIN_SIZE,
+  FLOW_TIMER_MIN_SIZE,
   FLOW_TEXT_ALIGNS,
   FLOW_TEXT_SIZES,
   FLOW_TONES,
@@ -333,6 +335,8 @@ import {
 } from "@/lib/diagrams/youtube"
 import { FIT_VIEW_OPTIONS } from "./DiagramCanvas"
 import { ImageSearchPanel, type ImageSearchAsk } from "./ImageSearchPanel"
+import { TimerFace } from "./TimerFace"
+import { createFlowTimer, resetFlowTimer } from "@/lib/diagrams/timers"
 import { LocalVideoFace } from "./LocalVideoFace"
 import { RecordingPanel } from "./RecordingPanel"
 import { getRecordingSnapshot, startRecording, stopRecording, subscribeRecording } from "@/lib/recording"
@@ -402,7 +406,7 @@ const REVEAL_MARGIN = { left: 84, right: 32, top: 72, bottom: 64 }
  * box), pan (dragging moves the view), or place a box, a note or a text.
  * Switchboard: or a teleport.
  */
-type Tool = "select" | "hand" | "shape" | "note" | "text" | "document" | "teleport"
+type Tool = "select" | "hand" | "shape" | "note" | "text" | "document" | "teleport" | "timer"
 
 /** A ✦ Answer being waited for. */
 type Asking = {
@@ -493,6 +497,7 @@ const TOOL_KEYS: Record<string, Tool | "image" | "images" | "files"> = {
   g: "images",
   p: "teleport",
   f: "files",
+  o: "timer",
 }
 
 /** Switchboard: no video playing. */
@@ -777,7 +782,8 @@ function hasText(box: FlowBoxNodeData): boolean {
     box.shape !== "teleport" &&
     box.shape !== "video" &&
     box.shape !== "pdf" &&
-    box.shape !== "sheet"
+    box.shape !== "sheet" &&
+    box.shape !== "timer"
   )
 }
 
@@ -923,7 +929,9 @@ function clipboardWords(box: FlowBoxNodeData): string {
       : box.shape === "note"
         ? "Note"
         // Switchboard: and a PDF or a spreadsheet with no name says what it is.
-        : box.shape === "pdf"
+        : box.shape === "timer"
+          ? "Timer"
+          : box.shape === "pdf"
           ? PDF_LABEL
           : box.shape === "sheet"
             ? SHEET_LABEL
@@ -1308,7 +1316,9 @@ function Resizer({
   const least =
     box.shape === "image"
       ? { width: 24, height: 24 }
-      : box.shape === "pdf"
+      : box.shape === "timer"
+        ? FLOW_TIMER_MIN_SIZE
+        : box.shape === "pdf"
         ? { width: 96, height: PDF_BAR + 48 }
         : box.shape === "diamond"
           ? FLOW_DIAMOND_MIN_SIZE
@@ -1703,11 +1713,11 @@ function EditableBoxNode({ id, data, selected }: NodeProps) {
     !editing &&
     !connecting &&
     // Switchboard: and a PDF, as a picture is. A spreadsheet's card is the one size.
-    (box.shape === "note" || box.shape === "text" || box.shape === "image" || box.shape === "pdf" || isFlowBoxShape(box.shape))
+    (box.shape === "note" || box.shape === "text" || box.shape === "image" || box.shape === "pdf" || box.shape === "timer" || isFlowBoxShape(box.shape))
 
   return (
     <div className={cx("relative size-full", interactive && "group")}>
-      <FlowBox
+      {box.shape === "timer" ? <TimerFace id={id} label={box.label} timer={box.timer} shown={editor?.shown} onRename={editor && interactive ? label => editor.updateNode(id, { label }) : undefined} onChange={editor && interactive ? timer => editor.updateNode(id, { timer }) : undefined} /> : <FlowBox
         {...box}
         // Switchboard: a PDF or a spreadsheet whose name is cleared in its panel says
         // what it is (FlowBox), not "Untitled".
@@ -1721,7 +1731,7 @@ function EditableBoxNode({ id, data, selected }: NodeProps) {
           if (!rich || rich[index]?.checked === undefined) return
           editor.updateNode(id, { [key]: rich.map((paragraph, position) => position === index ? { ...paragraph, checked: !paragraph.checked } : paragraph) })
         } : undefined}
-      />
+      />}
       {resizable ? <Resizer id={id} box={box} editor={editor} /> : null}
       {/* The selection outline sits OUTSIDE the box rather than being a ring
           on it: a diamond is clipped out of its box, and would clip its own
@@ -1841,6 +1851,8 @@ const EDITOR_EDGE_TYPES = { [EDIT_EDGE_TYPE]: EditableFlowEdge }
 // ─────────────────────────────────────────────────────────────────────
 
 export type FlowEditorHandle = {
+  /** Selects a node and brings it into view, for timer notifications and the strip. */
+  revealNode: (id: string) => boolean
   /** Writes anything not yet saved; resolves once it has been. */
   flush: () => Promise<void>
   // Switchboard: Edit ▸ Undo, Redo and Paste are menu items there, whose accelerators
@@ -1991,6 +2003,7 @@ function FlowEditorCanvas({
 }: Omit<Props, "ref"> & { editorRef?: React.Ref<FlowEditorHandle> }) {
   const { screenToFlowPosition, deleteElements, getViewport, setViewport, setCenter, getNodesBounds } =
     useReactFlow()
+  const revealNodeRef = useRef<(id: string) => boolean>(() => false)
   const wrapperRef = useRef<HTMLDivElement | null>(null)
   // Switchboard: the whole editor — the canvas and the panels beside or over it —
   // where the canvas's own floating UI is looked for (TerminalSlot.covered).
@@ -2126,7 +2139,7 @@ function FlowEditorCanvas({
     const timer = setTimeout(() => setAnswered(null), ANSWERED_NOTICE_MS)
     return () => clearTimeout(timer)
   }, [answered])
-  const placing = tool === "shape" || tool === "note" || tool === "text" || tool === "document" || tool === "teleport"
+  const placing = tool === "shape" || tool === "note" || tool === "text" || tool === "document" || tool === "teleport" || tool === "timer"
   // For an upload landing later, which mustn't act on the tool it started with.
   const toolRef = useRef(tool)
   useEffect(() => {
@@ -2231,6 +2244,7 @@ function FlowEditorCanvas({
     editorRef,
     () => ({
       flush,
+      revealNode: (id: string) => revealNodeRef.current(id),
       // Read at the moment they are called, by which time the ref holds this render's.
       undo: () => shortcutsRef.current.undo(),
       redo: () => shortcutsRef.current.redo(),
@@ -2261,7 +2275,13 @@ function FlowEditorCanvas({
   }, [json])
 
   useEffect(() => {
-    if (dragging || json === savedJson) return
+    if (json === savedRef.current) return
+    // Undo, deletion and edits all cancel or replace deadlines promptly. Canvas
+    // geometry and ordinary typing keep their normal debounce.
+    const timers = (value: string) => JSON.stringify((JSON.parse(value) as FlowSpec).nodes
+      .filter(node => node.shape === "timer").map(node => ({ id: node.id, label: node.label, timer: node.timer })))
+    if (timers(json) !== timers(savedRef.current)) { void enqueueSave(json); return }
+    if (dragging) return
     const timer = setTimeout(() => void enqueueSave(json), SAVE_DELAY_MS)
     return () => clearTimeout(timer)
   }, [json, savedJson, dragging, enqueueSave])
@@ -2949,6 +2969,25 @@ function FlowEditorCanvas({
     return dx !== 0 || dy !== 0
   }
 
+  revealNodeRef.current = (id: string) => {
+    const bounds = wrapperRef.current?.getBoundingClientRect()
+    const node = nodesRef.current.find(candidate => candidate.id === id)
+    if (!shownRef.current || !bounds || bounds.width <= 0 || bounds.height <= 0 || !node) return false
+    if (!unfoldTo(id)) return false
+    changeEditing(null)
+    setNodes(current => current.map(candidate => ({ ...candidate, selected: candidate.id === id })))
+    setEdges(deselected)
+    requestAnimationFrame(() => {
+      if (!shownRef.current) return
+      const rect = rectOf(nodesRef.current.find(candidate => candidate.id === id) ?? node)
+      const view = teleportViewport(rect, bounds, Math.max(0.8, getViewport().zoom))
+      // Set a concrete view: animated d3 centering can start after a board is
+      // hidden again, when its pane has no dimensions.
+      void setViewport(view)
+    })
+    return true
+  }
+
   // Switchboard: a PDF's or a spreadsheet's panel is a document's (the same chrome and
   // classes), and keeps its node in view the same way.
   const panelNodeId = documentNodeId ?? fileNodeId
@@ -3103,13 +3142,15 @@ function FlowEditorCanvas({
   }
 
   // Places a toolbar item at the click or drop, centred except for free text.
-  function placeNew(shape: FlowBoxShape | "note" | "text" | "document" | "teleport", at: { x: number; y: number }) {
+  function placeNew(shape: FlowBoxShape | "note" | "text" | "document" | "teleport" | "timer", at: { x: number; y: number }) {
     if (shape === "document") { void placeDocument(at); return }
     if (shape === "teleport") { placeTeleport(at); return }
     record()
     const item = PALETTE.find((entry) => entry.shape === shape)
     const box =
-      shape === "note" || shape === "text"
+      shape === "timer"
+        ? { ...plainBox({ label: "Timer", shape: "timer", tone: "default" }), timer: createFlowTimer() }
+        : shape === "note" || shape === "text"
         ? blankNode(shape)
         : plainBox({
             label: item?.label ?? "Step",
@@ -3462,6 +3503,7 @@ function FlowEditorCanvas({
       from.shape === "document" ||
       from.shape === "terminal" ||
       from.shape === "teleport" ||
+      from.shape === "timer" ||
       from.shape === "video" ||
       from.shape === "pdf" ||
       from.shape === "sheet"
@@ -4005,7 +4047,7 @@ function FlowEditorCanvas({
       position,
       width: rect.width,
       height: rect.height,
-      data: { ...box },
+      data: { ...box, timer: box.timer ? resetFlowTimer(box.timer) : undefined },
       selected: true,
     }
     nodesRef.current = [...deselected(current), added]
@@ -4138,7 +4180,7 @@ function FlowEditorCanvas({
       position: { x: node.position.x + dx, y: node.position.y + dy },
       width: node.width,
       height: node.height,
-      data: { ...node.data, teleportTo: destination(node.data.teleportTo) },
+      data: { ...node.data, timer: node.data.timer ? resetFlowTimer(node.data.timer) : undefined, teleportTo: destination(node.data.teleportTo) },
       selected: true,
     }))
     const arrows = copy.edges.map((edge) =>
@@ -4932,7 +4974,7 @@ function FlowEditorCanvas({
     }
     const dropped = event.dataTransfer.getData(DRAG_MIME)
     const shape =
-      dropped === "note" || dropped === "text" || dropped === "document" || dropped === "teleport"
+      dropped === "note" || dropped === "text" || dropped === "document" || dropped === "teleport" || dropped === "timer"
         ? dropped
         : FLOW_BOX_SHAPES.find((option) => option === dropped)
     if (!shape) return
@@ -6782,7 +6824,8 @@ function BoxBar({
       box.shape !== "teleport" &&
       box.shape !== "video" &&
       box.shape !== "pdf" &&
-      box.shape !== "sheet",
+      box.shape !== "sheet" &&
+      box.shape !== "timer",
   )
   // Swatches drawn as notes or ink only when every node selected is one.
   const swatch: "box" | "note" | "text" =
@@ -8363,6 +8406,9 @@ function ToolRail({
         <RailButton label="Document" active={tool === "document"} onClick={() => onTool(tool === "document" ? "select" : "document")} drag="document">
           <RiFileTextLine className="size-4" aria-hidden="true" />
         </RailButton>
+        <RailButton label="Timer" shortcut="O" active={tool === "timer"} onClick={() => onTool(tool === "timer" ? "select" : "timer")} drag="timer">
+          <RiTimerLine className="size-4" aria-hidden="true" />
+        </RailButton>
         <div className={anchor}>
           <RailButton
             label={uploading ? "Uploading…" : "Image"}
@@ -8429,10 +8475,10 @@ function ToolRail({
 type RailFit = "full" | "compact" | "columns"
 const RailFitContext = createContext<RailFit>("full")
 // The rail's height in the first two, from the classes above, RailButton's and
-// RailDivider's — 11 tools, 12 gaps, 2 dividers, the padding — with 8px clear above
+// RailDivider's — 12 tools, 13 gaps, 2 dividers, the padding — with 8px clear above
 // and below. In two columns it is 186px.
-const RAIL_FULL_HEIGHT = 11 * 32 + 12 * 4 + 2 * 5 + 8 + 16
-const RAIL_COMPACT_HEIGHT = 11 * 28 + 12 * 2 + 2 * 1 + 4 + 16
+const RAIL_FULL_HEIGHT = 12 * 32 + 13 * 4 + 2 * 5 + 8 + 16
+const RAIL_COMPACT_HEIGHT = 12 * 28 + 13 * 2 + 2 * 1 + 4 + 16
 function railFit(paneHeight: number): RailFit {
   // Not measured yet: as it always was.
   if (!(paneHeight > 0) || paneHeight >= RAIL_FULL_HEIGHT) return "full"
@@ -8589,7 +8635,7 @@ function RailButton({
    */
   expanded?: boolean
   onClick: () => void
-  drag?: FlowBoxShape | "note" | "text" | "document" | "teleport"
+  drag?: FlowBoxShape | "note" | "text" | "document" | "teleport" | "timer"
   /** False while something it opened is showing where the tip would go. */
   tip?: boolean
   disabled?: boolean
@@ -8654,6 +8700,7 @@ const SHORTCUTS: [string, string][] = [
   ["⌘ C  ⌘ V", "Copy, paste at the pointer"],
   // Switchboard: and a link to a YouTube video is the video.
   ["⌘ V", "Paste a YouTube link as its video"],
+  ["O", "Place a timer"],
   ["⌘ Z", "Undo"],
   ["⌫", "Delete"],
   ["Space", "Hold and drag to pan"],

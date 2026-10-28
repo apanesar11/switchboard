@@ -81,6 +81,7 @@ import {
 } from "@/lib/diagrams/youtube"
 import { parseFlowFileSrc, sheetFormatName } from "@/lib/diagrams/files"
 import { DiagramFileCopy } from "./DiagramFileCopy"
+import { TimerFace } from "./TimerFace"
 import { LocalVideoFace } from "./LocalVideoFace"
 
 // Every box is sized from its text; in the browser, measure that text for
@@ -742,6 +743,7 @@ export function FlowBox({
   children?: React.ReactNode
 }) {
   const { label, detail, shape, tone, dashed, align } = box
+  if (shape === "timer") return <TimerFace id={nodeId} label={label} timer={box.timer} />
   if (shape === "document") {
     return (
       <div className={cx("flow-file-node relative flex size-full items-center gap-3 rounded-xl border border-gray-300 bg-white px-4 shadow-sm dark:border-gray-700 dark:bg-gray-900", className)} title={`${label} · Double-click to open`}>

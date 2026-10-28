@@ -184,6 +184,20 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   and redo. Each whiteboard is a file in `~/.switchboard/whiteboards/` — never in your
   repo.
 
+  **Timers** live on the canvas too. Pick **Timer** (O) and click to place a card;
+  drag its header or resize it like other board items. Name it, choose **5m**, **15m**,
+  **25m**, **60m**, or click the countdown to enter minutes, `mm:ss` or `h:mm:ss`
+  (1 second to 24 hours). **Start**, **Pause**, **Resume** and **Reset** stay on the
+  card. A paused timer keeps its remaining time; editing its duration starts a fresh
+  session. At zero, the card says **Time’s up** and offers **Restart** or **Dismiss**.
+  The speaker toggles its completion chime. Timers keep running on other boards and
+  after closing a tab; the timer indicator beside the tabs lists them and returns you
+  to a card. An alarm also posts a desktop notification when the app is in the
+  background. Deadlines survive relaunch; a timer that expired while the app was quit
+  or the Mac asleep alerts when it returns. Duplicated cards and boards start idle.
+  `npm run test:timers:browser` checks timer controls and background completion in an
+  isolated Electron profile.
+
   **Terminals** float over a whiteboard: **Open terminal…** asks which workspace — the
   whiteboard's own first, then the ones you used recently, then the rest, with a search
   box — and any number can be open at once, one per workspace. Each is that workspace's

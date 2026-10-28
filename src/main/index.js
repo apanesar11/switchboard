@@ -6,7 +6,7 @@
 // the work to git.js / github.js / runner.js, then shape the result into the
 // exact payload §4 promises.  Nothing here throws across IPC.
 
-const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain, nativeImage, nativeTheme, net, protocol, safeStorage, session, shell, systemPreferences } = require('electron');
+const { app, BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, nativeImage, nativeTheme, net, powerMonitor, protocol, safeStorage, session, shell, systemPreferences } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -101,6 +101,30 @@ const recording = require('./recording-session.js').createRecordingSession({
 function wbReady() {
   return whiteboardsReady || Promise.resolve();
 }
+
+const { createTimerService, createTimerAlerts } = require('./timers.js');
+const whiteboardTimers = createTimerService({
+  store: whiteboards,
+  directory: whiteboards.rootDir(),
+  onChanged: items => send('sb:evt:wbTimers', items),
+  onElapsed: createTimerAlerts({
+    shell, Notification,
+    getWindow: () => mainWindow,
+    onElapsed: item => send('sb:evt:wbTimerElapsed', item),
+    onNavigate: where => {
+      if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+      const win = mainWindow;
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+      const navigate = () => {
+        if (!win.isDestroyed()) win.webContents.send('sb:evt:wbTimerNavigate', where);
+      };
+      if (win.webContents.isLoadingMainFrame()) win.webContents.once('did-finish-load', navigate);
+      else navigate();
+    },
+  }),
+});
 
 process.on('unhandledRejection', reason => {
   console.error('[switchboard] unhandled rejection:', reason);
@@ -349,7 +373,7 @@ function createWindow() {
   // fit on setTimeout rather than requestAnimationFrame precisely because rAF is
   // starved while a window is not on screen.
   if (!process.env.SB_SMOKE) mainWindow.once('ready-to-show', () => mainWindow.show());
-  mainWindow.on('focus', () => { send('sb:evt:focus'); usage.poke(); });
+  mainWindow.on('focus', () => { send('sb:evt:focus'); usage.poke(); void whiteboardTimers.check(); });
   mainWindow.on('close', event => {
     saveBounds();
     // Once published, the red close button completes the promised close/reopen
@@ -1425,6 +1449,11 @@ function handleWb(channel, fn) {
 whiteboards.onChange(change => send('sb:evt:wbChanged', change));
 
 handleWb('sb:wb:list', () => whiteboards.list());
+handleWb('sb:wb:timers', async () => {
+  await whiteboardTimers.start();
+  await whiteboardTimers.settle();
+  return { ok: true, data: whiteboardTimers.list() };
+});
 handleWb('sb:wb:get', id => whiteboards.get(id));
 handleWb('sb:wb:create', req => whiteboards.create(req));
 handleWb('sb:wb:saveSpec', (id, spec) => whiteboards.saveSpec(id, spec));
@@ -2029,12 +2058,15 @@ if (!app.requestSingleInstanceLock()) {
     // that is still being filled. `activate` may have opened it meanwhile.
     await wbReady();
     if (!BrowserWindow.getAllWindows().length) createWindow();
+    await whiteboardTimers.start();
+    powerMonitor.on('resume', () => { void whiteboardTimers.check(); });
   });
 
   // macOS: closing the window does not quit the app; the dock icon reopens it.
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
   });
+  app.on('will-quit', () => whiteboardTimers.stop());
 
   // macOS sends this on launch and on every Dock click. Behind the migration like the
   // first window, and never a second window when one is already there.

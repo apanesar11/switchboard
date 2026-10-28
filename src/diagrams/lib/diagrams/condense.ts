@@ -81,6 +81,9 @@ export function inspectFlowCondenseSelection(
   if (selected.some((node) => node.shape === "pdf" || node.shape === "sheet")) {
     throw new Error("Leave PDFs and spreadsheets out of the selection before condensing.")
   }
+  if (selected.some((node) => node.shape === "timer")) {
+    throw new Error("Leave timers out of the selection before condensing.")
+  }
   if (selected.some((node) => !(node.label.trim() || node.detail?.trim()))) {
     throw new Error("Every selected node needs text before it can be condensed.")
   }

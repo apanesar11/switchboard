@@ -16,6 +16,7 @@
 import { defaultFlowSides, foldFlow, type FlowBoxNodeData, type FlowEdgeData, type FlowFoldEdge } from "./layout"
 import { normalizeFlowText } from "./validate"
 import { parseFlowRichText } from "./rich-text"
+import { createFlowTimer } from "./timers"
 import {
   DEFAULT_FLOW_SHAPE,
   DEFAULT_FLOW_TEXT_ALIGN,
@@ -115,7 +116,7 @@ export function flowSpecFromCanvas(
   const kept = new Set(nodes.filter((node) => !blank.has(node.id)).map((node) => node.id))
 
   const specNodes: FlowNodeSpec[] = nodes.filter((node) => !blank.has(node.id)).map((node) => {
-    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, answeredIn, detached, workspace, font, minimized, teleportTo, videoId, videoSrc, videoStart, file } =
+    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, answeredIn, detached, workspace, font, minimized, teleportTo, videoId, videoSrc, videoStart, file, timer } =
       node.data
     // Switchboard: a pinned terminal is labelled with its workspace, as the
     // validator labels it — a teleport "Teleport", a video with no title
@@ -133,6 +134,8 @@ export function flowSpecFromCanvas(
         ? PDF_LABEL
         : shape === "sheet"
         ? SHEET_LABEL
+        : shape === "timer"
+        ? "Timer"
         : UNTITLED_FLOW_LABEL)
     const cleanDetail = cleanBoxText(detail)
     return {
@@ -182,6 +185,7 @@ export function flowSpecFromCanvas(
           : undefined,
       // Switchboard: the file a PDF or a spreadsheet shows.
       file: shape === "pdf" || shape === "sheet" ? file : undefined,
+      timer: shape === "timer" ? { ...(timer ?? createFlowTimer()) } : undefined,
     }
   })
 
@@ -809,7 +813,7 @@ export function tidyFlowTree(
   const pinned = pinImages
     ? new Set(
         boxes
-          .filter((box) => box.shape === "image" || box.shape === "video" || box.shape === "pdf")
+          .filter((box) => box.shape === "image" || box.shape === "video" || box.shape === "pdf" || box.shape === "timer")
           .map((box) => box.id),
       )
     : new Set<string>()

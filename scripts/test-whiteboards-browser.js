@@ -133,6 +133,7 @@ if (!process.versions.electron) {
   const resizes = [];
   const workspace = id => ({ id, dir: dirs[id], project: 'example', section: 'example', repos: [], processes: [] });
   const handle = (channel, callback) => ipcMain.handle('sb:' + channel, (_event, ...args) => callback(...args));
+  handle('wb:timers', () => ({ ok: true, data: [] }));
   handle('ws:list', () => [workspace(wsId), workspace(otherId)]);
   handle('ws:scan', id => ({ ...workspace(id), ok: true }));
   handle('pr:summary', () => ({}));

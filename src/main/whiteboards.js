@@ -1190,6 +1190,16 @@ function duplicate(id) {
       for (let n = 2; taken.has(name); n++) name = fitName(row.name, ` copy ${n}`);
       const spec = row.spec === undefined ? undefined : JSON.parse(JSON.stringify(row.spec));
       await copyDocuments(spec);
+      // A duplicate starts its own countdowns only when Start is pressed. Copying
+      // an active deadline would otherwise sound a second alarm unexpectedly.
+      if (spec && Array.isArray(spec.nodes)) {
+        for (const node of spec.nodes) {
+          if (node && node.shape === 'timer' && node.timer) {
+            node.timer = { durationMs: node.timer.durationMs, remainingMs: node.timer.durationMs,
+              status: 'idle', sound: node.timer.sound !== false };
+          }
+        }
+      }
       const at = now();
       const copy = Object.assign({}, row, {
         id: crypto.randomUUID(),

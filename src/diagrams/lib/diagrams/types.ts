@@ -72,6 +72,7 @@ export const FLOW_SHAPES = [
   "video",
   "pdf",
   "sheet",
+  "timer",
 ] as const
 
 export type FlowShape = (typeof FLOW_SHAPES)[number]
@@ -92,7 +93,7 @@ export function isFlowBoxShape(shape: FlowShape): shape is FlowBoxShape {
  * Switchboard: a pinned terminal and a video are sized by hand too, and so is a
  * box — one never resized is as wide as every other box and as tall as its text.
  */
-export const FLOW_SIZED_SHAPES = [...FLOW_BOX_SHAPES, "note", "text", "image", "terminal", "video", "pdf"] as const
+export const FLOW_SIZED_SHAPES = [...FLOW_BOX_SHAPES, "note", "text", "image", "terminal", "video", "pdf", "timer"] as const
 
 export function isFlowSizedShape(shape: FlowShape): boolean {
   return (FLOW_SIZED_SHAPES as readonly FlowShape[]).includes(shape)
@@ -257,7 +258,21 @@ export type FlowNodeSpec = {
    * what it is (lib/diagrams/files.ts). Required on those two, and only kept on them.
    */
   file?: string
+  /** An embedded countdown. Running timers keep an absolute deadline. */
+  timer?: FlowTimer
 }
+
+export type FlowTimer = {
+  durationMs: number
+  remainingMs: number
+  status: "idle" | "running" | "paused" | "finished"
+  /** Running deadline, retained on a finished timer until Reset or Dismiss. */
+  endsAt?: number
+  sound: boolean
+}
+
+export const FLOW_TIMER_DEFAULT_SIZE: FlowSize = { width: 300, height: 260 }
+export const FLOW_TIMER_MIN_SIZE: FlowSize = { width: 260, height: 240 }
 
 export type FlowEdgeSpec = {
   from: string

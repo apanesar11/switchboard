@@ -61,6 +61,7 @@ import {
 import { parseFlowFileSrc } from "./files"
 import { parseLocalVideoSrc } from "./local-video"
 import { parseFlowRichText } from "./rich-text"
+import { parseFlowTimer } from "./timers"
 import { isYouTubeVideoId, youTubeVideoFromText, type YouTubeVideo } from "./youtube"
 
 export type ValidationResult =
@@ -428,14 +429,18 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? PDF_LABEL)
       : shape === "sheet"
       ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? SHEET_LABEL)
+      : shape === "timer"
+      ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? "Timer")
       : shape === "note"
       ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? "")
       : text(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText)
     const detail = optionalText(entry.detail, where, "detail", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText)
     let labelRichText, detailRichText
+    let timer
     try {
       labelRichText = parseFlowRichText(entry.labelRichText, label)
       detailRichText = parseFlowRichText(entry.detailRichText, detail ?? "")
+      timer = shape === "timer" ? parseFlowTimer(entry.timer) : undefined
     } catch (error) {
       fail(where, error instanceof Error ? error.message : "invalid rich text")
     }
@@ -493,6 +498,7 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       // Switchboard: a PDF's or a spreadsheet's file. A PDF's size is kept above, as an
       // image's is; a spreadsheet's card is the one size, as a document's is.
       file,
+      timer,
     }
   })
 

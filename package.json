@@ -20,7 +20,8 @@
     "test:recording:browser": "node scripts/test-recording-browser.js",
     "build:diagrams": "node scripts/build-diagrams.js",
     "check:diagrams": "tsc -p src/diagrams/tsconfig.json",
-    "test:diagrams": "node --test scripts/test-whiteboards.js scripts/test-whiteboard-cli.js scripts/test-answer.js scripts/test-flow-layout.js scripts/test-condense.js scripts/test-images.js scripts/test-image-search.js scripts/test-youtube.js scripts/test-videos.js scripts/test-rich-text.js scripts/test-flow-files.js scripts/test-files.js scripts/test-sheets.js",
+    "test:diagrams": "node --test scripts/test-flow-timers.js scripts/test-timers.js scripts/test-whiteboards.js scripts/test-whiteboard-cli.js scripts/test-answer.js scripts/test-flow-layout.js scripts/test-condense.js scripts/test-images.js scripts/test-image-search.js scripts/test-youtube.js scripts/test-videos.js scripts/test-rich-text.js scripts/test-flow-files.js scripts/test-files.js scripts/test-sheets.js",
+    "test:timers:browser": "node scripts/test-timers-browser.js",
     "test:rich-text:browser": "node scripts/test-rich-text-browser.js",
     "test:documents:browser": "node scripts/test-documents-browser.js",
     "test:whiteboards:browser": "node scripts/test-whiteboards-browser.js"

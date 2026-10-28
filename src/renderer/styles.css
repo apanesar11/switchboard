@@ -1730,3 +1730,11 @@ input.wbfield::placeholder{color:var(--sec)}
 /* Avoid the diff count's global .add color on the connection action. */
 .db-btn.add{color:var(--ink)}
 .db-providers span{padding:0 5px}
+
+/* Timers remain visible beside the whiteboard tabs, even when their board is closed. */
+.wbtimer{display:inline-flex;align-items:center;gap:6px;flex:none;align-self:center;height:27px;margin:1px 6px 0;padding:0 9px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--ink-2);font-size:11px;font-variant-numeric:tabular-nums;-webkit-app-region:no-drag}
+.wbtimer:hover{background:var(--sel);color:var(--ink)}
+.wbtimer.done{color:#b4842c;border-color:#c99c4b66;background:#e9b94912}
+.wbtimer .n{opacity:.6;font-size:10px}
+.wbtimer-menu{max-width:min(420px,calc(100vw - 20px))}
+.wbtimer-menu .mi .ml{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

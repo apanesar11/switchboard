@@ -395,6 +395,9 @@ function create(element: HTMLElement, initial: Props) {
   }
 
   return {
+    revealNode(id: string): boolean {
+      return instance.editor?.revealNode(id) ?? false
+    },
     update(next: Partial<Props>) {
       if (instance.destroying) return
       instance.props = { ...instance.props, ...next }

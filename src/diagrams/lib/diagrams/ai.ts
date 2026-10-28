@@ -451,6 +451,7 @@ const FLOW_AI_WORDLESS_SHAPES: ReadonlySet<FlowShape> = new Set<FlowShape>([
   "video",
   "pdf",
   "sheet",
+  "timer",
 ])
 
 /**

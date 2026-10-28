@@ -84,6 +84,11 @@ contextBridge.exposeInMainWorld('sb', {
   // migration = { error, skipped, legacyRoot, legacyLabel } or null — legacyLabel is where
   // the old diagrams are now, the home folder written as ~, for the screen's sentences.
   whiteboardsList: () => ipcRenderer.invoke('sb:wb:list'),
+  // Running and completed countdown deadlines across every unarchived board.
+  whiteboardsTimers: () => ipcRenderer.invoke('sb:wb:timers'),
+  onWhiteboardTimersChanged: cb => subscribe('sb:evt:wbTimers', cb),
+  onWhiteboardTimerElapsed: cb => subscribe('sb:evt:wbTimerElapsed', cb),
+  onWhiteboardTimerNavigate: cb => subscribe('sb:evt:wbTimerNavigate', cb),
   whiteboardsGet: id => ipcRenderer.invoke('sb:wb:get', id),
   // `req`: { folderId, name, spec, workspace? } — `workspace` left out starts the board
   // with the workspace used last, or the most recent one still on the rail.

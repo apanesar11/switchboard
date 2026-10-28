@@ -675,7 +675,7 @@ SB.views = SB.views || {};
         // The Claude gauge is the strip's while there is one (a board open in a tab). In
         // a slot that is always there, so the gauge coming or going never moves the
         // buttons after it: app.js puts the focus back by position after a render.
-        h('span.wbgauge', null, tabs.open.length ? null : usageGauge()),
+        h('span.wbgauge', null, tabs.open.length || timerItems.length ? null : usageGauge()),
         h('button.btn', {
           type: 'button',
           dataset: { wbNewFolder: '' },
@@ -1360,6 +1360,7 @@ SB.views = SB.views || {};
       home: !(r.view === 'whiteboard' && r.board),
       sub: data ? D.plural(data.folders.length, 'folder') + ' · ' + D.plural(live(data).length, 'whiteboard') : '',
       tabs: tabs.open.map(function (id) { return tabOf(id, r); }),
+      timers: timerItems,
       gauge: gaugeShown()
     };
   }
@@ -1419,6 +1420,7 @@ SB.views = SB.views || {};
         onClick: function (e) { togglePicker(e.currentTarget); }
       }, D.icon('plus')),
       h('span.sp'),
+      timerIndicator(),
       h('button.wbmore', {
         type: 'button',
         title: 'Every open whiteboard',
@@ -1429,6 +1431,81 @@ SB.views = SB.views || {};
       m.gauge ? usageGauge() : null);
     strip.addEventListener('keydown', tabKeys);
     return strip;
+  }
+
+  // Main keeps deadlines alive independently of this view's canvas cache.
+  var timerItems = [];
+  var timerRefreshVersion = 0;
+  function timerTime(item) {
+    if (item.status === 'finished' || item.endsAt <= Date.now()) return 'Time’s up';
+    var seconds = Math.ceil((item.endsAt - Date.now()) / 1000);
+    var minutes = Math.floor(seconds / 60);
+    return minutes + ':' + String(seconds % 60).padStart(2, '0');
+  }
+  function timerIndicator() {
+    if (!timerItems.length) return null;
+    var first = timerItems[0];
+    return h('button.wbtimer' + (first.status === 'finished' ? '.done' : ''), {
+      type: 'button', 'aria-label': 'Whiteboard timers', 'aria-haspopup': 'menu',
+      title: first.label + ' · ' + first.boardName,
+      dataset: { wbTimers: '' },
+      onClick: function (event) { toggleTimers(event.currentTarget); }
+    }, '◷', h('span', { dataset: { wbTimerCountdown: first.nodeId, wbTimerBoard: first.boardId } }, timerTime(first)),
+      timerItems.length > 1 ? h('span.n', null, '+' + (timerItems.length - 1)) : null);
+  }
+  var timerNavigation = 0;
+  function openTimer(item) {
+    closePop(false);
+    var token = ++timerNavigation;
+    var tries = 0;
+    function revealTimer() {
+      if (token !== timerNavigation || route().board !== item.boardId) return;
+      var canvas = canvases[item.boardId];
+      if (canvas && canvas.api && typeof canvas.api.revealNode === 'function' && canvas.api.revealNode(item.nodeId)) return;
+      if (++tries < 60) setTimeout(revealTimer, 100);
+    }
+    function navigateWhenReady() {
+      if (token !== timerNavigation) return;
+      // A notification can reopen a window before boot restores its route.
+      // Navigate after that restoration, so it cannot replace this destination.
+      if (!SB.state || !SB.state.booted) { setTimeout(navigateWhenReady, 100); return; }
+      goTab(item.boardId);
+      revealTimer();
+    }
+    navigateWhenReady();
+  }
+  function toggleTimers(anchor) {
+    if (pop && pop.kind === 'timers') { closePop(true); return; }
+    var menu = h('div.menu.wbmenu.wbtimer-menu', { role: 'menu', 'aria-label': 'Whiteboard timers', onKeydown: popKeys });
+    timerItems.forEach(function (item) {
+      var row = popItem(item.label + ' · ' + item.boardName, function () { openTimer(item); }, { kbd: timerTime(item) });
+      var clock = row.querySelector('.kbd');
+      if (clock) { clock.dataset.wbTimerCountdown = item.nodeId; clock.dataset.wbTimerBoard = item.boardId; }
+      menu.appendChild(row);
+    });
+    showPop('timers', menu, under(anchor, true), anchor, '[data-wb-timers]');
+    focusEl(menu.querySelector('.mi'));
+  }
+  function receiveTimers(items) {
+    timerItems = Array.isArray(items) ? items.slice().sort(function (a, b) {
+      return (a.status === 'finished' ? 0 : 1) - (b.status === 'finished' ? 0 : 1) || a.endsAt - b.endsAt;
+    }) : [];
+    refreshStrip();
+    if (pop && pop.kind === 'timers') closePop(false);
+  }
+  if (window.sb && typeof window.sb.whiteboardsTimers === 'function') {
+    var initialTimerVersion = timerRefreshVersion;
+    window.sb.whiteboardsTimers().then(function (result) {
+      if (initialTimerVersion === timerRefreshVersion && result && result.ok) receiveTimers(result.data);
+    }).catch(noop);
+    window.sb.onWhiteboardTimersChanged(function (items) { timerRefreshVersion++; receiveTimers(items); });
+    window.sb.onWhiteboardTimerNavigate(openTimer);
+    setInterval(function () {
+      document.querySelectorAll('[data-wb-timer-countdown]').forEach(function (element) {
+        var item = timerItems.find(function (t) { return t.nodeId === element.dataset.wbTimerCountdown && t.boardId === element.dataset.wbTimerBoard; });
+        if (item) element.textContent = timerTime(item);
+      });
+    }, 1000);
   }
 
   // The five-hour Claude gauge (views/usage.js), the Grid header's: at the strip's right
@@ -1677,13 +1754,13 @@ SB.views = SB.views || {};
       return;
     }
     if (r.view !== 'whiteboards') return;
-    var sig = tabs.open.length ? JSON.stringify(stripModel(r)) : '';
+    var sig = tabs.open.length || timerItems.length ? JSON.stringify(stripModel(r)) : '';
     if (sig !== homeSig) repaint();
   }
 
   // The home's strip, rebuilt with the home on every render; none until a board is open.
   function homeStrip(r) {
-    if (!tabs.open.length) { homeSig = ''; return null; }
+    if (!tabs.open.length && !timerItems.length) { homeSig = ''; return null; }
     var m = stripModel(r);
     homeSig = JSON.stringify(m);
     return stripEl(m);

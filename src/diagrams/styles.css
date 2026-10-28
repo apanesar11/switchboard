@@ -457,3 +457,39 @@
     .flow-document-focus { padding: 8px; }
   }
 }
+
+/* A countdown is an ordinary board item; its controls keep pointer gestures local. */
+.flow-timer { display:flex; flex-direction:column; width:100%; height:100%; overflow:hidden; border:1px solid #d8dce4; border-radius:16px; background:#fff; color:#1d2637; box-shadow:0 3px 8px #16243b08,0 12px 30px #16243b08; }
+.flow-timer-header { display:flex; align-items:center; gap:8px; min-height:44px; padding:8px 13px; border-bottom:1px solid #edf0f4; color:#727c8e; }
+.flow-timer-header input,.flow-timer-header>span { flex:1; min-width:0; width:0; padding:3px 2px; border:0; border-radius:4px; background:transparent; color:inherit; font-size:12px; font-weight:600; outline:none; text-overflow:ellipsis; }
+.flow-timer-header input:focus { color:#1d2637; box-shadow:0 0 0 2px #5c7cfa55; }
+.flow-timer button { display:inline-flex; align-items:center; justify-content:center; gap:6px; border:0; border-radius:7px; cursor:pointer; font:inherit; }
+.flow-timer button:focus-visible { outline:2px solid #7289f8; outline-offset:3px; }
+.flow-timer-header button { width:28px; height:28px; background:transparent; color:inherit; }
+.flow-timer-header button:hover { background:#edf0f4; }
+.flow-timer-body { display:flex; flex:1; flex-direction:column; align-items:center; justify-content:center; gap:9px; padding:12px 14px; }
+.flow-timer .flow-timer-clock { padding:0; color:inherit; background:transparent; font-size:44px; font-weight:500; letter-spacing:-1.8px; line-height:1.08; font-variant-numeric:tabular-nums; }
+.flow-timer-clock:disabled { cursor:default; opacity:1; }
+.flow-timer-status { color:#8991a0; font-size:10px; font-weight:500; letter-spacing:.3px; }
+.flow-timer-presets { display:flex; gap:5px; }
+.flow-timer-presets button { padding:4px 10px; background:#f3f5f8; color:#788296; font-size:10px; }
+.flow-timer-presets button[aria-pressed="true"] { background:#e9edff; color:#5269c9; }
+.flow-timer-duration { height:22px; padding:4px; color:#8991a0; font-size:10px; }
+.flow-timer-actions { display:flex; justify-content:center; gap:7px; margin-top:2px; }
+.flow-timer-actions button { min-width:34px; height:32px; padding:0 10px; background:#f1f3f7; color:#7a8495; font-size:11px; }
+.flow-timer-actions .flow-timer-primary { min-width:100px; color:#fff; background:#536cd6; font-weight:600; box-shadow:0 2px 4px #536cd61a; }
+.flow-timer-progress { flex:none; height:3px; background:#eef0f7; }
+.flow-timer-progress>div { height:100%; background:#7186e3; transition:width .2s linear; }
+.flow-timer[data-status="finished"] { border-color:#d8aa49; box-shadow:0 0 0 3px #e9b94920,0 8px 24px #16243b0a; }
+.flow-timer[data-status="finished"] .flow-timer-status { color:#a7781f; font-weight:600; }
+.flow-timer[data-status="finished"] .flow-timer-progress>div { background:#d8aa49; }
+.flow-timer-edit { display:flex; flex-direction:column; align-items:center; gap:10px; width:100%; }
+.flow-timer-edit input { width:100%; border:1px solid #bdc8ed; border-radius:8px; background:transparent; color:inherit; padding:6px; text-align:center; font-size:32px; font-variant-numeric:tabular-nums; outline:none; }
+.flow-timer-edit span { color:#8991a0; font-size:10px; text-align:center; }
+.flow-timer-edit button { padding:7px 12px; color:#fff; background:#536cd6; font-size:11px; }
+.flow-timer:where([data-term-theme="dark"] *) { background:#111827; color:#e5eaf3; border-color:#374151; box-shadow:0 8px 24px #0003; }
+.flow-timer:where([data-term-theme="dark"] *) .flow-timer-header { border-color:#263042; color:#97a3b7; }
+.flow-timer:where([data-term-theme="dark"] *) .flow-timer-header input:focus { color:#f3f4f6; }
+.flow-timer:where([data-term-theme="dark"] *) .flow-timer-presets button,.flow-timer:where([data-term-theme="dark"] *) .flow-timer-actions button:not(.flow-timer-primary) { background:#222d41; color:#a5b0c5; }
+.flow-timer:where([data-term-theme="dark"] *) .flow-timer-presets button[aria-pressed="true"] { background:#2b3760; color:#b8c7ff; }
+.flow-timer:where([data-term-theme="dark"] *) .flow-timer-progress { background:#263042; }
