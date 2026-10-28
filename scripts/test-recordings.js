@@ -97,6 +97,7 @@ test('append copies caller bytes before waiting for disk and handles short write
     ...fs,
     async open(...args) {
       const handle = await fs.open(...args);
+      if (args[1] === 'r') return handle;
       return {
         write(buffer, offset, length, position) {
           writes += 1;
@@ -167,6 +168,7 @@ test('disk-full failure closes the file and keeps the bytes already written', as
     ...fs,
     async open(...args) {
       const handle = await fs.open(...args);
+      if (args[1] === 'r') return handle;
       return {
         write(...writeArgs) {
           writes += 1;

@@ -1,7 +1,7 @@
 'use strict';
 
 // The real renderer, preload, permission handlers and local recording writer with
-// Chromium's simulated camera/microphone. Everything lives in a scratch directory;
+// real MediaRecorder fed by canvas/Web Audio streams. Everything lives in a scratch directory;
 // this never opens a physical device, reads the user's config or reaches the web.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -33,8 +33,7 @@ if (!process.versions.electron) {
   const directory = path.join(temp, 'recordings');
   const rendererFile = path.join(repo, 'src/renderer/index.html');
   app.setPath('userData', path.join(temp, 'profile'));
-  app.commandLine.appendSwitch('use-fake-device-for-media-stream');
-  app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
+  app.commandLine.appendSwitch('disable-gpu');
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
   const whiteboards = require('../src/main/whiteboards');
   const { createRecordingSession } = require('../src/main/recording-session');
@@ -48,6 +47,7 @@ if (!process.versions.electron) {
     platform: 'test', systemPreferences: {}, shell: { showItemInFolder: file => revealed.push(file) },
   });
   const handle = (name, callback) => ipcMain.handle('sb:' + name, (_event, ...args) => callback(...args));
+  handle('wb:timers', () => ({ ok: true, data: [] }));
   handle('ws:list', () => []);
   handle('pr:summary', () => ({}));
   handle('run:states', () => []);
@@ -97,6 +97,20 @@ if (!process.versions.electron) {
       throw new Error('Timed out: ' + code + '\n' + panel + '\n' + errors.join('\n'));
     };
     const click = selector => run(`document.querySelector(${JSON.stringify(selector)}).click()`);
+    // Generate actual encoded media without OS camera permissions or hardware.
+    // The recorder, IPC writer, container finalizer and player are the real ones.
+    const simulateDevices = () => run(`navigator.mediaDevices.getUserMedia = async () => {
+      const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 360;
+      const context = canvas.getContext('2d'); let frame = 0;
+      const paint = () => { context.fillStyle = 'hsl(' + (frame++ % 360) + ',70%,50%)'; context.fillRect(0,0,640,360); };
+      paint(); const timer = setInterval(paint, 50);
+      const video = canvas.captureStream(20);
+      const audio = new AudioContext(), destination = audio.createMediaStreamDestination();
+      const tone = audio.createOscillator(); tone.connect(destination); tone.start(); await audio.resume();
+      const track = video.getVideoTracks()[0], stop = track.stop.bind(track);
+      track.stop = () => { clearInterval(timer); void audio.close(); stop(); };
+      return new MediaStream([...video.getTracks(), ...destination.stream.getAudioTracks()]);
+    }; undefined`);
     const phase = name => `document.querySelector('[data-recording-panel][data-phase="${name}"]')`;
     const files = () => fs.existsSync(directory) ? fs.readdirSync(directory) : [];
     const completed = () => files().filter(file => !file.includes('.partial.'));
@@ -104,6 +118,9 @@ if (!process.versions.electron) {
       const bytes = fs.readFileSync(path.join(directory, filename));
       assert.ok(bytes.length > 1000, 'The saved recording has video data');
       assert.deepEqual([...bytes.subarray(0, 4)], [0x1a, 0x45, 0xdf, 0xa3], 'A real WebM container was saved');
+      const firstCluster = bytes.indexOf(Buffer.from('1f43b675', 'hex'));
+      const cues = bytes.indexOf(Buffer.from('1c53bb6b', 'hex'));
+      assert.ok(cues >= 0 && cues < firstCluster, 'The seek index is available before the video data');
     };
     let code = 0;
     try {
@@ -117,6 +134,7 @@ if (!process.versions.electron) {
       await until('SB.state.booted');
       await run(`SB.go({ view: 'whiteboard', board: ${JSON.stringify(board.data.id)} })`);
       await until('document.querySelector("[data-recording-start]")');
+      await simulateDevices();
       assert.equal(await run(`(() => {
         const image = document.querySelector('[aria-label="Image (I)"]');
         const record = document.querySelector('[data-recording-start]');
@@ -161,7 +179,8 @@ if (!process.versions.electron) {
       await until(phase('recording'));
       await click('[aria-label="Full screen"]');
       assert.equal((await bounds()).inside, true, 'Preview stays inside the board in fullscreen');
-      await sleep(1300);
+      // Span multiple keyframes/clusters so a near-end seek exercises the index.
+      await sleep(6500);
       if (process.env.SWITCHBOARD_RECORDING_CAPTURE) {
         fs.mkdirSync(process.env.SWITCHBOARD_RECORDING_CAPTURE, { recursive: true });
         const screenshot = await window.webContents.capturePage();
@@ -172,6 +191,27 @@ if (!process.versions.electron) {
       assert.deepEqual(await run('window.recordingTestTracks.map(track => track.readyState)'), ['ended', 'ended']);
       assert.equal(completed().length, 1);
       checkWebM(completed()[0]);
+      const immediateSeek = await run(`new Promise((resolve, reject) => {
+        const video = document.createElement('video'); video.preload = 'metadata';
+        const timeout = setTimeout(() => { video.removeAttribute('src'); video.load(); reject(new Error('Immediate near-end seek timed out')); }, 5000);
+        video.addEventListener('error', () => { clearTimeout(timeout); reject(new Error(video.error?.message || 'Probe failed')); }, {once:true});
+        video.addEventListener('loadedmetadata', () => {
+          const duration = video.duration;
+          if (!Number.isFinite(duration) || duration <= 5) {
+            clearTimeout(timeout); reject(new Error('Full duration was unavailable at loadedmetadata: ' + duration)); return;
+          }
+          const target = duration - .15;
+          video.addEventListener('seeked', () => {
+            clearTimeout(timeout);
+            const result = { duration, target, time: video.currentTime, paused: video.paused, width: video.videoWidth };
+            video.removeAttribute('src'); video.load(); resolve(result);
+          }, {once:true});
+          video.currentTime = target;
+        }, {once:true});
+        video.src = document.querySelector('[data-local-video] video').src.split('#')[0];
+      })`);
+      assert.ok(Math.abs(immediateSeek.time - immediateSeek.target) < .05 && immediateSeek.paused && immediateSeek.width > 0,
+        'A fresh player can seek directly near the end from loadedmetadata, without playing through the recording');
       await until('document.querySelector("[data-local-video] video")?.readyState >= 2');
       assert.equal(await run(`(() => {
         const video = document.querySelector('[data-local-video] video');
@@ -240,6 +280,7 @@ if (!process.versions.electron) {
       assert.equal(await run(`document.querySelector(${JSON.stringify(title)}).textContent`), 'Example introduction', 'The video name survives reopening');
 
       if (await run(`!!document.querySelector('[aria-label="Exit full screen"]')`)) await click('[aria-label="Exit full screen"]');
+      await simulateDevices();
       await click('[data-recording-start]');
       await until(phase('recording'));
       await sleep(1300);
@@ -250,9 +291,13 @@ if (!process.versions.electron) {
       assert.equal(files().filter(file => file.includes('.partial.')).length, 0);
       recording.resume();
       assert.deepEqual(errors, [], 'No renderer errors');
-      console.log('PASS — side toolbar Record, confined/resizable preview, microphone, local playable video cards, rename/undo/reopen, resize persistence and close flush');
+      console.log('PASS — recording, indexed WebM, immediate near-end seeking, local video cards, rename/undo/reopen, resize persistence and close flush');
     } catch (error) {
       code = 1;
+      if (process.env.SWITCHBOARD_RECORDING_CAPTURE) {
+        fs.mkdirSync(process.env.SWITCHBOARD_RECORDING_CAPTURE, { recursive: true });
+        for (const file of files()) fs.copyFileSync(path.join(directory, file), path.join(process.env.SWITCHBOARD_RECORDING_CAPTURE, file));
+      }
       console.error(error.stack || error);
     } finally {
       await recording.interrupt();

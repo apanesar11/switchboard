@@ -8,6 +8,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
+const { finalizeRecordingWebM } = require('./recording-webm');
 
 const MAX_RECORDING_CHUNK_BYTES = 16 * 1024 * 1024;
 const MAX_PENDING_BYTES = 2 * MAX_RECORDING_CHUNK_BYTES;
@@ -23,6 +24,9 @@ function recordingSrc(filePath) {
 
 /** Only finished files made by this recorder are playable through sbvideo://. */
 function createRecordingVideoHandler({ directory, net }) {
+  // Range requests for one older recording share its first-open repair. New
+  // recordings already have their index; reading their header is inexpensive.
+  const prepared = new Map();
   return async request => {
     const missing = () => new Response('not found', { status: 404 });
     if (typeof directory !== 'string' || !path.isAbsolute(directory)) return missing();
@@ -39,8 +43,15 @@ function createRecordingVideoHandler({ directory, net }) {
     const file = path.join(directory, name);
     try {
       // A link with a plausible filename must not expose a file outside this folder.
-      const stat = await fs.lstat(file);
+      let stat = await fs.lstat(file);
       if (!stat.isFile()) return missing();
+      if (name.endsWith('.webm')) {
+        if (!prepared.has(file)) prepared.set(file, finalizeRecordingWebM(file).catch(() => false));
+        // Keep an older/read-only recording playable even if it cannot be repaired.
+        await prepared.get(file);
+        stat = await fs.lstat(file);
+        if (!stat.isFile()) return missing();
+      }
       const resultHeaders = new Headers({
         'Content-Type': name.endsWith('.mp4') ? 'video/mp4' : 'video/webm',
         'X-Content-Type-Options': 'nosniff',
@@ -215,6 +226,10 @@ function createRecordingStore({ directory, fileSystem = fs, now = () => new Date
           if (recording.handle && !recording.failed) await recording.handle.sync();
           await close(recording);
           if (recording.failed) return remember({ ...recording.failed, recoveryPath: recording.partialPath });
+          if (recordingExtension(recording.mimeType) === 'webm') {
+            await finalizeRecordingWebM(recording.partialPath, { fileSystem });
+            recording.bytes = (await fileSystem.stat(recording.partialPath)).size;
+          }
           await fileSystem.rename(recording.partialPath, recording.finalPath);
           return remember({ ok: true, data: { ...details(recording, recording.finalPath), src: recordingSrc(recording.finalPath) } });
         } catch (error) {

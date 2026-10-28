@@ -248,6 +248,8 @@ versions. To uninstall, delete the desktop app and remove it from the Dock.
   as a video card with a first-frame thumbnail, play/pause, seeking, volume, and the
   same resize handles as YouTube videos. Click the pencil beside its title (or
   double-click the title) to rename it; Enter or a click away saves, and Escape cancels.
+  Saving prepares the full timeline so you can immediately seek anywhere, including
+  near the end. Older WebM recordings are prepared once when first opened.
   The files stay in `~/Movies/Switchboard/`;
   the board keeps a local reference and plays them again after reopening. Closing a
   recording's tab or quitting stops, saves, and adds its video before closing. This
