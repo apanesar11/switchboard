@@ -50,9 +50,11 @@ const videos = require('./videos.js');
 const sheets = require('./sheets.js');
 const answer = require('./answer.js');
 const { Publisher } = require('./publisher.js');
+const { installTarget } = require('./platform.js');
 const publisher = new Publisher({
-  target: app.isPackaged ? path.resolve(process.execPath, '..', '..', '..')
-    : path.join(os.homedir(), 'Desktop', 'Switchboard.app'),
+  target: app.isPackaged
+    ? (process.platform === 'win32' ? path.dirname(process.execPath) : path.resolve(process.execPath, '..', '..', '..'))
+    : installTarget(),
   logFile: path.join(app.getPath('userData'), 'publish.log'),
 });
 publisher.on('state', state => send('sb:evt:publish', state));
@@ -354,8 +356,8 @@ function createWindow() {
     minHeight: WINDOW.minHeight,
     show: false,
     backgroundColor: '#ffffff',
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 18, y: 18 },
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    trafficLightPosition: process.platform === 'darwin' ? { x: 18, y: 18 } : undefined,
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload.js'),
       contextIsolation: true,
@@ -1602,6 +1604,7 @@ function pdfHasPages(file) {
 }
 
 async function pdfCover(file) {
+  if (process.platform !== 'darwin') return null;
   let timer = null;
   try {
     const [opens, image] = await Promise.all([
@@ -2121,7 +2124,7 @@ if (!app.requestSingleInstanceLock()) {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
         return;
       }
-      const installed = publisher.applyOnQuit();
+      const installed = await publisher.applyOnQuit();
       if (!installed.ok) {
         quitting = false;
         discardOk = false;                // the window stays, and so do its unsaved files

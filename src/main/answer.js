@@ -46,6 +46,7 @@
 
 const { net, safeStorage } = require('electron');
 const { spawn, execFile } = require('child_process');
+const { cliInvocation } = require('./platform.js');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -274,7 +275,10 @@ let detecting = null;
 
 function runQuiet(bin, args, timeout) {
   return new Promise(resolve => {
-    execFile(bin, args, { timeout: timeout || 8000, env: process.env, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    let invocation;
+    try { invocation = cliInvocation(bin, args); }
+    catch (err) { resolve({ missing: err.code === 'ENOENT', code: 1, out: '', err: err.message }); return; }
+    execFile(invocation.file, invocation.args, { timeout: timeout || 8000, env: process.env, maxBuffer: 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
       resolve({
         missing: !!(err && err.code === 'ENOENT'),
         code: err ? (typeof err.code === 'number' ? err.code : 1) : 0,
@@ -557,6 +561,10 @@ function spawnCli(bin, args, opts) {
   function kill(why) {
     if (stopped || !child || child.exitCode !== null) return;
     stopped = why;
+    if (process.platform === 'win32') {
+      execFile('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {});
+      return;
+    }
     try { process.kill(-child.pid, 'SIGTERM'); } catch (_) { try { child.kill('SIGTERM'); } catch (__) { /* gone */ } }
     setTimeout(() => {
       try { process.kill(-child.pid, 'SIGKILL'); } catch (_) { /* gone */ }
@@ -564,11 +572,13 @@ function spawnCli(bin, args, opts) {
   }
 
   try {
-    child = spawn(bin, args, {
+    const invocation = cliInvocation(bin, args);
+    child = spawn(invocation.file, invocation.args, {
       cwd: opts.cwd,
       env: Object.assign({}, process.env, opts.env || {}),
       stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       detached: true,
+      windowsHide: true,
     });
   } catch (err) {
     settle({ code: null, missing: err && err.code === 'ENOENT', error: err, stopped: null, err: '' });

@@ -17,6 +17,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const desktop = require('./desktop-install.js');
+const { buildTarget, npmInvocation } = require('./platform.js');
 
 const PROC = 'publish';
 const MAX_CHARS = 1024 * 1024;   // the same cap as a runner ring buffer
@@ -150,7 +151,7 @@ class Publisher extends EventEmitter {
   // ── the build ─────────────────────────────────────────────────────────────
 
   async build(ws) {
-    if (process.platform !== 'darwin') throw new Error('desktop publishing requires macOS.');
+    buildTarget();
     const pkg = JSON.parse(fs.readFileSync(path.join(ws.dir, 'package.json'), 'utf8'));
     if (pkg.name !== 'switchboard' || !pkg.scripts?.['install:desktop']) {
       throw new Error('this source folder has no desktop installer.');
@@ -163,8 +164,9 @@ class Publisher extends EventEmitter {
       const env = { ...process.env };
       for (const name of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS']) delete env[name];
       await new Promise((resolve, reject) => {
-        const child = spawn('npm', ['run', 'install:desktop', '--', '--stage', receipt, '--target', this.target], {
-          cwd: ws.dir, env, stdio: ['ignore', 'pipe', 'pipe'],
+        const invocation = npmInvocation(['run', 'install:desktop', '--', '--stage', receipt, '--target', this.target]);
+        const child = spawn(invocation.file, invocation.args, {
+          cwd: ws.dir, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
         });
         if (this.run) this.run.pid = child.pid || null;
         let tail = '';
@@ -196,6 +198,15 @@ class Publisher extends EventEmitter {
 
   applyOnQuit() {
     if (!this.pending) return { ok: true };
+    if (process.platform === 'win32') {
+      return Promise.resolve().then(() => desktop.scheduleCommit(this.pending, this.logFile)).then(() => {
+        this.pending = null;
+        return { ok: true };
+      }).catch(err => {
+        this.set('error', this.current.wsId, 'Could not schedule the update: ' + err.message + ' Close Switchboard to retry.');
+        return { ok: false, error: this.current.message };
+      });
+    }
     try {
       desktop.commit(this.pending);
       this.pending = null;

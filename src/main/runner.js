@@ -23,6 +23,8 @@ const { StringDecoder } = require('string_decoder');
 const { promisify } = require('util');
 
 const ports = require('./ports.js');
+const platform = require('./platform.js');
+const windowsProcesses = require('./windows-processes.js');
 
 const pexec = promisify(execFile);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -185,6 +187,9 @@ class Ring {
  * anything it backgrounded keeps that pgid even after launchd adopts it.
  */
 async function processTable() {
+  if (process.platform === 'win32') {
+    try { return await windowsProcesses.snapshot(); } catch (_) { return { kids: new Map(), info: new Map() }; }
+  }
   const kids = new Map();
   const info = new Map();
   let stdout = '';
@@ -217,6 +222,10 @@ async function startTimesOf(pids) {
   const list = (Array.isArray(pids) ? pids : []).map(Number).filter((p) => Number.isInteger(p) && p > 0);
   const out = new Map();
   if (!list.length) return out;
+  if (process.platform === 'win32') {
+    for (const [pid, record] of (await processTable()).info) if (list.includes(pid)) out.set(pid, record.start);
+    return out;
+  }
   let stdout = '';
   try {
     const r = await pexec('/bin/ps', ['-o', 'pid=,lstart=', '-p', list.join(',')], { maxBuffer: 4 * 1024 * 1024 });
@@ -254,6 +263,10 @@ function walk(kids, rootPid) {
 async function describePids(pids) {
   const list = (Array.isArray(pids) ? pids : []).map(Number).filter((p) => Number.isInteger(p));
   if (!list.length) return [];
+  if (process.platform === 'win32') {
+    return [...(await processTable()).info].filter(([pid]) => list.includes(pid))
+      .map(([pid, record]) => ({ pid, command: record.command }));
+  }
   let stdout = '';
   try {
     const r = await pexec('/bin/ps', ['-o', 'pid=,command=', '-p', list.join(',')]);
@@ -315,7 +328,7 @@ class Proc {
     this.command = opts.command;
     this.cwd = opts.cwd;
     this.env = opts.env || null;
-    this.shell = opts.shell || process.env.SHELL || '/bin/bash';
+    this.shell = opts.shell || platform.commandShell();
     this.cols = opts.cols || DEFAULT_COLS;
     this.rows = opts.rows || DEFAULT_ROWS;
     this.onData = opts.onData || function () {};
@@ -353,7 +366,8 @@ class Proc {
     if (pty) {
       // forkpty() calls setsid(), so the child is a session leader and its pgid
       // equals its pid — which is what makes the group kill in stop() exact.
-      this.term = pty.spawn(this.shell, ['-lc', this.command], {
+      const args = platform.commandArgs(this.command);
+      this.term = pty.spawn(this.shell, process.platform === 'win32' ? args.join(' ') : args, {
         name: 'xterm-256color',
         cols: this.cols,
         rows: this.rows,
@@ -369,10 +383,12 @@ class Proc {
     // detached:true is not optional here: without it the child shares
     // Switchboard's own process group, and the group kill in stop() would take
     // the app down with the dev server.
-    this.child = spawn(this.shell, ['-lc', this.command], {
+    this.child = spawn(this.shell, platform.commandArgs(this.command), {
       cwd: this.cwd,
       env,
       detached: true,
+      windowsVerbatimArguments: process.platform === 'win32',
+      windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.pid = this.child.pid;
@@ -444,6 +460,7 @@ class Proc {
       const rec = info.get(p);
       if (!rec || rec.start !== start) this.descendants.delete(p);
     }
+    if (process.platform === 'win32' && this.exited) return;
     for (const p of walk(table.kids, this.pid)) {
       const rec = info.get(p);
       if (rec) this.descendants.set(p, rec.start);
@@ -459,6 +476,18 @@ class Proc {
     const steps = [];
     const pid = this.pid;
     if (!pid) return { steps: ['never started'] };
+
+    if (process.platform === 'win32') {
+      const table = await processTable();
+      this.census(table);
+      const records = new Map();
+      if (!this.exited && table.info.has(pid)) records.set(pid, table.info.get(pid).start);
+      for (const [child, start] of this.descendants) records.set(child, start);
+      await windowsProcesses.killKnown(records);
+      try { if (this.term && !this.exited) this.term.kill(); } catch (_) { /* gone */ }
+      try { if (this.child && !this.exited) this.child.kill(); } catch (_) { /* gone */ }
+      return { steps: ['Stopped Windows processes after checking their creation times'] };
+    }
 
     // Take one last census while the tree is still up.
     this.census(await processTable());
@@ -664,6 +693,10 @@ function planWorkspace(input) {
  * ngrok. Ask the very shell that will run the command.
  */
 async function onPath(binary) {
+  if (process.platform === 'win32') {
+    try { await pexec('where.exe', [String(binary)], { timeout: 8000, windowsHide: true }); return true; }
+    catch (_) { return false; }
+  }
   const shell = process.env.SHELL || '/bin/bash';
   try {
     await pexec(shell, ['-lc', 'command -v ' + JSON.stringify(String(binary))], { timeout: 8000 });

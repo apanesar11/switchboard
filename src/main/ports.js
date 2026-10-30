@@ -205,6 +205,15 @@ async function ngrokUrl(port) {
 
 /** Every TCP listener on the machine: [{ pid, command, port }]. */
 async function listeners() {
+  if (process.platform === 'win32') {
+    try {
+      const { stdout } = await pexec('netstat.exe', ['-ano', '-p', 'TCP'], { windowsHide: true, timeout: 8000 });
+      return stdout.split(/\r?\n/).flatMap(line => {
+        const m = line.trim().match(/^TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/);
+        return m ? [{ pid: Number(m[2]), port: Number(m[1]), command: null }] : [];
+      });
+    } catch (_) { return []; }
+  }
   let stdout = '';
   try {
     // Deliberately NO -iTCP:<port> filters: with several of them lsof exits 1 if
@@ -235,6 +244,7 @@ async function listeners() {
 
 /** The working directory of a PID. No sudo needed for the user's own processes. */
 async function cwdOfPid(pid) {
+  if (process.platform === 'win32') return null; // Windows does not expose another process's cwd safely.
   const p = Number(pid);
   if (!Number.isInteger(p)) return null;
   try {
@@ -246,6 +256,7 @@ async function cwdOfPid(pid) {
 
 /** The working directories of many PIDs in one lsof call: Map pid -> cwd. */
 async function cwdOfPids(pids) {
+  if (process.platform === 'win32') return new Map();
   const list = [];
   for (const n of (Array.isArray(pids) ? pids : [])) {
     const p = Number(n);
@@ -275,6 +286,10 @@ async function cwdOfPids(pids) {
 async function ownerOfPort(port) {
   const p = Number(port);
   if (!Number.isInteger(p)) return null;
+  if (process.platform === 'win32') {
+    const owner = (await listeners()).find(listener => listener.port === p);
+    return owner ? { ...owner, cwd: null } : null;
+  }
   let stdout = '';
   try {
     const r = await pexec(LSOF, ['-nP', '-iTCP:' + p, '-sTCP:LISTEN', '-Fpc']);

@@ -81,3 +81,4 @@ function commit(plan) {
 }
 
 module.exports = { exists, isOurApp, prepare, commit, discard };
+if (process.platform === 'win32') module.exports = require('./windows-install.js');

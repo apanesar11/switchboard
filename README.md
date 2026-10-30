@@ -18,11 +18,12 @@ npm install
 npm start
 ```
 
-Switchboard currently targets macOS. Install Node.js/npm and Git on each Mac;
+Switchboard builds on macOS and Windows (x64 or ARM64). Install Node.js/npm and Git on the build machine;
 GitHub features also need `gh` signed in with `gh auth login`. Install and sign in
 to whichever coding CLI you use on that machine, then run `codex` or `claude` in a
 Switchboard terminal. Claude is optional, and there is no Codex usage meter yet.
-Install tmux if you want terminal sessions to survive quitting Switchboard.
+On macOS, install tmux if you want terminal sessions to survive quitting Switchboard.
+Windows terminals use PowerShell and ConPTY; they close when Switchboard quits.
 
 `npm start` first builds the whiteboard editor (`npm run build:diagrams`, a second or
 so); it is the one part of the app that is built rather than run as written.
@@ -60,13 +61,31 @@ absolute `workspaces.<id>.dir` paths to select individual folders. Relative
 
 ## Install the desktop app
 
-To build and install the macOS desktop app, run this after installing dependencies:
+To preview the OS, CPU and install location without building anything:
+
+```bash
+npm run install:desktop -- --dry-run
+```
+
+To build and install for the computer you are using, run this after installing dependencies:
 
 ```bash
 npm run install:desktop
 ```
 
-Then double-click **Switchboard** on the Desktop. This is a standalone
+The command automatically selects macOS or Windows and the current Node.js CPU
+architecture. Use native ARM64 Node.js for an ARM64 build, or x64 Node.js for an
+x64 build. Build on the target operating system; copying `node_modules` between
+Mac and Windows does not work because the terminal includes native code.
+
+On Windows, the app installs to `%LOCALAPPDATA%\Programs\Switchboard` and creates a
+**Switchboard** desktop shortcut. Launch it from that shortcut or from
+`Switchboard.exe` in the install folder. Administrator access is not required.
+The whole app folder is needed when sharing a Windows build, not just the `.exe`.
+Windows builds are unsigned. Git and coding CLIs are separate tools for the
+features that use them; launching a packaged app does not require Node.js or npm.
+
+On macOS, double-click **Switchboard** on the Desktop. This is a standalone
 `~/Desktop/Switchboard.app` bundle with its own runtime and four-pane grid icon.
 Drag it to the app section of the Dock, or right-click its running Dock icon and
 choose **Options → Keep in Dock**. It needs no Terminal, npm, or source checkout to
@@ -82,13 +101,28 @@ dependencies available for publishing. The build's output appears in the workspa
 **Logs** tab as it runs, and is saved in `publish.log` under Switchboard's Application
 Support folder.
 
+On Windows, Publish prepares the update while you work and a separate Node.js
+helper installs it after Switchboard exits. Wait a few seconds before reopening;
+the result is appended to `publish.log` in Electron's Application Support/userData
+folder. A failed swap restores the previous app; the staged update is retained if
+it cannot be applied. Keep Node.js/npm installed for building and publishing.
+
 `npm run install:desktop` remains available for installing from Terminal while the
 desktop app is quit. `npm start` runs the source directly during development. Both
 use your existing configuration and terminal sessions. To build without installing,
 use `npm run package`; the result
-is under `dist/Switchboard-darwin-<architecture>/Switchboard.app`. The grid icon's
+is under `dist/Switchboard-darwin-<architecture>/Switchboard.app` on macOS, or
+`dist/Switchboard-win32-<architecture>/Switchboard.exe` on Windows. Use
+`npm run package -- --dry-run` to preview that target. The grid icon's
 editable source is `assets/switchboard.svg`; packaging generates its PNG and ICNS
-versions. To uninstall, delete the desktop app and remove it from the Dock.
+versions on macOS. To uninstall on macOS, delete the desktop app and remove it from
+the Dock. On Windows, quit the app, delete its install folder and desktop shortcut.
+
+Mac-specific integrations (Finder clipboard files and Quick Look PDF cover images)
+are unavailable on Windows. Port probing works on Windows, but process working
+directories are not attributed there; Start/Stop tracks its own process trees by
+PID and creation time instead. Workspace commands must work on the host OS: a
+Mac shell script does not become a Windows command automatically.
 
 ## What it does
 

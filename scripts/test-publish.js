@@ -12,6 +12,8 @@ const desktop = require('../src/main/desktop-install.js');
 const { Publisher } = require('../src/main/publisher.js');
 const { MEDIA_USAGE_DESCRIPTIONS } = require('./package.js');
 
+// Windows replacement and Publish tests live in test-windows-install.js.
+if (process.platform === 'darwin') {
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'switchboard-publish-test-'));
 after(() => fs.rmSync(temp, { recursive: true, force: true }));
 
@@ -177,3 +179,4 @@ test('build output reaches the Logs tab with CR LF line endings, whatever the ch
   assert.equal(publisher.logs('switchboard').text, before);
   assert.equal(publisher.runState().exitCode, 0);
 });
+}

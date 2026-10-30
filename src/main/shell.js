@@ -36,6 +36,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { terminalShell } = require('./platform.js');
 
 const MAX_CHARS = 1024 * 1024;     // ARCHITECTURE §5: 1 MB per shell
 const MAX_LINES = 5000;
@@ -275,6 +276,7 @@ let tmuxBin;               // undefined: not looked up yet; null: not installed
 
 /** The tmux binary, found once. Homebrew's usual homes are tried after PATH. */
 function tmuxPath() {
+  if (process.platform === 'win32') return null;
   if (tmuxBin !== undefined) return tmuxBin;
   tmuxBin = null;
   if (process.env.SWITCHBOARD_NO_TMUX === '1') return null;
@@ -407,7 +409,7 @@ class Term {
     // `-l` is the whole point: a login shell reads .zprofile/.zshrc, so the PATH,
     // aliases and prompt are the ones iTerm2 gives — which is what puts `claude`
     // (~/.local/bin/claude) within reach.
-    this.term = pty.spawn(this.shellPath, ['-l'], {
+    this.term = pty.spawn(this.shellPath, process.platform === 'win32' ? ['-NoLogo'] : ['-l'], {
       name: 'xterm-256color',
       cols: this.cols,
       rows: this.rows,
@@ -596,6 +598,12 @@ class Term {
     }
     const pid = this.pid;
     if (!pid) { this.finish(null, null); return; }
+    if (process.platform === 'win32') {
+      // Closing ConPTY ends its shell and attached console processes.
+      try { if (this.term) this.term.kill(); } catch (_) { /* already gone */ }
+      if (!this.exited) this.finish(null, 1);
+      return;
+    }
 
     try { process.kill(-pid, 'SIGHUP'); } catch (e) { /* ESRCH: it already went */ }
 
@@ -726,7 +734,7 @@ class Shells extends EventEmitter {
     const term = new Term({
       wsId,
       cwd: resolved.dir,
-      shell: process.env.SHELL || '/bin/zsh',
+      shell: terminalShell(),
       mode: tmuxPath() ? 'tmux' : 'plain',
       cols,
       rows,

@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { buildTarget } = require('../src/main/platform.js');
 
 const root = path.resolve(__dirname, '..');
 const MEDIA_USAGE_DESCRIPTIONS = Object.freeze({
@@ -36,12 +37,13 @@ function buildIcon() {
 }
 
 async function packageApp(options = {}) {
-  if (process.platform !== 'darwin') throw new Error('Building the desktop app requires macOS.');
+  const target = buildTarget();
+  console.log(`Building Switchboard for ${target.label}`);
   require('./fix-node-pty.js');
   // The Diagrams tab's bundle is generated, not committed: build it from the source
   // this app is being made from, so the installed app never carries a stale one.
   await require('./build-diagrams.js').build();
-  const icon = buildIcon();
+  const icon = target.platform === 'darwin' ? buildIcon() : undefined;
   const { packager } = await import('@electron/packager');
   const [output] = await packager({
     dir: root,
@@ -50,8 +52,8 @@ async function packageApp(options = {}) {
     appBundleId: 'local.switchboard.app',
     appCategoryType: 'public.app-category.developer-tools',
     extendInfo: MEDIA_USAGE_DESCRIPTIONS,
-    platform: 'darwin',
-    arch: process.arch,
+    platform: target.platform,
+    arch: target.arch,
     out: options.out || path.join(root, 'dist'),
     overwrite: true,
     icon,
@@ -73,15 +75,19 @@ async function packageApp(options = {}) {
       /^\/node_modules\/xlsx\/dist\/(?!cpexcel\.js$)/,
     ],
     // A local ad-hoc signature needs no Apple account or signing certificate.
-    osxSign: {
+    osxSign: target.platform === 'darwin' ? {
       identity: '-',
       identityValidation: false,
       preAutoEntitlements: false,
       // Hardened library validation requires a shared Apple Team ID. Ad-hoc
       // local builds have none, so use the normal development runtime instead.
       optionsForFile: () => ({ timestamp: 'none', hardenedRuntime: false }),
-    },
+    } : undefined,
   });
+  if (target.platform === 'win32') {
+    require('../src/main/windows-install.js').writeManifest(output);
+    return output;
+  }
   const bundle = path.join(output, 'Switchboard.app');
   execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', bundle], { stdio: 'pipe' });
   return bundle;
@@ -90,7 +96,17 @@ async function packageApp(options = {}) {
 module.exports = { packageApp, MEDIA_USAGE_DESCRIPTIONS };
 
 if (require.main === module) {
-  packageApp().then(bundle => console.log(`Built ${bundle}`)).catch(err => {
+  const args = process.argv.slice(2);
+  const run = async () => {
+    if (args.length === 1 && args[0] === '--dry-run') {
+      const target = buildTarget();
+      console.log(`Will build ${target.label}: dist/Switchboard-${target.platform}-${target.arch}/${target.platform === 'darwin' ? 'Switchboard.app' : 'Switchboard.exe'}`);
+      return;
+    }
+    if (args.length) throw new Error('Unknown package option. Use --dry-run to preview the build.');
+    console.log(`Built ${await packageApp()}`);
+  };
+  run().catch(err => {
     console.error('Could not package Switchboard:', err.message);
     process.exitCode = 1;
   });
