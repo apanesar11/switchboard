@@ -368,6 +368,7 @@ class Proc {
       // equals its pid — which is what makes the group kill in stop() exact.
       const args = platform.commandArgs(this.command);
       this.term = pty.spawn(this.shell, process.platform === 'win32' ? args.join(' ') : args, {
+        useConptyDll: process.platform === 'win32',
         name: 'xterm-256color',
         cols: this.cols,
         rows: this.rows,
@@ -483,11 +484,13 @@ class Proc {
       const records = new Map();
       if (!this.exited && table.info.has(pid)) records.set(pid, table.info.get(pid).start);
       for (const [child, start] of this.descendants) records.set(child, start);
+      // Close ConPTY while its shell is still alive, then reap any descendants
+      // that detached from the console, checking their identities again.
+      try { if (this.term && !this.exited) this.term.kill(); } catch (_) { /* gone */ }
       await windowsProcesses.killKnown(records);
       // ConPTY flushes final output before emitting its exit event.
       const deadline = Date.now() + 2000;
       while (!this.exited && Date.now() < deadline) await sleep(50);
-      try { if (this.term && !this.exited) this.term.kill(); } catch (_) { /* gone */ }
       try { if (this.child && !this.exited) this.child.kill(); } catch (_) { /* gone */ }
       return { steps: ['Stopped Windows processes after checking their creation times'] };
     }

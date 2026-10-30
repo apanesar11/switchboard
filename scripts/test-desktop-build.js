@@ -22,7 +22,8 @@ try {
     const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/sh';
     const args = process.platform === 'win32'
       ? ['-NoProfile', '-Command', "Write-Output ('NATIVE' + '_PTY_OK')"] : ['-c', 'echo NATIVE_PTY_OK'];
-    const term = pty.spawn(shell, args, { cols: 80, rows: 24, cwd: ${JSON.stringify(temp)}, env: process.env });
+    const term = pty.spawn(shell, args, { cols: 80, rows: 24, cwd: ${JSON.stringify(temp)}, env: process.env,
+      useConptyDll: process.platform === 'win32' });
     let output = '';
     term.onData(data => { output += data; });
     term.onExit(() => { console.log(output); process.exit(output.includes('NATIVE_PTY_OK') ? 0 : 1); });

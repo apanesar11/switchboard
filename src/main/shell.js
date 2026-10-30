@@ -410,6 +410,9 @@ class Term {
     // aliases and prompt are the ones iTerm2 gives — which is what puts `claude`
     // (~/.local/bin/claude) within reach.
     this.term = pty.spawn(this.shellPath, process.platform === 'win32' ? ['-NoLogo'] : ['-l'], {
+      // Ship a consistent ConPTY implementation instead of depending on the
+      // host Windows console's shutdown behavior.
+      useConptyDll: process.platform === 'win32',
       name: 'xterm-256color',
       cols: this.cols,
       rows: this.rows,
@@ -599,16 +602,11 @@ class Term {
     const pid = this.pid;
     if (!pid) { this.finish(null, null); return; }
     if (process.platform === 'win32') {
-      // End the live shell's tree first. node-pty 1.1's ConPTY kill path tries
-      // to attach a helper after closing the console, racing its own cleanup.
-      await new Promise(resolve => execFile('taskkill.exe', ['/PID', String(pid), '/T', '/F'],
-        { windowsHide: true, timeout: 8000 }, () => resolve()));
+      // The bundled ConPTY path closes the console and its input pipe together.
+      try { if (this.term) this.term.kill(); } catch (_) { /* already gone */ }
       const deadline = Date.now() + HUP_GRACE_MS;
       while (!this.exited && Date.now() < deadline) await sleep(50);
-      if (!this.exited) {
-        try { if (this.term) this.term.kill(); } catch (_) { /* already gone */ }
-        this.finish(null, 1);
-      }
+      if (!this.exited) this.finish(null, 1);
       return;
     }
 
