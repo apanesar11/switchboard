@@ -18,7 +18,7 @@ npm install
 npm start
 ```
 
-Switchboard builds on macOS and Windows (x64 or ARM64). Install Node.js/npm and Git on the build machine;
+Switchboard builds on macOS and Windows (x64 or ARM64). Install Node.js 24+ with npm and Git on the build machine;
 GitHub features also need `gh` signed in with `gh auth login`. Install and sign in
 to whichever coding CLI you use on that machine, then run `codex` or `claude` in a
 Switchboard terminal. Claude is optional, and there is no Codex usage meter yet.

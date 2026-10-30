@@ -484,6 +484,9 @@ class Proc {
       if (!this.exited && table.info.has(pid)) records.set(pid, table.info.get(pid).start);
       for (const [child, start] of this.descendants) records.set(child, start);
       await windowsProcesses.killKnown(records);
+      // ConPTY flushes final output before emitting its exit event.
+      const deadline = Date.now() + 2000;
+      while (!this.exited && Date.now() < deadline) await sleep(50);
       try { if (this.term && !this.exited) this.term.kill(); } catch (_) { /* gone */ }
       try { if (this.child && !this.exited) this.child.kill(); } catch (_) { /* gone */ }
       return { steps: ['Stopped Windows processes after checking their creation times'] };

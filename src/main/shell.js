@@ -599,9 +599,16 @@ class Term {
     const pid = this.pid;
     if (!pid) { this.finish(null, null); return; }
     if (process.platform === 'win32') {
-      // Closing ConPTY ends its shell and attached console processes.
-      try { if (this.term) this.term.kill(); } catch (_) { /* already gone */ }
-      if (!this.exited) this.finish(null, 1);
+      // End the live shell's tree first. node-pty 1.1's ConPTY kill path tries
+      // to attach a helper after closing the console, racing its own cleanup.
+      await new Promise(resolve => execFile('taskkill.exe', ['/PID', String(pid), '/T', '/F'],
+        { windowsHide: true, timeout: 8000 }, () => resolve()));
+      const deadline = Date.now() + HUP_GRACE_MS;
+      while (!this.exited && Date.now() < deadline) await sleep(50);
+      if (!this.exited) {
+        try { if (this.term) this.term.kill(); } catch (_) { /* already gone */ }
+        this.finish(null, 1);
+      }
       return;
     }
 

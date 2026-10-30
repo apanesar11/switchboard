@@ -19,7 +19,7 @@ async function until(fn) {
 test('Windows terminal opens PowerShell through ConPTY and accepts commands', windows, async t => {
   const shell = require('../src/main/shell.js');
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'switchboard-terminal-'));
-  t.after(async () => { await shell.close('fixture'); fs.rmSync(temp, { recursive: true, force: true }); });
+  t.after(async () => { await shell.close('fixture'); fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
   assert.equal(shell.info().pty, true, shell.info().ptyError);
   assert.equal(shell.info().tmux, false);
   const opened = await shell.open({ id: 'fixture', dir: temp });

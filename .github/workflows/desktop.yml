@@ -25,3 +25,5 @@ jobs:
       - run: npm run package
       - name: Smoke test the packaged app and native terminal
         run: node scripts/test-desktop-build.js
+      - name: Install on the native desktop
+        run: npm run install:desktop
