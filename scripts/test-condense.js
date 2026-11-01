@@ -31,7 +31,8 @@ after(() => fs.rmSync(temp, { recursive: true, force: true }));
 const node = (id, x, y, extra = {}) => ({ id, label: id, position: { x, y }, ...extra });
 const edge = (from, to, extra = {}) => ({ from, to, fromSide: 'right', toSide: 'left', ...extra });
 const flow = (nodes, edges, extra = {}) => ({ kind: 'flow', direction: 'right', nodes, edges, ...extra });
-const summary = [{ label: 'Customer identity' }, { label: 'Plans and membership', detail: 'A plan belongs to the identified customer.' }];
+// Switchboard: a replacement box is its label alone — ✦ Condense writes no second line.
+const summary = [{ label: 'Customer identity' }, { label: 'Plans and membership: a plan belongs to the identified customer.' }];
 
 function assertClear(spec) {
   const boxes = layoutDiagram(spec).nodes;
@@ -164,7 +165,7 @@ test('a growing condensed branch has room around neighbouring trees and retained
     node('root', 0, 300), node('a', 280, 300), node('b', 560, 300), node('c', 840, 300), node('d', 1120, 300), node('e', 1400, 300),
     node('above', 280, 80), node('above-child', 560, 80), node('below', 280, 520), node('below-child', 560, 520),
   ], [edge('root', 'a'), edge('a', 'b'), edge('b', 'c'), edge('c', 'd'), edge('d', 'e'), edge('above', 'above-child'), edge('below', 'below-child')]);
-  const result = replaceFlowSelection(spec, ['a', 'b', 'c', 'd', 'e'], Array.from({ length: 4 }, (_, i) => ({ label: `Important concept ${i + 1}`, detail: 'A longer explanation that takes several lines while remaining a readable summary.' })));
+  const result = replaceFlowSelection(spec, ['a', 'b', 'c', 'd', 'e'], Array.from({ length: 4 }, (_, i) => ({ label: `Important concept ${i + 1}: a longer explanation that takes several lines while remaining a readable summary.` })));
   assertClear(result.spec);
   assert.deepEqual(result.spec.nodes.find(n => n.id === 'root').position, spec.nodes[0].position);
   for (const id of ['above', 'above-child', 'below', 'below-child']) assert.ok(result.spec.nodes.some(n => n.id === id));
@@ -215,8 +216,7 @@ test('a taller replacement root keeps its anchor and makes room for surviving bo
     node('root', 0, 0), node('a', 280, 0), node('unrelated', 0, 100),
   ], [edge('root', 'a')]);
   const { spec: next, addedIds } = replaceFlowSelection(spec, ['root', 'a'], [{
-    label: 'The concept and its qualifications',
-    detail: 'The identified customer can hold several plans. Plans do not establish a new identity. Recurring membership accounts and prepaid balances describe separate payment arrangements.',
+    label: 'The concept and its qualifications. The identified customer can hold several plans. Plans do not establish a new identity. Membership accounts and prepaid balances are separate arrangements.',
   }]);
   assert.deepEqual(next.nodes.find(n => n.id === addedIds[0]).position, { x: 0, y: 0 });
   assert.ok(next.nodes.some(n => n.id === 'unrelated'));

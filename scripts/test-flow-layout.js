@@ -39,7 +39,13 @@ const {
   carryOverFlowLayout,
   FLOW_TAB_GAP_X,
   FLOW_TAB_GAP_Y,
+  FLOW_TAB_GAP_DOWN,
+  FLOW_TAB_GAP_ACROSS,
   FLOW_ROOM_GAP,
+  branchDirection,
+  branchHandles,
+  flowTabDirection,
+  nextChildPosition,
   stepTerminalFont,
   TERMINAL_FONT_STEP,
 } = require(outfile);
@@ -1182,4 +1188,188 @@ test('folding a branch leaves a PDF placed beside it where it is, as it leaves a
   const folded = apply(showing, tidyFlowTree(showing, edges, ['q'], [], { pinImages: true }));
   assert.deepEqual({ x: folded.get('report').x, y: folded.get('report').y }, { x: pdf.x, y: pdf.y });
   assert.equal(folded.get('c').y - (folded.get('a').y + H), FLOW_TAB_GAP_Y, 'the branch still closes up');
+});
+
+// ── Switchboard: a branch going down — out of a box's bottom into the top of one below ──
+//
+// The user asked that a box joined from its parent's bottom be laid out as one joined
+// from the parent's right is (2026-11-01): "we need auto-formatting there as well".
+// Such a branch is Tab's turned on its side: the boxes spread side by side under the
+// one they hang off, centred on it, and what the tree crowds is pushed left or right.
+
+const down = (source, target) => ({ source, target, sourceHandle: 'bottom', targetHandle: 'top' });
+const middle = b => b.x + b.width / 2;
+
+/** Adds `count` boxes under `parentId` one at a time, as Tab does on a branch going down. */
+function downTimes(boxes, edges, parentId, ids) {
+  let canvas = boxes.map(b => ({ ...b }));
+  const wired = [...edges];
+  for (const id of ids) {
+    const { position, moved } = placeTabChild(canvas, wired, parentId, { id, width: W, height: H }, 'down');
+    canvas = [...apply(canvas, moved).values(), { id, ...position, width: W, height: H }];
+    wired.push(down(parentId, id));
+  }
+  return { boxes: canvas, edges: wired };
+}
+
+/** The ids hanging under `parent` in `at`, left to right. */
+function row(at, ids) {
+  return [...ids].sort((a, b) => at.get(a).x - at.get(b).x);
+}
+
+test('an arrow joins a box into a branch out of a right side into a left, or out of a bottom into a top', () => {
+  const parent = box('p', 0, 0);
+  assert.equal(branchDirection(branchHandles('right'), parent, box('c', 300, 0)), 'right');
+  assert.equal(branchDirection(branchHandles('down'), parent, box('c', 0, 200)), 'down');
+  // Onto a box the wrong way from its parent, or by any other pair of sides, it is just an arrow.
+  assert.equal(branchDirection(branchHandles('right'), parent, box('c', -300, 0)), null);
+  assert.equal(branchDirection(branchHandles('down'), parent, box('c', 0, -200)), null);
+  assert.equal(branchDirection({ sourceHandle: 'left', targetHandle: 'right' }, parent, box('c', 300, 0)), null);
+  assert.equal(branchDirection({ sourceHandle: 'top', targetHandle: 'bottom' }, parent, box('c', 0, 200)), null);
+  assert.deepEqual(branchHandles('down'), { sourceHandle: 'bottom', targetHandle: 'top' });
+});
+
+test('the first box below lands centred under its parent, FLOW_TAB_GAP_DOWN beneath it', () => {
+  const { position, moved } = placeTabChild([box('q', 100, 0)], [], 'q', { id: 'a', width: W, height: H }, 'down');
+  assert.deepEqual(position, { x: 100, y: H + FLOW_TAB_GAP_DOWN });
+  assert.equal(moved.size, 0);
+  // A narrower box is centred on the parent too.
+  const narrow = placeTabChild([box('q', 100, 0)], [], 'q', { id: 'a', width: 100, height: H }, 'down');
+  assert.deepEqual(narrow.position, { x: 150, y: H + FLOW_TAB_GAP_DOWN });
+});
+
+test('more boxes below spread FLOW_TAB_GAP_ACROSS apart in one row, centred under the parent', () => {
+  const { boxes } = downTimes([box('q', 600, 0)], [], 'q', ['a', 'b', 'c']);
+  const at = new Map(boxes.map(b => [b.id, b]));
+  assert.deepEqual(row(at, ['a', 'b', 'c']), ['a', 'b', 'c'], 'in the order they were added');
+  assert.equal(at.get('b').x - (at.get('a').x + W), FLOW_TAB_GAP_ACROSS);
+  assert.equal(at.get('c').x - (at.get('b').x + W), FLOW_TAB_GAP_ACROSS);
+  for (const id of ['a', 'b', 'c']) assert.equal(at.get(id).y, H + FLOW_TAB_GAP_DOWN, `${id} in the row`);
+  assert.equal((middle(at.get('a')) + middle(at.get('c'))) / 2, middle(at.get('q')), 'the row is centred on q');
+  assert.deepEqual({ x: at.get('q').x, y: at.get('q').y }, { x: 600, y: 0 }, 'the box they hang off stays put');
+});
+
+test('an answer in parts below the question lands exactly where adding each would put it', () => {
+  const start = [box('root', 0, 0), box('q', 0, H + FLOW_TAB_GAP_DOWN)];
+  const edges = [down('root', 'q')];
+  const oneByOne = downTimes(start, edges, 'q', ['a', 'b', 'c']);
+  const { positions, moved } = placeTabChildren(start, edges, 'q', ['a', 'b', 'c'].map(id => ({ id, width: W, height: H })), 'down');
+  const at = apply(start, moved, ['a', 'b', 'c'].map(id => ({ id, ...positions.get(id), width: W, height: H })));
+  for (const b of oneByOne.boxes) assert.deepEqual({ x: at.get(b.id).x, y: at.get(b.id).y }, { x: b.x, y: b.y }, b.id);
+});
+
+test('a box dropped between two of its siblings below goes between them, back in their row', () => {
+  const { boxes, edges } = downTimes([box('q', 600, 0)], [], 'q', ['a', 'b', 'c', 'd']);
+  const at0 = new Map(boxes.map(b => [b.id, b]));
+  // d, dragged left between a and b, a little off the row.
+  const { dropped, from } = drag(boxes, 'd', { x: (at0.get('a').x + at0.get('b').x) / 2 + 10, y: at0.get('d').y + 37 });
+  const at = apply(dropped, tidyAfterMove(dropped, edges, from));
+  assert.deepEqual(row(at, ['a', 'b', 'c', 'd']), ['a', 'd', 'b', 'c']);
+  for (const id of ['b', 'c', 'd']) assert.equal(at.get(id).y, at.get('a').y, `${id} in the row`);
+  for (const [x, y] of [['a', 'd'], ['d', 'b'], ['b', 'c']]) {
+    assert.equal(at.get(y).x - (at.get(x).x + W), FLOW_TAB_GAP_ACROSS, `${x} to ${y}`);
+  }
+  assert.equal((middle(at.get('a')) + middle(at.get('c'))) / 2, middle(at.get('q')));
+  assert.deepEqual({ x: at.get('q').x, y: at.get('q').y }, { x: 600, y: 0 }, 'the box they hang off stays put');
+});
+
+test('a box dragged above what it hangs off leaves the branch below, which closes up behind it', () => {
+  const { boxes, edges } = downTimes([box('q', 600, 400)], [], 'q', ['a', 'b', 'c']);
+  const { dropped, from } = drag(boxes, 'b', { x: 1400, y: 0 });
+  const at = apply(dropped, tidyAfterMove(dropped, edges, from));
+  assert.deepEqual({ x: at.get('b').x, y: at.get('b').y }, { x: 1400, y: 0 }, 'left where it was dropped');
+  assert.equal(at.get('c').x - (at.get('a').x + W), FLOW_TAB_GAP_ACROSS, 'a and c close up');
+  assert.equal((middle(at.get('a')) + middle(at.get('c'))) / 2, middle(at.get('q')));
+});
+
+test('deleting a box below closes up the row around the parent', () => {
+  const { boxes, edges } = downTimes([box('q', 600, 0)], [], 'q', ['a', 'b', 'c']);
+  const at = apply(boxes.filter(b => b.id !== 'b'), tidyAfterDelete(boxes, edges, new Set(['b'])));
+  assert.equal(at.get('c').x - (at.get('a').x + W), FLOW_TAB_GAP_ACROSS);
+  assert.equal((middle(at.get('a')) + middle(at.get('c'))) / 2, middle(at.get('q')));
+});
+
+test('a box carries what hangs below it, all the way down', () => {
+  const start = downTimes([box('root', 600, 0)], [], 'root', ['p', 's']);
+  const deeper = downTimes(start.boxes, start.edges, 'p', ['p1', 'p2']);
+  assert.deepEqual(flowBranches(deeper.boxes, deeper.edges, ['root']).get('root').sort(), ['p', 'p1', 'p2', 's']);
+  assert.deepEqual(flowBranches(deeper.boxes, deeper.edges, ['p']).get('p').sort(), ['p1', 'p2']);
+});
+
+test('a row growing into another tree pushes that tree left or right out of its way, whole', () => {
+  // Another tree, hanging down, stands to the right of where q's row will grow.
+  const other = downTimes([box('o', 700, 0)], [], 'o', ['o1']);
+  const mine = [box('q', 300, 0), ...other.boxes];
+  const edges = [...other.edges];
+  const { positions, moved } = placeTabChildren(mine, edges, 'q', ['a', 'b', 'c'].map(id => ({ id, width: W, height: H })), 'down');
+  const at = apply(mine, moved, ['a', 'b', 'c'].map(id => ({ id, ...positions.get(id), width: W, height: H })));
+  // o and o1 moved together, rightwards, and are now FLOW_ROOM_GAP clear of c.
+  assert.equal(at.get('o').x - 700, at.get('o1').x - other.boxes.find(b => b.id === 'o1').x, 'o and o1 move together');
+  assert.ok(at.get('o1').x > 700, 'pushed right');
+  assert.equal(at.get('o1').x - (at.get('c').x + W), FLOW_ROOM_GAP);
+  const all = [...at.values()];
+  for (const x of all) for (const y of all) if (x !== y) assert.ok(!overlapping(x, y), `${x.id} on ${y.id}`);
+});
+
+test('a branch going right off a box below is one block with it: the next box along the row keeps clear', () => {
+  // a hangs under q; a1 and a2 hang off a's right side, so a's block is wide.
+  const start = downTimes([box('q', 600, 0)], [], 'q', ['a']);
+  const wide = tabTimes(start.boxes, start.edges, 'a', ['a1', 'a2']);
+  // Now b is added under q: it goes to the right of a's whole block, not onto a1.
+  const { position, moved } = placeTabChild(wide.boxes, wide.edges, 'q', { id: 'b', width: W, height: H }, 'down');
+  const at = apply(wide.boxes, moved, [{ id: 'b', ...position, width: W, height: H }]);
+  assert.equal(at.get('b').x - (at.get('a1').x + W), FLOW_TAB_GAP_ACROSS, 'b clears a1 and a2');
+  assert.equal(at.get('b').y, at.get('a').y, 'in a\'s row');
+  assert.equal((centre(at.get('a1')) + centre(at.get('a2'))) / 2, centre(at.get('a')), 'a1 and a2 still centred on a');
+  const all = [...at.values()];
+  for (const x of all) for (const y of all) if (x !== y) assert.ok(!overlapping(x, y), `${x.id} on ${y.id}`);
+});
+
+test('boxes hanging below a box in a column stack the column under their whole block', () => {
+  // a and b hang off q's right; a has two boxes hanging below it.
+  const start = tabTimes([box('q', 0, 600)], [], 'q', ['a', 'b']);
+  const tall = downTimes(start.boxes, start.edges, 'a', ['a1', 'a2']);
+  const at = new Map(tall.boxes.map(b => [b.id, b]));
+  const bottomOfA = Math.max(at.get('a1').y, at.get('a2').y) + H;
+  assert.equal(at.get('b').y - bottomOfA, FLOW_TAB_GAP_Y, 'b stacks under a1 and a2, not under a alone');
+  assert.equal(at.get('b').x, at.get('a').x, 'still in the column');
+  // Centred under a, the row would reach back under q, level with it: it is let along
+  // just far enough to clear q instead.
+  assert.equal(at.get('a2').x - (at.get('a1').x + W), FLOW_TAB_GAP_ACROSS, 'a1 and a2 still a row');
+  assert.ok(at.get('a1').x > at.get('q').x + W, 'the row keeps clear of q');
+  assert.ok(middle(at.get('a1')) < middle(at.get('a')) && middle(at.get('a2')) > middle(at.get('a')), 'and still hangs either side of a');
+  const all = [...at.values()];
+  for (const x of all) for (const y of all) if (x !== y) assert.ok(!overlapping(x, y), `${x.id} on ${y.id}`);
+});
+
+test('Tab goes on downwards from a box whose every box hangs below it, and rightwards otherwise', () => {
+  const below = downTimes([box('q', 600, 0)], [], 'q', ['a']);
+  assert.equal(flowTabDirection(below.boxes, below.edges, 'q'), 'down');
+  assert.equal(flowTabDirection(below.boxes, below.edges, 'a'), 'right', 'a box with nothing hanging off it');
+  const right = tabTimes([box('q', 0, 600)], [], 'q', ['a']);
+  assert.equal(flowTabDirection(right.boxes, right.edges, 'q'), 'right');
+  const both = downTimes(right.boxes, right.edges, 'q', ['b']);
+  assert.equal(flowTabDirection(both.boxes, both.edges, 'q'), 'right', 'both ways: Tab keeps to the right');
+});
+
+test('where the next box below would land, for the answer\'s placeholder', () => {
+  const parent = box('q', 600, 0);
+  assert.deepEqual(nextChildPosition(parent, [], [parent], { width: W, height: H }, 'down'), { x: 600, y: H + FLOW_TAB_GAP_DOWN });
+  const first = box('a', 600, H + FLOW_TAB_GAP_DOWN);
+  assert.deepEqual(nextChildPosition(parent, [first], [parent, first], { width: W, height: H }, 'down'), { x: 600 + W + FLOW_TAB_GAP_ACROSS, y: first.y });
+});
+
+test('arrows that go right, then down, then back to the first box never hang the layout', () => {
+  // a → b to the right, b → c down, c → a to the right (a is right of c): a loop no
+  // one-way walk could close. The box closing it tops a tree of its own, and the
+  // layout ends.
+  const boxes = [box('a', 300, 0), box('b', 600, 0), box('c', 0, 300)];
+  const edges = [tab('a', 'b'), down('b', 'c'), tab('c', 'a')];
+  const { position, moved } = placeTabChild(boxes, edges, 'b', { id: 'd', width: W, height: H });
+  assert.ok(Number.isFinite(position.x) && Number.isFinite(position.y));
+  assert.ok(moved instanceof Map);
+  assert.ok(tidyFlowTree(boxes, edges, ['a']) instanceof Map);
+  assert.ok(tidyAfterDelete(boxes, edges, new Set(['c'])) instanceof Map);
+  const from = new Map([['b', { x: 600, y: 0 }]]);
+  assert.ok(tidyAfterMove(boxes.map(b => (b.id === 'b' ? { ...b, y: 40 } : b)), edges, from) instanceof Map);
 });

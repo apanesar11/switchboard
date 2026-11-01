@@ -76,6 +76,18 @@ export const FLOW_TEXT_PAD_Y = 3
 const FLOW_DETAIL_FONT_SIZE = 11
 const FLOW_DETAIL_LINE_HEIGHT = 16
 const FLOW_DETAIL_GAP = 2
+/**
+ * Switchboard: a code block's type and slab (FlowTextParagraph.code) — 11px monospace
+ * on a 16px line whatever the box's text size, padded 6 down and 8 across, and 4 clear
+ * of the text above and below it. What styles.css draws `.flow-rich-text pre` with, so
+ * what is measured is what fits; the font stack is the one `--font-mono` names there.
+ */
+export const FLOW_CODE_FONT_SIZE = 11
+export const FLOW_CODE_LINE_HEIGHT = 16
+export const FLOW_CODE_PAD_X = 8
+export const FLOW_CODE_PAD_Y = 6
+export const FLOW_CODE_GAP = 4
+export const FLOW_CODE_FONT_FAMILY = '"SF Mono", Menlo, Consolas, monospace'
 
 /**
  * A box label's font size and line height for each text size, in pixels.
@@ -110,12 +122,24 @@ const WIDE = new Set("mwMW@%")
 /** Above this weight the glyphs are visibly wider; 6% covers 600 and 700. */
 const BOLD_FACTOR = 1.06
 
+/**
+ * Switchboard: a monospace glyph's advance, as a fraction of the font size — SF Mono's
+ * and Menlo's are 0.6 — and how many of them a tab is drawn as (styles.css tab-size).
+ */
+const MONO_ADVANCE = 0.6
+const MONO_TAB = 4
+
 export function estimateTextWidth(
   text: string,
   fontSize: number,
   weight = 400,
+  mono = false,
 ): number {
   let units = 0
+  if (mono) {
+    for (const char of text) units += char === "\t" ? MONO_TAB * MONO_ADVANCE : MONO_ADVANCE
+    return Math.ceil(units * fontSize)
+  }
   for (const char of text) {
     if (HAIRLINE.has(char)) units += 0.3
     else if (NARROW.has(char)) units += 0.42
@@ -127,8 +151,11 @@ export function estimateTextWidth(
   return Math.ceil(units * fontSize * (weight >= 600 ? BOLD_FACTOR : 1))
 }
 
-/** How wide `text` is drawn at `fontSize` and `weight`, in pixels. */
-export type FlowTextMeasure = (text: string, fontSize: number, weight: number) => number
+/**
+ * How wide `text` is drawn at `fontSize` and `weight`, in pixels. Switchboard: in the
+ * code blocks' monospace when `mono`, else in the boxes' own type.
+ */
+export type FlowTextMeasure = (text: string, fontSize: number, weight: number, mono?: boolean) => number
 
 let measureText: FlowTextMeasure = estimateTextWidth
 
@@ -387,50 +414,79 @@ export function flowLabelWeight(node: Pick<FlowNodeSpec, "shape" | "bold" | "lab
   return node.shape === "note" || node.shape === "text" ? 400 : 500
 }
 
-// The second line wrapped to `width`, and the height it adds under a label.
-function detailLines(detail: string | undefined, width: number, rich?: FlowRichText): string[] {
-  return detail ? richTextLines(detail, rich, width, FLOW_DETAIL_FONT_SIZE, 400).map((line) => line.text) : []
+/** One line as drawn: its words, how wide they run, and the height it takes. */
+type MeasuredLine = { text: string; width: number; height: number }
+
+/** How tall `lines` stand, one under another. */
+function textHeight(lines: MeasuredLine[]): number {
+  return lines.reduce((total, line) => total + line.height, 0)
 }
 
-/** Measure mixed weights and the list's hanging indent, including wrapped items. */
-function richTextLines(text: string, rich: FlowRichText | undefined, width: number, fontSize: number, weight: number): { text: string; width: number }[] {
-  if (!rich) return wrapText(text, width, fontSize, weight).map((text) => ({ text, width: measureText(text, fontSize, weight) }))
+// The second line wrapped to `width`, and the height it adds under a label.
+function detailLines(detail: string | undefined, width: number, rich?: FlowRichText): MeasuredLine[] {
+  return detail ? richTextLines(detail, rich, width, FLOW_DETAIL_FONT_SIZE, FLOW_DETAIL_LINE_HEIGHT, 400) : []
+}
+
+/**
+ * Measure mixed weights and the list's hanging indent, including wrapped items.
+ * Switchboard: and a code block's lines, in monospace within its slab's padding, the
+ * block's padding and gap added to its first and last line — so the lines' heights
+ * added up are the text's height.
+ */
+function richTextLines(text: string, rich: FlowRichText | undefined, width: number, fontSize: number, lineHeight: number, weight: number): MeasuredLine[] {
+  if (!rich) return wrapText(text, width, fontSize, weight).map((text) => ({ text, width: measureText(text, fontSize, weight), height: lineHeight }))
   const indents: number[] = []
-  return richTextVisualLines(rich.length ? rich : plainTextParagraphs(text)).flatMap((paragraph) => {
-    const text = paragraph.runs.map((run) => run.text).join("")
-    indents.length = paragraph.level ?? 0
-    indents.push(paragraph.checked !== undefined ? FLOW_CHECKLIST_INDENT : paragraph.bullet ? FLOW_BULLET_INDENT : 0)
-    const indent = fontSize * indents.reduce((total, padding) => total + padding, 0)
-    const available = Math.max(1, width - indent)
-    const measure = (start: number, end: number) => {
-      let offset = 0, measured = 0
-      for (const run of paragraph.runs) {
-        const part = run.text.slice(Math.max(0, start - offset), Math.max(0, end - offset))
-        if (part) measured += measureText(part, fontSize, run.bold ? 700 : weight)
-        offset += run.text.length
+  return (rich.length ? rich : plainTextParagraphs(text)).flatMap((paragraph) => {
+    const code = paragraph.code === true
+    const lines = richTextVisualLines([paragraph]).flatMap((line): MeasuredLine[] => {
+      const text = line.runs.map((run) => run.text).join("")
+      if (code) indents.length = 0
+      else {
+        indents.length = line.level ?? 0
+        indents.push(line.checked !== undefined ? FLOW_CHECKLIST_INDENT : line.bullet ? FLOW_BULLET_INDENT : 0)
       }
-      return measured
-    }
-    const lines: { text: string; width: number }[] = []
-    let start = 0
-    while (start < text.length) {
-      let end = start
-      while (end < text.length && (end === start || measure(start, end + 1) <= available)) end += 1
-      if (end < text.length) {
-        const prefix = text.slice(start, end)
-        const boundary = Math.max(prefix.lastIndexOf(" ") + 1, ...[...prefix.matchAll(/[-?!–—…]/g)].map((match) => match.index + 1))
-        if (boundary > 0) end = start + boundary
+      // What the line's words sit inside of: a list item's indent, or the slab's padding.
+      const inset = code ? FLOW_CODE_PAD_X * 2 : fontSize * indents.reduce((total, padding) => total + padding, 0)
+      const size = code ? FLOW_CODE_FONT_SIZE : fontSize
+      const height = code ? FLOW_CODE_LINE_HEIGHT : lineHeight
+      const available = Math.max(1, width - inset)
+      const measure = (start: number, end: number) => {
+        if (code) return measureText(text.slice(start, end), size, 400, true)
+        let offset = 0, measured = 0
+        for (const run of line.runs) {
+          const part = run.text.slice(Math.max(0, start - offset), Math.max(0, end - offset))
+          if (part) measured += measureText(part, size, run.bold ? 700 : weight)
+          offset += run.text.length
+        }
+        return measured
       }
-      lines.push({ text: text.slice(start, end).trimEnd(), width: measure(start, end) + indent })
-      start = end
-      while (text[start] === " ") start += 1
+      const wrapped: MeasuredLine[] = []
+      let start = 0
+      while (start < text.length) {
+        let end = start
+        while (end < text.length && (end === start || measure(start, end + 1) <= available)) end += 1
+        if (end < text.length) {
+          const prefix = text.slice(start, end)
+          const boundary = Math.max(prefix.lastIndexOf(" ") + 1, ...[...prefix.matchAll(/[-?!–—…]/g)].map((match) => match.index + 1))
+          if (boundary > 0) end = start + boundary
+        }
+        wrapped.push({ text: text.slice(start, end).trimEnd(), width: measure(start, end) + inset, height })
+        start = end
+        while (text[start] === " ") start += 1
+      }
+      return wrapped.length ? wrapped : [{ text: "", width: inset, height }]
+    })
+    if (code && lines.length) {
+      const edge = FLOW_CODE_PAD_Y + FLOW_CODE_GAP
+      lines[0] = { ...lines[0], height: lines[0].height + edge }
+      lines[lines.length - 1] = { ...lines[lines.length - 1], height: lines[lines.length - 1].height + edge }
     }
-    return lines.length ? lines : [{ text: "", width: indent }]
+    return lines
   })
 }
 
-function detailHeight(lines: string[]): number {
-  return lines.length > 0 ? lines.length * FLOW_DETAIL_LINE_HEIGHT + FLOW_DETAIL_GAP : 0
+function detailHeight(lines: MeasuredLine[]): number {
+  return lines.length > 0 ? textHeight(lines) + FLOW_DETAIL_GAP : 0
 }
 
 /**
@@ -481,9 +537,9 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
   if (shape === "note") {
     const width = node.size?.width ?? FLOW_NOTE_SIZE
     const inner = width - FLOW_NOTE_PAD * 2
-    const lines = richTextLines(node.label, node.labelRichText, inner, fontSize, weight)
+    const lines = richTextLines(node.label, node.labelRichText, inner, fontSize, lineHeight, weight)
     const needed =
-      lines.length * lineHeight +
+      textHeight(lines) +
       detailHeight(detailLines(node.detail, inner, node.detailRichText)) +
       FLOW_NOTE_PAD * 2
     return { width, height: Math.max(node.size?.height ?? FLOW_NOTE_SIZE, needed) }
@@ -491,8 +547,8 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
 
   if (shape === "text") {
     const wrapAt = (node.size?.width ?? FLOW_TEXT_AUTO_MAX_WIDTH) - FLOW_TEXT_PAD_X * 2
-    const lines = richTextLines(node.label, node.labelRichText, wrapAt, fontSize, weight)
-    const details = richTextLines(node.detail ?? "", node.detailRichText, wrapAt, FLOW_DETAIL_FONT_SIZE, 400)
+    const lines = richTextLines(node.label, node.labelRichText, wrapAt, fontSize, lineHeight, weight)
+    const details = richTextLines(node.detail ?? "", node.detailRichText, wrapAt, FLOW_DETAIL_FONT_SIZE, FLOW_DETAIL_LINE_HEIGHT, 400)
     const width =
       node.size?.width ??
       clamp(
@@ -508,13 +564,13 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
       )
     return {
       width,
-      height: lines.length * lineHeight + detailHeight(node.detail ? details.map((line) => line.text) : []) + FLOW_TEXT_PAD_Y * 2,
+      height: textHeight(lines) + detailHeight(node.detail ? details : []) + FLOW_TEXT_PAD_Y * 2,
     }
   }
 
   const width = node.size?.width ?? FLOW_NODE_WIDTH
   const labelWidth = Math.max(1, width - (shape === "diamond" ? FLOW_DIAMOND_LABEL_INSET : FLOW_LABEL_INSET))
-  const lines = richTextLines(node.label, node.labelRichText, labelWidth, fontSize, weight)
+  const lines = richTextLines(node.label, node.labelRichText, labelWidth, fontSize, lineHeight, weight)
   return {
     width,
     height: Math.max(
@@ -523,7 +579,7 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
       // Switchboard: one resized by hand is as tall as it was made instead.
       node.size?.height ?? (shape === "diamond" ? FLOW_DIAMOND_HEIGHT : FLOW_NODE_MIN_HEIGHT),
       // Every line the second line wraps to, not just its first.
-      lines.length * lineHeight + detailHeight(detailLines(node.detail, labelWidth, node.detailRichText)) + 22,
+      textHeight(lines) + detailHeight(detailLines(node.detail, labelWidth, node.detailRichText)) + 22,
     ),
   }
 }

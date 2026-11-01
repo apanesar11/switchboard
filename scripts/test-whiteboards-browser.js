@@ -149,10 +149,11 @@ if (!process.versions.electron) {
   handle('answer:start', (_id, req) => {
     answersAsked.push(req);
     const n = answersAsked.length;
+    // An answer's box is its label alone (ai.ts BOX_RULES): at High, the paragraph is the label.
     const paragraph = 'An example paragraph that explains the answer in full sentences. '.repeat(8).trim();
     return { ok: true, files: 0, conversation: null, text: JSON.stringify({ parts: [
-      { label: `Example answer ${n}a`, detail: paragraph },
-      { label: `Example answer ${n}b`, detail: paragraph },
+      { label: `Example answer ${n}a. ${paragraph}` },
+      { label: `Example answer ${n}b. ${paragraph}` },
     ] }) };
   });
   handle('answer:setSettings', patch => {
@@ -1620,7 +1621,7 @@ if (!process.versions.electron) {
       const details = popover + ' [role=radiogroup][aria-label="Details"]';
       const detailsSays = () => run(`(() => { const group = document.querySelector(${q(details)}); return group ? { levels: Array.from(group.querySelectorAll('[role=radio]')).map(b => b.textContent.trim() + (b.getAttribute('aria-checked') === 'true' ? '*' : '')), hint: group.nextElementSibling?.textContent.trim() } : null; })()`);
       await check('Details offers Low, Medium and High, Low first, in place of the two switches', async () => {
-        assert.deepEqual(await detailsSays(), { levels: ['Low*', 'Medium', 'High'], hint: 'A few words, and a short line when it helps' });
+        assert.deepEqual(await detailsSays(), { levels: ['Low*', 'Medium', 'High'], hint: 'A few words in each box' });
         const menuText = await run(`document.querySelector(${q(popover)}).textContent`);
         assert.doesNotMatch(menuText, /Subtext|Read the boxes before it/);
         assert.match(menuText, /Web access/);
@@ -1630,7 +1631,7 @@ if (!process.versions.electron) {
         await waitFor(() => settingsChanges.length > 0, 'the change');
         assert.deepEqual(settingsChanges, [{ details: 'high' }]);
         await waitFor(async () => (await detailsSays())?.levels[2] === 'High*', 'High to be checked');
-        assert.deepEqual(await detailsSays(), { levels: ['Low', 'Medium', 'High*'], hint: 'A full paragraph under each box' });
+        assert.deepEqual(await detailsSays(), { levels: ['Low', 'Medium', 'High*'], hint: 'A full paragraph in each box' });
       });
       await capture('answer-details-high');
       await run(`Array.from(document.querySelectorAll(${q(details + ' [role=radio]')})).find(b => b.textContent.trim() === 'Low').click()`);
@@ -1716,7 +1717,8 @@ if (!process.versions.electron) {
         await run(`${apiOf(boardId)}.flush()`);
         const saved = boardFile(boardId).spec.nodes.filter(n => n.label.startsWith('Example answer'));
         assert.deepEqual(saved.map(n => n.size?.width), [360, 360]);
-        assert.ok(saved.every(n => n.detail.length > 500), 'a paragraph is kept whole');
+        assert.ok(saved.every(n => n.label.length > 500), 'a paragraph is kept whole');
+        assert.ok(saved.every(n => n.detail === undefined), 'and never as a second line');
       });
       await capture('answer-details-boxes');
       // A question asked from an answer goes with the boxes leading up to it — always.
@@ -1731,7 +1733,7 @@ if (!process.versions.electron) {
       await check('a question further along sends the boxes before it', async () => {
         await waitFor(() => answersAsked.length === 2, 'the second question');
         assert.match(answersAsked[1].user, /^Boxes leading to the question, first to last:\n- Review the design\n/m);
-        assert.match(answersAsked[1].user, /^The question box: Example answer 1a$/m);
+        assert.match(answersAsked[1].user, /^The question box: Example answer 1a\. An example paragraph that explains the answer in full sentences\./m);
         await waitFor(async () => (await nodeCount()) === nodesBefore + 4, 'the second answer');
       });
       for (const left of [nodesBefore + 2, nodesBefore]) {

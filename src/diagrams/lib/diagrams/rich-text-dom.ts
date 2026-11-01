@@ -1,7 +1,8 @@
 import { appendTextRun, richTextHtml, richTextPlainText, richTextSelectedParagraphs, shiftListIndent, type FlowTextSelection } from "./rich-text"
 import type { FlowRichText, FlowTextRun } from "./types"
 
-export type FlowTextCommand = "bold" | "italic" | "insertUnorderedList" | "checklist" | "indent" | "outdent"
+// Switchboard: "code" \u2014 the selected paragraphs as a code block, or back (rich-text.ts toggleCode).
+export type FlowTextCommand = "bold" | "italic" | "insertUnorderedList" | "checklist" | "indent" | "outdent" | "code"
 export const FLOW_FORMAT_EVENT = "flow-text-format"
 export const FLOW_PASTE_EVENT = "flow-text-paste"
 
@@ -16,14 +17,16 @@ export function readRichText(element: HTMLElement, paragraphElements?: HTMLEleme
   let runs: FlowTextRun[] = []
   let bullet = false
   let checked: boolean | undefined
+  // Switchboard: inside a <pre> \u2014 a code block (rich-text.ts richTextHtml).
+  let code = false
   let level = 0
   let listDepth = 0
   let owner = element
   const owners: HTMLElement[] = []
   const flush = (force = false) => {
     if (runs.length || force) {
-      paragraphs.push({ runs, ...(checked !== undefined ? { checked } : bullet ? { bullet: true } : {}),
-        ...((bullet || checked !== undefined) && level > 0 ? { level } : {}) })
+      paragraphs.push({ runs, ...(code ? { code: true } : checked !== undefined ? { checked } : bullet ? { bullet: true } : {}),
+        ...(!code && (bullet || checked !== undefined) && level > 0 ? { level } : {}) })
       owners.push(owner)
       paragraphElements?.push(owner)
     }
@@ -34,18 +37,20 @@ export function readRichText(element: HTMLElement, paragraphElements?: HTMLEleme
       appendTextRun(runs, { text: (node.textContent ?? "").replace(/\r\n?/g, "\n").replace(/\u00a0/g, " "), bold, italic })
       return
     }
-    if (!(node instanceof HTMLElement) || node.hasAttribute("data-flow-checkbox") || ["SCRIPT", "STYLE", "IMG"].includes(node.tagName)) return
+    // Switchboard: nor is a code block's copy button any of its words.
+    if (!(node instanceof HTMLElement) || node.hasAttribute("data-flow-checkbox") || node.hasAttribute("data-flow-copy") || ["SCRIPT", "STYLE", "IMG"].includes(node.tagName)) return
     const tag = node.tagName
     if (tag === "BR") {
       // A sole final <br> is the caret's placeholder, not an extra paragraph.
       if (isSoftBreak(node)) appendTextRun(runs, { text: "\n", bold, italic })
       return
     }
-    const block = ["DIV", "P", "LI", "UL", "OL"].includes(tag)
+    const block = ["DIV", "P", "LI", "UL", "OL", "PRE"].includes(tag)
     const list = tag === "UL" || tag === "OL"
     if (block) flush(list && owner.tagName === "LI" && !owners.includes(owner))
     const previousBullet = bullet
     const previousChecked = checked
+    const previousCode = code
     const previousOwner = owner
     const previousLevel = level
     const previousDepth = listDepth
@@ -57,6 +62,10 @@ export function readRichText(element: HTMLElement, paragraphElements?: HTMLEleme
       owner = node
       level = Math.max(0, listDepth - 1)
     }
+    if (tag === "PRE") {
+      code = true
+      owner = node
+    }
     const style = getComputedStyle(node)
     const nextBold = tag === "B" || tag === "STRONG" || Number.parseInt(style.fontWeight, 10) >= 600
     const nextItalic = tag === "I" || tag === "EM" || style.fontStyle === "italic"
@@ -65,6 +74,7 @@ export function readRichText(element: HTMLElement, paragraphElements?: HTMLEleme
     if (block && tag !== "UL" && tag !== "OL") flush(runs.length > 0 || before === paragraphs.length)
     bullet = previousBullet
     checked = previousChecked
+    code = previousCode
     owner = previousOwner
     level = previousLevel
     listDepth = previousDepth
@@ -112,7 +122,7 @@ export function restoreFlowTextSelection(element: HTMLElement, selection: FlowTe
       const walker = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
         acceptNode: (node) => {
           const parent = node instanceof Element ? node : node.parentElement
-          if (parent?.closest("[data-flow-checkbox]") || (paragraph.tagName === "LI" && parent?.closest("li") !== paragraph)) return NodeFilter.FILTER_REJECT
+          if (parent?.closest("[data-flow-checkbox], [data-flow-copy]") || (paragraph.tagName === "LI" && parent?.closest("li") !== paragraph)) return NodeFilter.FILTER_REJECT
           return node.nodeType === Node.TEXT_NODE || (node instanceof HTMLElement && node.tagName === "BR" && isSoftBreak(node))
             ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP
         },
@@ -166,13 +176,46 @@ export function flowCheckbox(target: EventTarget | null): HTMLElement | null {
   return target instanceof Element ? target.closest<HTMLElement>("[data-flow-checkbox]") : null
 }
 
-export function flowListState(element: HTMLElement): { bullet: boolean; checklist: boolean; indent: boolean; outdent: boolean } {
+/** Switchboard: the code block's copy button a press or click landed on, if one did. */
+export function flowCodeCopy(target: EventTarget | null): HTMLElement | null {
+  return target instanceof Element ? target.closest<HTMLElement>("[data-flow-copy]") : null
+}
+
+/**
+ * Switchboard: the words of the code block `button` is the copy button of, as typed —
+ * line breaks and indentation included, the button itself left out. Read from the
+ * block as it stands on the page (a copy of it), so it is right mid-edit too.
+ */
+export function flowCodeText(button: HTMLElement): string {
+  const block = button.closest("pre")
+  if (!block) return ""
+  const clone = block.cloneNode(true) as HTMLElement
+  for (const copy of clone.querySelectorAll("[data-flow-copy]")) copy.remove()
+  const host = document.createElement("div")
+  host.append(clone)
+  return richTextPlainText(readRichText(host))
+}
+
+/**
+ * Switchboard: whether the caret (or selection) is in a code block of `element`, with
+ * what it read to tell — for the keys that mean something else there.
+ */
+export function flowCodeAtSelection(element: HTMLElement): { rich: FlowRichText; selection: FlowTextSelection } | null {
+  const rich = readRichText(element)
+  const selection = flowTextSelection(element)
+  const [index] = richTextSelectedParagraphs(rich, selection)
+  return index !== undefined && rich[index].code === true ? { rich, selection } : null
+}
+
+export function flowListState(element: HTMLElement): { bullet: boolean; checklist: boolean; code: boolean; indent: boolean; outdent: boolean } {
   const rich = readRichText(element)
   const selection = flowTextSelection(element)
   const selected = richTextSelectedParagraphs(rich, selection)
   return {
     bullet: selected.length > 0 && selected.every((index) => rich[index].bullet && rich[index].checked === undefined),
     checklist: selected.length > 0 && selected.every((index) => rich[index].checked !== undefined),
+    // Switchboard: the toolbar's Code block, lit while the selection is in one.
+    code: selected.length > 0 && selected.every((index) => rich[index].code === true),
     indent: shiftListIndent(rich, selection, 1) !== rich,
     outdent: shiftListIndent(rich, selection, -1) !== rich,
   }

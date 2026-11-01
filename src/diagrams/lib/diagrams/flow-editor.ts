@@ -2,6 +2,9 @@
 // a FlowSpec, naming new boxes, deciding where Tab puts the next one (and how
 // the boxes around it shuffle to stay symmetrical), and keeping a hand-made
 // arrangement when Claude republishes the diagram.
+// Switchboard: the branches Tab builds run right; a branch can run down as well — an
+// arrow out of a box's bottom into the top of one below — and is laid out the same
+// way, turned on its side (FlowBranchDirection, layoutTree).
 //
 // Dependency-free apart from sibling pure modules, so it is unit tested in a
 // plain node environment (flow-editor.test.ts) and runs unchanged in the
@@ -280,8 +283,47 @@ export type FlowRect = { x: number; y: number; width: number; height: number }
 export const FLOW_TAB_GAP_X = 80
 /** Between boxes Tab stacks under one another. */
 export const FLOW_TAB_GAP_Y = 30
+/**
+ * Switchboard: between a box and one hanging off its bottom — the same room for an
+ * arrow as FLOW_TAB_GAP_X leaves to the right.
+ */
+export const FLOW_TAB_GAP_DOWN = 80
+/** Switchboard: between boxes spread side by side under the one they hang off. */
+export const FLOW_TAB_GAP_ACROSS = 40
 /** How close two boxes may come before one counts as landing on the other. */
 const FLOW_CLEARANCE = 10
+
+/**
+ * Switchboard: which way a branch runs. "right" is Tab's — a box hangs off another's
+ * right side, by an arrow from that side into its left, and its siblings stack under
+ * one another. "down" is the other way an arrow is drawn in a flowchart — out of a
+ * box's bottom into the top of one below — and those siblings spread side by side.
+ * The user asked for the branches that go down to be laid out as the ones going right
+ * are (2026-11-01): "we need auto-formatting there as well".
+ */
+export type FlowBranchDirection = "right" | "down"
+
+/** The handles an arrow joining a box into a branch uses, by the branch's direction. */
+export function branchHandles(direction: FlowBranchDirection): { sourceHandle: FlowSide; targetHandle: FlowSide } {
+  return direction === "right"
+    ? { sourceHandle: "right", targetHandle: "left" }
+    : { sourceHandle: "bottom", targetHandle: "top" }
+}
+
+/**
+ * Switchboard: the way `edge` joins `to` into a branch under `from` — right side to left
+ * side onto a box further right, or bottom to top onto a box further down — or null
+ * when it is no such arrow (a loop back, a side arrow, one drawn the other way round).
+ */
+export function branchDirection(
+  edge: Pick<FlowTreeEdge, "sourceHandle" | "targetHandle">,
+  from: FlowRect,
+  to: FlowRect,
+): FlowBranchDirection | null {
+  if (edge.sourceHandle === "right" && edge.targetHandle === "left") return to.x > from.x ? "right" : null
+  if (edge.sourceHandle === "bottom" && edge.targetHandle === "top") return to.y > from.y ? "down" : null
+  return null
+}
 
 function overlaps(a: FlowRect, b: FlowRect): boolean {
   return (
@@ -312,13 +354,30 @@ export function clearOfBoxes(rect: FlowRect, boxes: FlowRect[]): { x: number; y:
  * Whimsical does: the first one level with the parent, each one after under
  * the lowest of the parent's existing right-hand children — then down past
  * anything else it would land on.
+ * Switchboard: or, for a branch going down, under the parent — the first one centred
+ * on it, each one after to the right of the right-most box already hanging there.
  */
 export function nextChildPosition(
   parent: FlowRect,
   children: FlowRect[],
   boxes: FlowRect[],
   size: { width: number; height: number },
+  direction: FlowBranchDirection = "right",
 ): { x: number; y: number } {
+  if (direction === "down") {
+    const rightmost = children.reduce<FlowRect | null>(
+      (far, child) => (far === null || child.x + child.width > far.x + far.width ? child : far),
+      null,
+    )
+    const start =
+      rightmost === null
+        ? {
+            x: Math.round(parent.x + (parent.width - size.width) / 2),
+            y: parent.y + parent.height + FLOW_TAB_GAP_DOWN,
+          }
+        : { x: rightmost.x + rightmost.width + FLOW_TAB_GAP_ACROSS, y: rightmost.y }
+    return clearOfBoxes({ ...start, ...size }, boxes)
+  }
   const lowest = children.reduce<FlowRect | null>(
     (low, child) =>
       low === null || child.y + child.height > low.y + low.height ? child : low,
@@ -360,9 +419,20 @@ export const FLOW_ROOM_GAP = FLOW_TAB_GAP_Y * 2
 // box, hangs off nothing and is the top of a tree of its own. Switchboard: a
 // detached box is in no tree — its arrows, in and out, count for nothing here —
 // so it moves on its own, and what hung off it tops a tree of its own.
+// Switchboard: and a box hangs off another the other way too — by an arrow out of
+// that box's bottom into its top, from a box further up (branchDirection) — and
+// `directionOf` says which way each box hangs. A box's children may hang both ways
+// at once: the ones to its right stack under one another, the ones below it spread
+// side by side (layoutTree).
 type FlowTrees = {
   parentOf: Map<string, string>
   childrenOf: Map<string, string[]>
+  directionOf: Map<string, FlowBranchDirection>
+}
+
+/** The boxes hanging off `id` one way, in their order. */
+function childrenToward(trees: FlowTrees, id: string, direction: FlowBranchDirection): string[] {
+  return (trees.childrenOf.get(id) ?? []).filter((child) => trees.directionOf.get(child) === direction)
 }
 
 function flowTrees(
@@ -376,28 +446,59 @@ function flowTrees(
   // tree that will be rearranged around a different box.
   pinned: ReadonlySet<string> = new Set(),
 ): FlowTrees {
-  const sources = new Map<string, Set<string>>()
+  const sources = new Map<string, Map<string, FlowBranchDirection>>()
   for (const edge of edges) {
     const from = byId.get(edge.source)
     const to = byId.get(edge.target)
     // Switchboard: nor is a pinned terminal ever one of a branch's boxes — it stays
     // where it was put, whatever is laid out around it.
-    if (!from || !to || to.x <= from.x || from.detached || to.detached || pinned.has(to.id) || to.shape === "terminal") continue
-    if (edge.sourceHandle !== "right" || edge.targetHandle !== "left") continue
-    sources.set(to.id, (sources.get(to.id) ?? new Set()).add(from.id))
+    if (!from || !to || from.detached || to.detached || pinned.has(to.id) || to.shape === "terminal") continue
+    const direction = branchDirection(edge, from, to)
+    if (direction === null) continue
+    const into = sources.get(to.id) ?? new Map<string, FlowBranchDirection>()
+    into.set(from.id, direction)
+    sources.set(to.id, into)
   }
   const parentOf = new Map<string, string>()
   const childrenOf = new Map<string, string[]>()
+  const directionOf = new Map<string, FlowBranchDirection>()
   for (const [id, from] of sources) {
     if (from.size !== 1) continue
-    const [source] = from
+    const [[source, direction]] = from
     parentOf.set(id, source)
+    directionOf.set(id, direction)
     childrenOf.set(source, [...(childrenOf.get(source) ?? []), id])
+  }
+  // Switchboard: a step up a tree moves strictly left or strictly up, but with both
+  // ways allowed three boxes can still close a loop (right, then down, then back left
+  // to a box above the first). No box may hang off something that hangs off it: the
+  // box that would close the loop tops a tree of its own instead.
+  const settled = new Set<string>()
+  for (const start of parentOf.keys()) {
+    if (settled.has(start)) continue
+    const path: string[] = []
+    const onPath = new Set<string>()
+    let at: string | undefined = start
+    while (at !== undefined && !settled.has(at)) {
+      if (onPath.has(at)) {
+        const closing = path[path.length - 1]
+        parentOf.delete(closing)
+        directionOf.delete(closing)
+        childrenOf.set(at, (childrenOf.get(at) ?? []).filter((child) => child !== closing))
+        break
+      }
+      onPath.add(at)
+      path.push(at)
+      at = parentOf.get(at)
+    }
+    for (const id of path) settled.add(id)
   }
   // Top to bottom as they stand, so tidying never reorders a branch — and a box
   // dragged in among its siblings takes the place it was dropped in. By their
   // middles (Switchboard), so a box dropped half over another goes before it or
   // after it as it looks; boxes stacked apart sort the same either way.
+  // Switchboard: the boxes hanging below sort left to right the same way, after the
+  // ones hanging to the right (childrenToward tells them apart).
   const late = new Map(fresh.map((id, index) => [id, index]))
   for (const list of childrenOf.values()) {
     list.sort((a, b) => {
@@ -406,23 +507,50 @@ function flowTrees(
       if (lateA !== undefined || lateB !== undefined) {
         return (lateA ?? -1) - (lateB ?? -1)
       }
+      const directionA = directionOf.get(a)
+      const directionB = directionOf.get(b)
+      if (directionA !== directionB) return directionA === "right" ? -1 : 1
       const boxA = byId.get(a)!
       const boxB = byId.get(b)!
+      if (directionA === "down") {
+        return (
+          boxA.x + boxA.width / 2 - (boxB.x + boxB.width / 2) || boxA.y - boxB.y || a.localeCompare(b)
+        )
+      }
       return (
         boxA.y + boxA.height / 2 - (boxB.y + boxB.height / 2) || boxA.x - boxB.x || a.localeCompare(b)
       )
     })
   }
-  return { parentOf, childrenOf }
+  return { parentOf, childrenOf, directionOf }
 }
 
-/** The top of the tree `id` is in: every step up moves strictly left, so it ends. */
+/**
+ * The top of the tree `id` is in: every step up moves strictly left or strictly up, and
+ * flowTrees cut any loop the two together could close, so it ends.
+ */
 function topOf(trees: FlowTrees, id: string): string {
   let top = id
-  for (let up = trees.parentOf.get(top); up !== undefined; up = trees.parentOf.get(top)) {
+  for (let up = trees.parentOf.get(top); up !== undefined && up !== id; up = trees.parentOf.get(top)) {
     top = up
   }
   return top
+}
+
+/**
+ * Switchboard: which way Tab adds the next box to `parentId` — down, when everything
+ * already hanging off it hangs below it; otherwise right, as Tab has always added one.
+ * So a branch someone started downwards by hand goes on downwards.
+ */
+export function flowTabDirection(
+  boxes: FlowTreeBox[],
+  edges: FlowTreeEdge[],
+  parentId: string,
+): FlowBranchDirection {
+  const trees = flowTrees(new Map(boxes.map((box) => [box.id, box])), edges)
+  return childrenToward(trees, parentId, "down").length > 0 && childrenToward(trees, parentId, "right").length === 0
+    ? "down"
+    : "right"
 }
 
 /**
@@ -430,58 +558,156 @@ function topOf(trees: FlowTrees, id: string): string {
  * with the midpoint of the first and last boxes hanging off it, those boxes
  * stacked FLOW_TAB_GAP_Y apart, and a box's whole branch moving with it. The
  * top box stays where it is and nothing moves sideways.
+ * Switchboard: and the boxes hanging below a box spread side by side under it,
+ * FLOW_TAB_GAP_ACROSS apart and centred on it, each keeping the height it is at —
+ * so for them nothing moves up or down. Either way a box's whole branch, both the
+ * boxes to its right and the ones below it, is one block, and the blocks of
+ * neighbouring siblings never overlap: a sibling with boxes hanging below it is
+ * that much taller, and the next one stacks under all of it.
  */
 function layoutTree(
   at: Map<string, FlowTreeBox>,
   trees: FlowTrees,
   topId: string,
 ): Map<string, FlowTreeBox> {
-  // Each box's branch as a block: how far it reaches above and below the
-  // box's centre, and where every box in it sits relative to that centre.
-  type Block = { above: number; below: number; centres: Map<string, number> }
+  // Each box's branch as a block: how far it reaches left and right of, above and
+  // below, the box's centre, and where every box in it sits relative to that centre.
+  type Block = {
+    left: number
+    right: number
+    above: number
+    below: number
+    centres: Map<string, FlowPoint>
+  }
   function branch(id: string): Block {
     const box = at.get(id)!
-    const centres = new Map([[id, 0]])
+    const centres = new Map([[id, { x: 0, y: 0 }]])
+    let left = box.width / 2
+    let right = box.width / 2
     let above = box.height / 2
     let below = box.height / 2
-    const blocks = (trees.childrenOf.get(id) ?? []).map(branch)
-    if (blocks.length === 0) return { above, below, centres }
-    // Stacked from 0 down, FLOW_TAB_GAP_Y between neighbouring blocks…
-    const stacked: number[] = []
-    let cursor = 0
-    for (const block of blocks) {
-      stacked.push(cursor + block.above)
-      cursor += block.above + block.below + FLOW_TAB_GAP_Y
+    // A child's block, placed with its centre `dx` across and `dy` down from this box's.
+    const place = (block: Block, dx: number, dy: number) => {
+      for (const [member, centre] of block.centres) centres.set(member, { x: centre.x + dx, y: centre.y + dy })
+      left = Math.max(left, block.left - dx)
+      right = Math.max(right, block.right + dx)
+      above = Math.max(above, block.above - dy)
+      below = Math.max(below, block.below + dy)
     }
-    // …then shifted so this box is level with the first and last of them.
-    const shift = (stacked[0] + stacked[stacked.length - 1]) / 2
-    blocks.forEach((block, index) => {
-      const offset = stacked[index] - shift
-      for (const [child, centre] of block.centres) centres.set(child, centre + offset)
-      above = Math.max(above, block.above - offset)
-      below = Math.max(below, block.below + offset)
-    })
-    return { above, below, centres }
+    // The box this one hangs off, where it stands: a column of boxes hanging off this
+    // box's right must not reach up into a parent above it, nor a row hanging under
+    // it reach back into a parent to its left — the one place the two directions can
+    // meet. The column (or row) is then let down (or along) just far enough.
+    const parentId = trees.parentOf.get(id)
+    const parent = parentId !== undefined ? at.get(parentId) : undefined
+    const rights = childrenToward(trees, id, "right")
+    if (rights.length > 0) {
+      const blocks = rights.map(branch)
+      // Stacked from 0 down, FLOW_TAB_GAP_Y between neighbouring blocks…
+      const stacked: number[] = []
+      let cursor = 0
+      for (const block of blocks) {
+        stacked.push(cursor + block.above)
+        cursor += block.above + block.below + FLOW_TAB_GAP_Y
+      }
+      // …then shifted so this box is level with the first and last of them. Each
+      // keeps the x it is at.
+      let shift = (stacked[0] + stacked[stacked.length - 1]) / 2
+      const offsets = rights.map((child) => {
+        const kept = at.get(child)!
+        return kept.x + kept.width / 2 - (box.x + box.width / 2)
+      })
+      if (parent && trees.directionOf.get(id) === "down") {
+        const columnLeft = Math.min(...blocks.map((block, index) => box.x + box.width / 2 + offsets[index] - block.left))
+        const columnRight = Math.max(...blocks.map((block, index) => box.x + box.width / 2 + offsets[index] + block.right))
+        if (columnLeft < parent.x + parent.width + FLOW_CLEARANCE && parent.x < columnRight + FLOW_CLEARANCE) {
+          shift = Math.min(shift, box.y + box.height / 2 - (parent.y + parent.height + FLOW_CLEARANCE))
+        }
+      }
+      blocks.forEach((block, index) => place(block, offsets[index], stacked[index] - shift))
+    }
+    const downs = childrenToward(trees, id, "down")
+    if (downs.length > 0) {
+      const blocks = downs.map(branch)
+      // Spread from 0 rightwards, FLOW_TAB_GAP_ACROSS between neighbouring blocks…
+      const spread: number[] = []
+      let cursor = 0
+      for (const block of blocks) {
+        spread.push(cursor + block.left)
+        cursor += block.left + block.right + FLOW_TAB_GAP_ACROSS
+      }
+      // …then shifted so this box is centred on the first and last of them. Each
+      // keeps the y it is at.
+      let shift = (spread[0] + spread[spread.length - 1]) / 2
+      const offsets = downs.map((child) => {
+        const kept = at.get(child)!
+        return kept.y + kept.height / 2 - (box.y + box.height / 2)
+      })
+      if (parent && trees.directionOf.get(id) === "right") {
+        const rowTop = Math.min(...blocks.map((block, index) => box.y + box.height / 2 + offsets[index] - block.above))
+        const rowBottom = Math.max(...blocks.map((block, index) => box.y + box.height / 2 + offsets[index] + block.below))
+        if (rowTop < parent.y + parent.height + FLOW_CLEARANCE && parent.y < rowBottom + FLOW_CLEARANCE) {
+          shift = Math.min(shift, box.x + box.width / 2 - (parent.x + parent.width + FLOW_CLEARANCE))
+        }
+      }
+      blocks.forEach((block, index) => place(block, spread[index] - shift, offsets[index]))
+    }
+    return { left, right, above, below, centres }
   }
 
   const top = at.get(topId)!
-  const centre = top.y + top.height / 2
+  const centre = { x: top.x + top.width / 2, y: top.y + top.height / 2 }
   const placed = new Map<string, FlowTreeBox>()
   for (const [id, offset] of branch(topId).centres) {
     const box = at.get(id)!
-    placed.set(id, { ...box, y: Math.round(centre + offset - box.height / 2) })
+    placed.set(id, {
+      ...box,
+      x: Math.round(centre.x + offset.x - box.width / 2),
+      y: Math.round(centre.y + offset.y - box.height / 2),
+    })
   }
   return placed
 }
 
-/** Whether two boxes share any of the canvas's width — one could land on the other going up or down. */
-function sameColumn(a: FlowRect, b: FlowRect): boolean {
-  return a.x < b.x + b.width + FLOW_CLEARANCE && b.x < a.x + a.width + FLOW_CLEARANCE
+/**
+ * Switchboard: the axis a tidied tree moved its boxes along — y for the branches
+ * going right (whose boxes stack up and down), x for the ones going down (whose
+ * boxes spread side by side) — and so the axis along which it can newly crowd a box
+ * outside it, and along which that box is pushed away. A tree with no branches at
+ * all is taken as Tab's kind.
+ */
+type FlowAxis = "x" | "y"
+
+function treeAxes(trees: FlowTrees, tree: Iterable<string>): FlowAxis[] {
+  const axes = new Set<FlowAxis>()
+  for (const id of tree) {
+    const direction = trees.directionOf.get(id)
+    if (direction === "right") axes.add("y")
+    else if (direction === "down") axes.add("x")
+  }
+  return axes.size === 0 ? ["y"] : [...axes]
 }
 
-/** The room between two boxes in one column, top to bottom — less than 0 when they overlap. */
-function gapBetween(a: FlowRect, b: FlowRect): number {
-  return Math.max(b.y - (a.y + a.height), a.y - (b.y + b.height))
+/**
+ * Whether two boxes share any of the canvas's width (axis y) — one could land on the
+ * other going up or down — or of its height (axis x), going left or right.
+ */
+function sameLane(a: FlowRect, b: FlowRect, axis: FlowAxis): boolean {
+  return axis === "y"
+    ? a.x < b.x + b.width + FLOW_CLEARANCE && b.x < a.x + a.width + FLOW_CLEARANCE
+    : a.y < b.y + b.height + FLOW_CLEARANCE && b.y < a.y + a.height + FLOW_CLEARANCE
+}
+
+/** The room between two boxes along `axis` — less than 0 when they overlap that way. */
+function laneGap(a: FlowRect, b: FlowRect, axis: FlowAxis): number {
+  return axis === "y"
+    ? Math.max(b.y - (a.y + a.height), a.y - (b.y + b.height))
+    : Math.max(b.x - (a.x + a.width), a.x - (b.x + b.width))
+}
+
+/** A box's start and extent along `axis`. */
+function along(box: FlowRect, axis: FlowAxis): { start: number; size: number } {
+  return axis === "y" ? { start: box.y, size: box.height } : { start: box.x, size: box.width }
 }
 
 /**
@@ -497,6 +723,9 @@ function gapBetween(a: FlowRect, b: FlowRect): number {
  * crowded moves with every box its arrows hold it to, away from the box that
  * crowded it, until it is FLOW_ROOM_GAP clear of everything already settled —
  * and anything that lands on in turn moves on the same way.
+ *
+ * Switchboard: along `axes` — up and down for a tree whose branches go right, left
+ * and right for one whose branches go down, both for a tree with both (treeAxes).
  */
 function makeRoom(
   at: Map<string, FlowTreeBox>,
@@ -504,13 +733,14 @@ function makeRoom(
   tree: Set<string>,
   edges: FlowTreeEdge[],
   pinned: ReadonlySet<string> = new Set(),
+  axes: FlowAxis[] = ["y"],
 ): void {
   // The room a pair must keep: FLOW_ROOM_GAP, or what they had before when
   // that was less.
-  const needed = (a: string, b: string) => {
+  const needed = (a: string, b: string, axis: FlowAxis) => {
     const before = [was.get(a), was.get(b)]
-    return before[0] && before[1] && sameColumn(before[0], before[1])
-      ? Math.min(FLOW_ROOM_GAP, gapBetween(before[0], before[1]))
+    return before[0] && before[1] && sameLane(before[0], before[1], axis)
+      ? Math.min(FLOW_ROOM_GAP, laneGap(before[0], before[1], axis))
       : FLOW_ROOM_GAP
   }
 
@@ -546,15 +776,17 @@ function makeRoom(
   const waiting = new Set([...pieces.values()].filter((piece) => !piece.some((id) => pinned.has(id))))
   // Each pass moves one piece and settles it, so this ends.
   while (waiting.size > 0) {
-    let crowded: { piece: string[]; box: FlowRect; by: FlowRect } | null = null
+    let crowded: { piece: string[]; box: FlowRect; by: FlowRect; axis: FlowAxis } | null = null
     search: for (const piece of waiting) {
       for (const id of piece) {
         const box = at.get(id)!
         for (const other of settled) {
           const by = at.get(other)!
-          if (sameColumn(box, by) && gapBetween(box, by) < needed(id, other)) {
-            crowded = { piece, box, by }
-            break search
+          for (const axis of axes) {
+            if (sameLane(box, by, axis) && laneGap(box, by, axis) < needed(id, other, axis)) {
+              crowded = { piece, box, by, axis }
+              break search
+            }
           }
         }
       }
@@ -562,30 +794,35 @@ function makeRoom(
     if (crowded === null) return
     waiting.delete(crowded.piece)
 
-    // Away from the box that crowded it: down if it sits lower, up if higher.
-    const down =
-      crowded.box.y + crowded.box.height / 2 >= crowded.by.y + crowded.by.height / 2
+    // Away from the box that crowded it: down (or right) if it sits further that
+    // way, up (or left) if not.
+    const { axis } = crowded
+    const mine = along(crowded.box, axis)
+    const theirs = along(crowded.by, axis)
+    const forward = mine.start + mine.size / 2 >= theirs.start + theirs.size / 2
     // Every shift that would leave a pair too close, as an open range…
     const ranges: [number, number][] = []
     for (const id of crowded.piece) {
       const box = at.get(id)!
       for (const other of settled) {
         const by = at.get(other)!
-        if (!sameColumn(box, by)) continue
-        const room = needed(id, other)
-        ranges.push([by.y - box.y - box.height - room, by.y + by.height + room - box.y])
+        if (!sameLane(box, by, axis)) continue
+        const room = needed(id, other, axis)
+        const a = along(box, axis)
+        const b = along(by, axis)
+        ranges.push([b.start - a.start - a.size - room, b.start + b.size + room - a.start])
       }
     }
     // …and the smallest one way that is in none of them. The furthest end of
     // them all always is, so there is one.
-    const ends = down
+    const ends = forward
       ? ranges.map(([, high]) => Math.ceil(high)).filter((end) => end >= 0).sort((a, b) => a - b)
       : ranges.map(([low]) => Math.floor(low)).filter((end) => end <= 0).sort((a, b) => b - a)
     const shift =
       ends.find((end) => ranges.every(([low, high]) => end <= low || end >= high)) ?? 0
     for (const id of crowded.piece) {
       const box = at.get(id)!
-      at.set(id, { ...box, y: box.y + shift })
+      at.set(id, axis === "y" ? { ...box, y: box.y + shift } : { ...box, x: box.x + shift })
       settled.add(id)
     }
   }
@@ -663,7 +900,7 @@ function tidyTrees(
     for (const [id, box] of placed) at.set(id, box)
     // Switchboard: never onto a pinned terminal (where it is now, as it never moves).
     clearOfTerminals(at, trees, top, terminals.map((box) => at.get(box.id) ?? box))
-    makeRoom(at, was, new Set(placed.keys()), edges, pinned)
+    makeRoom(at, was, new Set(placed.keys()), edges, pinned, treeAxes(trees, placed.keys()))
   }
   return at
 }
@@ -699,14 +936,17 @@ function movesFrom(
  * Switchboard: whatever the tidied tree would land on is pushed up or down out
  * of its way (makeRoom), so the tree is always laid out — where the admin's
  * gives up on the tidying and stacks the new box under whatever it would hit.
+ * Switchboard: or, `direction` "down", hanging off the parent's bottom — beside the
+ * boxes already hanging there, the row spread out again around the parent.
  */
 export function placeTabChild(
   boxes: FlowTreeBox[],
   edges: FlowTreeEdge[],
   parentId: string,
   child: { id: string; width: number; height: number },
+  direction: FlowBranchDirection = "right",
 ): { position: FlowPoint; moved: Map<string, FlowPoint> } {
-  const { positions, moved } = placeTabChildren(boxes, edges, parentId, [child])
+  const { positions, moved } = placeTabChildren(boxes, edges, parentId, [child], direction)
   return { position: positions.get(child.id)!, moved }
 }
 
@@ -721,6 +961,7 @@ export function placeTabChildren(
   edges: FlowTreeEdge[],
   parentId: string,
   children: { id: string; width: number; height: number }[],
+  direction: FlowBranchDirection = "right",
 ): { positions: Map<string, FlowPoint>; moved: Map<string, FlowPoint> } {
   const byId = new Map(boxes.map((box) => [box.id, box]))
   const parent = byId.get(parentId)
@@ -728,17 +969,20 @@ export function placeTabChildren(
 
   // In the column of the boxes already hanging off the parent — the lowest of
   // them, as Tab has always lined a new one up — or FLOW_TAB_GAP_X right of it.
-  const siblings = flowTrees(byId, edges).childrenOf.get(parentId) ?? []
+  // Switchboard: going down, in the row of the boxes already hanging under it — the
+  // right-most of them — or FLOW_TAB_GAP_DOWN under it.
+  const siblings = childrenToward(flowTrees(byId, edges), parentId, direction)
   const last = siblings.length > 0 ? byId.get(siblings[siblings.length - 1]) : undefined
-  const x = last ? last.x : parent.x + parent.width + FLOW_TAB_GAP_X
-  const fresh = children.map((child) => ({ ...child, x, y: parent.y }))
+  const fresh =
+    direction === "right"
+      ? children.map((child) => ({ ...child, x: last ? last.x : parent.x + parent.width + FLOW_TAB_GAP_X, y: parent.y }))
+      : children.map((child) => ({ ...child, x: parent.x, y: last ? last.y : parent.y + parent.height + FLOW_TAB_GAP_DOWN }))
   const wired = [
     ...edges,
     ...fresh.map((child) => ({
       source: parentId,
       target: child.id,
-      sourceHandle: "right",
-      targetHandle: "left",
+      ...branchHandles(direction),
     })),
   ]
 
@@ -932,28 +1176,43 @@ export function tidyAfterMove(
   // already settled in.
   leaders.sort((a, b) => depth(a) - depth(b))
 
-  // What hangs off a grabbed box and was left behind comes along sideways; the
-  // layout settles it up and down.
+  // What hangs off a grabbed box and was left behind comes along; the layout
+  // settles it — up and down in a branch going right, side to side in one going down.
   for (const id of leaders) {
     const dx = now.get(id)!.x - from.get(id)!.x
-    if (dx === 0) continue
+    const dy = now.get(id)!.y - from.get(id)!.y
+    if (dx === 0 && dy === 0) continue
     for (const below of branchBelow(before, id)) {
-      if (!moved.has(below)) work.get(below)!.x += dx
+      if (!moved.has(below)) {
+        work.get(below)!.x += dx
+        work.get(below)!.y += dy
+      }
     }
   }
   // Back into its column — its siblings' that stayed, or where Tab would put it —
-  // with its whole branch.
+  // with its whole branch. Switchboard: or, hanging below its parent, back into its
+  // siblings' row; dragged above the box it hangs off, it has left that branch, as a
+  // box dragged left of its parent has.
   for (const id of leaders) {
     const parentId = before.parentOf.get(id)
     if (parentId === undefined) continue
+    const direction = before.directionOf.get(id) ?? "right"
     const parent = work.get(parentId)!
     const box = work.get(id)!
-    if (box.x <= parent.x) continue
-    const stayed = (before.childrenOf.get(parentId) ?? []).find((sibling) => !moved.has(sibling))
-    const x = stayed !== undefined ? work.get(stayed)!.x : parent.x + parent.width + FLOW_TAB_GAP_X
-    const dx = x - box.x
-    box.x = x
-    if (dx !== 0) for (const below of branchBelow(before, id)) work.get(below)!.x += dx
+    const stayed = childrenToward(before, parentId, direction).find((sibling) => !moved.has(sibling))
+    if (direction === "right") {
+      if (box.x <= parent.x) continue
+      const x = stayed !== undefined ? work.get(stayed)!.x : parent.x + parent.width + FLOW_TAB_GAP_X
+      const dx = x - box.x
+      box.x = x
+      if (dx !== 0) for (const below of branchBelow(before, id)) work.get(below)!.x += dx
+    } else {
+      if (box.y <= parent.y) continue
+      const y = stayed !== undefined ? work.get(stayed)!.y : parent.y + parent.height + FLOW_TAB_GAP_DOWN
+      const dy = y - box.y
+      box.y = y
+      if (dy !== 0) for (const below of branchBelow(before, id)) work.get(below)!.y += dy
+    }
   }
 
   const anchors = [...leaders, ...leaders.flatMap((id) => before.parentOf.get(id) ?? [])]

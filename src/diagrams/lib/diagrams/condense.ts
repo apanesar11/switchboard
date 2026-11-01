@@ -22,7 +22,8 @@ import {
   type FlowSpec,
 } from "./types"
 
-export type FlowCondensePart = { label: string; detail?: string }
+/** One replacement box: its label alone — ✦ Condense writes no second line (ai.ts BOX_RULES). */
+export type FlowCondensePart = { label: string }
 
 export type FlowCondenseSelection = {
   /** In graph order, with original spec order breaking ties and cycles. */
@@ -194,13 +195,12 @@ export function replaceFlowSelection(
   const taken = new Set([...spec.nodes.map((node) => node.id), ...reservedIds])
   const added: FlowNodeSpec[] = parts.map((part) => {
     const label = normalizeFlowText(part.label)
-    const detail = part.detail === undefined ? undefined : normalizeFlowText(part.detail)
-    if (!label || label.length > DIAGRAM_TEXT_MAX_LENGTH || (detail?.length ?? 0) > DIAGRAM_TEXT_MAX_LENGTH) {
+    if (!label || label.length > DIAGRAM_TEXT_MAX_LENGTH) {
       throw new Error("Condense returned an empty or overly long node. Try again.")
     }
     const id = nextFlowNodeId(taken, label)
     taken.add(id)
-    return { id, label, detail: detail || undefined, shape: "rounded", ai: true }
+    return { id, label, shape: "rounded", ai: true }
   })
   const addedIds = added.map((node) => node.id)
   const picked = new Set(selectedIds)

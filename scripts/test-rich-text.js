@@ -450,3 +450,147 @@ test('a box’s size carries over a republish onto any outline, but never onto a
   // What the republish states itself wins.
   assert.deepEqual(carryOverFlowLayout(before, next({ size: { width: 240, height: 80 } })).spec.nodes[0].size, { width: 240, height: 80 });
 });
+
+// ── Switchboard: code blocks in a box's text ──
+//
+// A paragraph with `code: true` is a code block (types.ts FlowTextParagraph.code): the
+// user asked for code "directly within the text" with "a copy button that appears
+// within the code block itself" (2026-11-01). Its spaces are kept — the plain label is
+// still tidied as every label is, so the rich text is read as the label is kept.
+
+const code = (text) => ({ code: true, runs: [{ text }] });
+const { toggleCode, leaveCode, insertCodeText, normalizeFlowText } = modules["rich-text"];
+const { FLOW_CODE_LINE_HEIGHT, FLOW_CODE_PAD_Y, FLOW_CODE_GAP, FLOW_CODE_PAD_X, FLOW_TEXT_METRICS } = modules.layout;
+
+test('a code block keeps its indentation through validation, canvas snapshots and reload, while the label is tidied', () => {
+  const rich = [{ runs: [{ text: 'Install, then test:' }] }, code('  npm install\n    npm test'), { runs: [{ text: 'Done' }] }];
+  const label = normalizeFlowText(richTextPlainText(rich));
+  assert.equal(label, 'Install, then test:\nnpm install\nnpm test\nDone', 'the plain label collapses the indentation');
+  for (const shape of ['rounded', 'box', 'pill', 'diamond', 'text', 'note']) {
+    const parsed = parseDiagramSpec(spec({ label, labelRichText: rich, shape, detail: label, detailRichText: rich }));
+    assert.equal(parsed.ok, true, shape);
+    assert.deepEqual(parsed.value.nodes[0].labelRichText, rich, 'the rich text keeps the spaces');
+    assert.equal(parsed.value.nodes[0].label, label);
+    const canvas = layoutDiagram(parsed.value);
+    const saved = flowSpecFromCanvas({}, canvas.nodes, canvas.edges);
+    const reloaded = parseDiagramSpec(JSON.parse(JSON.stringify(saved)));
+    assert.equal(reloaded.ok, true, shape);
+    assert.deepEqual(reloaded.value.nodes[0].labelRichText, rich, shape);
+    assert.deepEqual(reloaded.value.nodes[0].detailRichText, rich, shape);
+    assert.equal(reloaded.value.nodes[0].label, label, shape);
+  }
+  // Still never onto changed words.
+  assert.equal(parseFlowRichText(rich, 'Other words\nnpm install\nnpm test\nDone'), undefined);
+  // And a code flag that isn't a flag is refused, as a checklist state that isn't one is.
+  assert.equal(parseDiagramSpec(spec({ label: 'x', labelRichText: [{ code: 'yes', runs: [{ text: 'x' }] }] })).ok, false);
+});
+
+test('tidying a code block keeps its spaces and lines, drops marks and list marks, trims what trails, and joins adjacent blocks', () => {
+  const messy = [
+    { code: true, bullet: true, level: 1, runs: [{ text: '  if (a) {   \n', bold: true }, { text: '    go()  ', italic: true }] },
+    { code: true, runs: [{ text: '}' }] },
+    { runs: [{ text: '  after  ' }] },
+  ];
+  const tidy = parseFlowRichText(messy, normalizeFlowText(richTextPlainText(messy)));
+  assert.deepEqual(tidy, [code('  if (a) {\n    go()\n}'), { runs: [{ text: 'after' }] }]);
+  // Blank lines inside a block collapse to one, as they do in any text; a tab stays.
+  assert.deepEqual(parseFlowRichText([code('a\n\n\n\tb')], 'a\n\nb'), [code('a\n\n\tb')]);
+  // A block that is only spaces is an empty block, and trailing empty lines go.
+  assert.deepEqual(parseFlowRichText([{ runs: [{ text: 'x' }] }, code('   '), code('y\n\n')], 'x\n\ny'), [{ runs: [{ text: 'x' }] }, code('\ny')]);
+});
+
+test('a code block is drawn as a <pre> with its copy button, its text escaped and unmarked', () => {
+  const html = richTextHtml([{ runs: [{ text: 'Run' }] }, code('<b>x</b> && y'), { bullet: true, runs: [{ text: 'then' }] }]);
+  assert.match(html, /^<div data-flow-paragraph="0">Run<\/div><pre data-flow-paragraph="1" class="flow-code"><button type="button" contenteditable="false" class="flow-code-copy nodrag nopan" data-flow-copy="1" aria-label="Copy code" title="Copy code"><svg[^]*?<\/svg><svg[^]*?<\/svg><\/button>&lt;b&gt;x&lt;\/b&gt; &amp;&amp; y<\/pre><ul><li data-flow-paragraph="2">then<\/li><\/ul>$/);
+  assert.doesNotMatch(html, /<b>/);
+  // The button is never disabled: it copies on the read-only canvas too.
+  assert.doesNotMatch(richTextHtml([code('x')], false), /disabled/);
+  assert.match(richTextHtml([code('')]), /<pre data-flow-paragraph="0" class="flow-code"><button[^]*?<\/button><br><\/pre>/);
+});
+
+test('Code block makes the selected paragraphs one block and back, with the plain text unchanged', () => {
+  const paragraphs = [{ runs: [{ text: 'Intro' }] }, { bullet: true, runs: [{ text: 'first', bold: true }] }, { checked: true, runs: [{ text: 'second' }] }, { runs: [{ text: 'Outro' }] }];
+  const plain = richTextPlainText(paragraphs);
+  const block = toggleCode(paragraphs, { start: 6, end: 14 });
+  assert.deepEqual(block, [{ runs: [{ text: 'Intro' }] }, code('first\nsecond'), { runs: [{ text: 'Outro' }] }]);
+  assert.equal(richTextPlainText(block), plain);
+  // A block made beside another is one block with it.
+  assert.deepEqual(toggleCode(block, { start: 0, end: 2 }), [code('Intro\nfirst\nsecond'), { runs: [{ text: 'Outro' }] }]);
+  // Off again: the block's lines are one paragraph's soft breaks.
+  assert.deepEqual(toggleCode(block, { start: 8, end: 8 }), [{ runs: [{ text: 'Intro' }] }, { runs: [{ text: 'first\nsecond' }] }, { runs: [{ text: 'Outro' }] }]);
+  assert.equal(toggleCode([], { start: 0, end: 0 }).length, 0);
+});
+
+test('Enter on an empty last line leaves the code block for a paragraph after it; elsewhere it is a new line of code', () => {
+  const value = [{ runs: [{ text: 'Run' }] }, code('npm test\n'), { runs: [{ text: 'Done' }] }];
+  // The caret at the very end of the block, on its empty line (offset 4 + 9).
+  const left = leaveCode(value, { start: 13, end: 13 });
+  assert.deepEqual(left.richText, [{ runs: [{ text: 'Run' }] }, code('npm test'), { runs: [] }, { runs: [{ text: 'Done' }] }]);
+  assert.deepEqual(left.selection, { start: 13, end: 13 }, 'the caret is in the new paragraph, at the same offset');
+  assert.equal(richTextPlainText(left.richText), richTextPlainText(value));
+  // Mid-block, or with a selection, or on a line with code on it: a new line instead.
+  assert.equal(leaveCode(value, { start: 8, end: 8 }), null);
+  assert.equal(leaveCode(value, { start: 12, end: 13 }), null);
+  assert.equal(leaveCode([code('npm test')], { start: 8, end: 8 }), null);
+  // A block that is only an empty line becomes the paragraph.
+  assert.deepEqual(leaveCode([{ runs: [{ text: 'Run' }] }, code('')], { start: 4, end: 4 }), { richText: [{ runs: [{ text: 'Run' }] }, { runs: [] }], selection: { start: 4, end: 4 } });
+  // Not in a code block: nothing to leave.
+  assert.equal(leaveCode(value, { start: 2, end: 2 }), null);
+});
+
+test('a code block is measured in monospace with its slab, so the box grows to hold it', () => {
+  const edge = FLOW_CODE_PAD_Y + FLOW_CODE_GAP;
+  // One line of code: its line, the slab's padding and the gap round it, over a plain paragraph's 18.
+  assert.equal(flowNodeSize({ label: 'x', labelRichText: [code('x')] }).height, FLOW_CODE_LINE_HEIGHT + 2 * edge + 22);
+  assert.equal(flowNodeSize({ label: 'Run\nx', labelRichText: [{ runs: [{ text: 'Run' }] }, code('x')] }).height, FLOW_TEXT_METRICS.medium.lineHeight + FLOW_CODE_LINE_HEIGHT + 2 * edge + 22);
+  // Three lines of code are one slab: three lines, one padding.
+  assert.equal(flowNodeSize({ label: 'a\nb\nc', labelRichText: [code('a\nb\nc')] }).height, 3 * FLOW_CODE_LINE_HEIGHT + 2 * edge + 22);
+  // A note and a text grow the same way; a text runs as wide as its code, slab and all.
+  assert.ok(flowNodeSize({ label: 'a\nb\nc', shape: 'note', labelRichText: [code('a\nb\nc')] }).height >= 3 * FLOW_CODE_LINE_HEIGHT + 2 * edge + 28);
+  setFlowTextMeasure((text, _size, _weight, mono) => text.length * (mono ? 7 : 10));
+  try {
+    const plain = flowNodeSize({ label: 'aaaa aaaa', shape: 'text' });
+    const asCode = flowNodeSize({ label: 'aaaa aaaa', shape: 'text', labelRichText: [code('aaaa aaaa')] });
+    assert.equal(plain.width, 9 * 10 + 4 * 2 + 2);
+    assert.equal(asCode.width, 9 * 7 + FLOW_CODE_PAD_X * 2 + 4 * 2 + 2, 'measured in monospace, inside the slab');
+    assert.equal(asCode.height, FLOW_CODE_LINE_HEIGHT + 2 * edge + 3 * 2);
+    // Code wraps inside the slab: 100 wide leaves 100 - 16 - 8 = 76 for the code's words, 10 characters a line.
+    const wrapped = flowNodeSize({ label: 'aaaa aaaa aaaa aaaa', shape: 'text', size: { width: 100, height: 16 }, labelRichText: [code('aaaa aaaa aaaa aaaa')] });
+    assert.equal(wrapped.height, 2 * FLOW_CODE_LINE_HEIGHT + 2 * edge + 3 * 2);
+    // Indentation counts: eight spaces and a word do not fit where the word alone did.
+    const indented = flowNodeSize({ label: 'aaaa', shape: 'text', size: { width: 100, height: 16 }, labelRichText: [code('        aaaa aaaa')] });
+    assert.equal(indented.height, 2 * FLOW_CODE_LINE_HEIGHT + 2 * edge + 3 * 2);
+  } finally { setFlowTextMeasure(null); }
+});
+
+test('a code block carries over a republish while its words match, and a republish may state one', () => {
+  const rich = [{ runs: [{ text: 'Run' }] }, code('  npm test')];
+  const before = spec({ label: 'Run\nnpm test', labelRichText: rich });
+  assert.deepEqual(carryOverFlowLayout(before, spec({ label: 'Run\nnpm test' })).spec.nodes[0].labelRichText, rich);
+  assert.equal(carryOverFlowLayout(before, spec({ label: 'Run\nnpm build' })).spec.nodes[0].labelRichText, undefined);
+  const stated = parseDiagramSpec(spec({ label: 'Run\n  npm test', labelRichText: rich }));
+  assert.equal(stated.ok, true);
+  assert.equal(stated.value.nodes[0].label, 'Run\nnpm test', 'a label handed in with the indentation is tidied');
+  assert.deepEqual(stated.value.nodes[0].labelRichText, rich);
+});
+
+test('typing into a code block through the words: Enter\'s new line and a paste of several lines, in place of the selection', () => {
+  const value = [{ runs: [{ text: 'Run' }] }, code('npm test'), { runs: [{ text: 'Done' }] }];
+  // Enter at the end of the block: an empty line to type on, drawn as such.
+  const broken = insertCodeText(value, { start: 12, end: 12 }, '\n');
+  assert.deepEqual(broken, { richText: [{ runs: [{ text: 'Run' }] }, code('npm test\n'), { runs: [{ text: 'Done' }] }], selection: { start: 13, end: 13 } });
+  assert.match(richTextHtml(broken.richText), /npm test\n<br><\/pre>/);
+  assert.doesNotMatch(richTextHtml(value), /<br>/);
+  // In the middle, in place of a selection.
+  assert.deepEqual(insertCodeText(value, { start: 7, end: 8 }, '\n').richText[1], code('npm\ntest'));
+  // Several lines pasted, indentation and all.
+  const pasted = insertCodeText(value, { start: 12, end: 12 }, '\n  if (a) {\n    b()\n  }');
+  assert.equal(richTextPlainText([pasted.richText[1]]), 'npm test\n  if (a) {\n    b()\n  }');
+  assert.deepEqual(pasted.selection, { start: 12 + '\n  if (a) {\n    b()\n  }'.length, end: 12 + '\n  if (a) {\n    b()\n  }'.length });
+  // Not within one block: nothing — the browser's own insertion will do.
+  assert.equal(insertCodeText(value, { start: 1, end: 1 }, '\n'), null);
+  assert.equal(insertCodeText(value, { start: 2, end: 6 }, '\n'), null, 'a selection across the block\'s edge');
+  // The empty line typed on, then left: the block as it was, and the paragraph after it.
+  const left = leaveCode(broken.richText, broken.selection);
+  assert.deepEqual(left.richText, [{ runs: [{ text: 'Run' }] }, code('npm test'), { runs: [] }, { runs: [{ text: 'Done' }] }]);
+});

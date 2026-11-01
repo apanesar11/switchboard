@@ -818,6 +818,56 @@ set outright; a pane gone part-way jumps to the end, a pan or zoom by hand wins,
 board already off screen is framed at once, not animated, when it is back. `npm run
 test:diagrams` covers the layout and folding (`scripts/test-flow-layout.js`).
 
+**A branch can go down as well as right** (added 2026-11-01, the user's ask: a box joined
+"from the bottom of the parent … to the top of the child … will not get auto-formatted.
+We need auto-formatting there as well"). `flow-editor.ts` reads an arrow out of a box's
+bottom into the top of a box below it as joining that box into a branch, exactly as it
+reads Tab's right-to-left arrow (`branchDirection`, `FlowBranchDirection`), and lays the
+two kinds out as one tree turned on its side: boxes hanging to the right stack under one
+another, `FLOW_TAB_GAP_Y` apart, keeping their x; boxes hanging below spread side by side,
+`FLOW_TAB_GAP_ACROSS` apart and centred under the box they hang off, keeping their y. A
+box's branch — both ways at once, if it has both — is one block, so a sibling with boxes
+below it is that much taller and the next one stacks under all of it; the one place the
+two can meet (a row under a right-hand box reaching back under its parent, or a column
+beside a box below reaching up into its parent) is let along or down just far enough to
+clear (`layoutTree`). Whatever the tree crowds is pushed along the axis it moved on — up
+or down for a right-going tree, left or right for a down-going one, both for a mixed one
+(`makeRoom`, `treeAxes`). Everything that worked for a right-going branch works for a
+down-going one: a box let go takes its place in the row (`tidyAfterMove`; dragged above
+its parent, it has left the branch), a delete closes the row up, a fold re-tidies it, a box
+carries what hangs below it, and the toolbar's Attached / Detached counts the arrow.
+**Drawing the arrow is enough**: an arrow connected by hand the way either branch is joined
+lays the tree out around its new box there and then (`onConnect`), rather than waiting for
+the next drag. Tab and ✦ Answer add below rather than to the right when everything hanging
+off the box hangs below it (`flowTabDirection`), so a branch started downwards goes on
+downwards; a box with branches both ways, or none, gets Tab's right. Two boxes can't hang
+off each other: a loop the two directions could close (right, down, back left to a box
+above) is cut, and the box closing it tops a tree of its own.
+
+**Code blocks in a box's text** (added 2026-11-01, "code blocks, like directly within the
+text. They should be very easy to copy. There should be a copy button that appears within
+the code block itself"). A paragraph of a box's rich text may be a code block
+(`FlowTextParagraph.code`, `types.ts`): drawn by `richTextHtml` as a `<pre>` on a slab —
+11px monospace on a 16px line whatever the box's text size, `FLOW_CODE_*` in `layout.ts`,
+which `styles.css` draws `.flow-rich-text pre` with — with a copy button in its corner
+that puts the block's words on the clipboard through main (`copyFlowCodeBlock`,
+`DiagramNodes.tsx`), on the read-only canvas and mid-edit alike, and shows a tick for a
+moment. The text toolbar's **Code block** (⌘E) makes the selected paragraphs one block,
+or a block paragraphs again (`toggleCode`); inside one, Enter is a new line of code, Tab
+two spaces, and Enter on an empty last line the way out (`leaveCode`), as Enter on an
+empty item leaves a list; a paste of several lines goes in a line at a time, since
+Chromium would split the `<pre>` at every newline. A block keeps its spaces — indentation
+is part of code — in one unmarked run, is never a list item, and two in a row are one
+(`normalizeRichText`, `mergeCodeBlocks`). The plain `label` is still tidied as every label
+is (`normalizeFlowText`, now defined in `rich-text.ts`), so the rich text is checked
+against it as the label is kept rather than character for character
+(`parseFlowRichText`), and ⌘C on boxes takes a block's words from the rich text, indented
+(`clipboardWords`). The layout measures a block's lines in the monospace stack
+(`FlowTextMeasure`'s `mono`, `measure.ts`), inside the slab's padding, with the slab's
+padding and gap on its first and last line, so a box grows to hold it exactly.
+`scripts/test-rich-text.js` covers the model and the measuring; the Chromium fixture
+(`npm run test:rich-text:browser`) the editing and the copy button.
+
 **A teleport takes the view across the board** (added 2026-10-13, the user's ask: "a
 button … When you click on it, it'll take you to another completely separate node"). A
 `shape: "teleport"` node is always labelled "Teleport", is always `FLOW_TELEPORT_SIZE`, and
@@ -1685,19 +1735,27 @@ in seconds, much as the admin's ✦ Answer does. The user rejected sending an AP
 of the workspace: "the API options will be very limited." The prompt and the answer's
 JSON shape are the admin's either way (`lib/diagrams/ai.ts`, mirrored by hand), with
 Switchboard's changes marked "Switchboard:" — no cap of four, the Details levels of the
-prompt, link stripping — so re-copying the admin's file would undo them; a CLI is
-also told it is in the workspace, that it can only read, and to name the file in a box's
-second line when the answer came from code (`lib/diagrams/answer.ts`).
+prompt, link stripping, no second line — so re-copying the admin's file would undo them; a
+CLI is also told it is in the workspace, that it can only read, and to end a box's label
+with the file it came from when Details leave room for it (`lib/diagrams/answer.ts`).
+
+**An answer writes no second line** (2026-11-01). The admin's answers put a "detail" under
+every label; the user found that line unreadable on a board — "I hate the caption" — and
+asked that the AI never write one, while a second line someone adds by hand (or an older
+board already has) is still drawn and still goes to the model as part of a question. So
+the answer's schema has no `detail` (`FLOW_AI_TEXT_FORMAT`), the prompt asks for a label
+alone (`BOX_RULES`), `parseFlowAiAnswer` keeps only the label however a model answers,
+✦ Condense's boxes are labels alone too (`condensePrompt`, `FlowCondensePart`), and a
+condensation that puts words in a `detail` anyway is refused rather than silently
+shortened (`parseFlowCondenseAnswer`; an empty one is tolerated).
 
 **Details** (Low by default; added 2026-10-13, "sometimes when it responds, it's very
 little information and it's not very useful") is how much each answer box says, three
 segments under **Answer as** in the ✦ Answer menu, with a line under them saying what the
-level gives. **Low** is the admin's box: a label of at most 8 words and one short line
-under it, or none when the label says it all. **Medium** asks for a label of at most 12
-words and, under it, two or three sentences (about 30 to 60 words) that explain it;
-**High** a label of at most 15 words and a paragraph of five to eight sentences (about 90
-to 160 words) — how it works or why, the specifics, any caveat. Medium and High never
-leave the second line empty. The level is in the system prompt (`ai.ts` `BOX_RULES`) and
+level gives. **Low** is the admin's box: a label of at most 8 words. **Medium** asks for
+the label to be two or three sentences (about 30 to 60 words) that explain the answer;
+**High** a paragraph of five to eight sentences (about 90 to 160 words) — what it is, how
+it works or why, the specifics, any caveat. The level is in the system prompt (`ai.ts` `BOX_RULES`) and
 said again as the last line of the question (`BOX_REMINDER`), since a CLI's answers on a
 board are one conversation and a level changed since its last answer has to win over the
 answers before it. Read back, a box's words are kept whole up to a box's own bound
@@ -1707,10 +1765,10 @@ paragraph is never cut, and drawn wider than a Low box (`ANSWER_WIDTH`: 280 at M
 rather than a column 800 pixels tall. The Claude API's `max_tokens` follows the level
 too (`CLAUDE_MAX_TOKENS`: 4,096, 8,192, 12,000 — forty High boxes are some 10,000
 tokens), and a cut-off answer at Medium or High says to try less Details; OpenAI's has
-no cap and the CLIs their own. Measured with Claude Code on 2026-10-13: a box's second
-line averaged 8 words at Low, 46–56 at Medium and 138–162 at High, and a board's
-conversation answered at Low and continued at High answered at High. ✦ Condense
-ignores Details: it writes a few short concept boxes.
+no cap and the CLIs their own. Measured with Claude Code on 2026-10-13 (when the
+explanation was still a second line): a box's explanation averaged 8 words at Low, 46–56
+at Medium and 138–162 at High, and a board's conversation answered at Low and continued
+at High answered at High. ✦ Condense ignores Details: it writes a few short concept boxes.
 
 Two switches went with it. **Subtext** (off by default) let the model write a line under
 the label at all; now it always may — "that should always be true" — Low writing one when

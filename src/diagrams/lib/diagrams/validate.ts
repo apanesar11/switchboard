@@ -60,7 +60,7 @@ import {
 } from "./types"
 import { parseFlowFileSrc } from "./files"
 import { parseLocalVideoSrc } from "./local-video"
-import { parseFlowRichText } from "./rich-text"
+import { normalizeFlowText, parseFlowRichText } from "./rich-text"
 import { parseFlowTimer } from "./timers"
 import { isYouTubeVideoId, youTubeVideoFromText, type YouTubeVideo } from "./youtube"
 
@@ -80,21 +80,11 @@ const UUID_RE =
 // a single space, so a name or an arrow's label stays one line.
 const WHITESPACE_RUN_RE = /\s+/g
 
-/**
- * A box's label or second line, which may run over several lines (Shift+Enter
- * in the editor): spaces collapse as everywhere else, but each line break is
- * kept — with at most one blank line in a row, and none at either end.
- * Exported for flowSpecFromCanvas, which saves text exactly as this keeps it.
- */
-export function normalizeFlowText(raw: string): string {
-  return raw
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .map((line) => line.replace(/[^\S\n]+/g, " ").trim())
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim()
-}
+// A box's label or second line, which may run over several lines: spaces collapse,
+// each line break is kept. Switchboard: defined in rich-text.ts now, which checks a
+// code block's words by the same rules; still exported from here for flowSpecFromCanvas
+// and the editor.
+export { normalizeFlowText }
 
 type Normalize = (raw: string) => string
 

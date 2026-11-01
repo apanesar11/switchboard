@@ -195,7 +195,14 @@ Mac shell script does not become a Windows command automatically.
   can't be read says so, with **Try again** for once it is fixed. Click a shape on the
   toolbar down the left and click the canvas to place it; with a box selected, Tab adds
   the next one joined to its right and starts you typing, ⇧Tab steps back, the arrow keys
-  move between boxes and ⌘D duplicates. Drag from a box's dot to draw an arrow. Drop,
+  move between boxes and ⌘D duplicates. Drag from a box's dot to draw an arrow: drawn
+  from a box's right side into another's left, or from its bottom into another's top, it
+  joins that box into the branch, which is laid out around it — boxes to the right stack
+  under one another, boxes below spread side by side — and Tab on a box whose boxes all
+  hang below it adds the next one below too. While typing in a box, **Code block** on the
+  text toolbar (⌘E) turns the selected lines into a code block: monospace, its spaces
+  kept, with a copy button in its corner; Enter in it is a new line, Tab indents, and Enter
+  on an empty last line leaves it. Drop,
   paste or pick a picture to put it on the canvas, or find one with **Search Google
   Images** on the picture tool (or G): Google's own image results open in a panel beside
   the canvas, searching the selected box's words, and a picture dragged out of it — or
@@ -339,9 +346,9 @@ Mac shell script does not become a Windows command automatically.
   says so. Under the chevron, and in Settings, **Web access** (on) lets whichever answers
   open a link in the question or search the web, only when the question needs it. Under
   the chevron alone, **Details** says how much each answer box holds: **Low** (the
-  default) a few words, and a short line under them when it helps; **Medium** two or
-  three sentences under each box, in a wider box; **High** a full paragraph, wider
-  still. Every answer reads the boxes leading up to its question.
+  default) a few words; **Medium** two or three sentences, in a wider box; **High** a
+  full paragraph, wider still. An answer never writes a second line under a box. Every
+  answer reads the boxes leading up to its question.
 
   **✦ Condense** appears when you drag-select several connected text nodes, including
   sibling branches with the same parent (⌘I also works). It replaces the discussion

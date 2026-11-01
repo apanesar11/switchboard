@@ -151,6 +151,14 @@ export type FlowTextParagraph = {
   checked?: boolean
   /** List nesting depth; omitted for top-level items and ordinary paragraphs. */
   level?: number
+  /**
+   * Switchboard: a code block — drawn in monospace on its own slab, with a button
+   * that copies it (2026-11-01, "there should be a copy button that appears within
+   * the code block itself"). Its lines are the paragraph's soft breaks, its spaces
+   * are kept as typed (indentation is part of code), its runs carry no marks, and
+   * it is never a list item. Two code blocks in a row are one block.
+   */
+  code?: boolean
 }
 export type FlowRichText = FlowTextParagraph[]
 

@@ -8,7 +8,7 @@
 // this measures with a canvas in the page's own font instead, so the lines
 // the layout counts are the lines that are drawn.
 
-import { setFlowTextMeasure } from "./layout"
+import { FLOW_CODE_FONT_FAMILY, setFlowTextMeasure } from "./layout"
 
 let installed = false
 
@@ -19,16 +19,17 @@ export function installFlowTextMeasure(): void {
   installed = true
 
   // The boxes inherit the page's font, read once it is first needed (the
-  // body is styled by then).
+  // body is styled by then). Switchboard: a code block is in the monospace stack
+  // styles.css draws it in, whatever the page's font.
   let family: string | null = null
   const widths = new Map<string, number>()
 
-  setFlowTextMeasure((text, fontSize, weight) => {
+  setFlowTextMeasure((text, fontSize, weight, mono = false) => {
     family ??= getComputedStyle(document.body).fontFamily || "sans-serif"
-    const key = `${weight} ${fontSize}\u0000${text}`
+    const key = `${mono ? "mono " : ""}${weight} ${fontSize}\u0000${text}`
     const known = widths.get(key)
     if (known !== undefined) return known
-    context.font = `${weight} ${fontSize}px ${family}`
+    context.font = `${weight} ${fontSize}px ${mono ? FLOW_CODE_FONT_FAMILY : family}`
     // A pixel to spare, so sub-pixel rounding on screen never wraps a line
     // the layout counted as fitting.
     const width = Math.ceil(context.measureText(text).width) + 1

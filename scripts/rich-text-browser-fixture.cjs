@@ -380,11 +380,56 @@ app.whenReady().then(async () => {
     linked = await node('link-box');
     assert.deepEqual([linked.shape, linked.videoId, linked.label], [undefined, undefined, 'https://youtu.be/exampleVid1?t=90']);
     assert.deepEqual([...new Set(asked)], ['https://i.ytimg.com/vi/exampleVid1/hqdefault.jpg'], 'only the poster was asked for');
+    // Switchboard: a code block — made from the toolbar, typed into a line at a time (Tab
+    // indents), left by Enter on an empty line, copied by its own button mid-edit and as
+    // drawn, and kept, indentation and all, through save and reload (2026-11-01).
+    await run(`window.mount({ kind: 'flow', nodes: [{ id: 'code-box', label: 'Install it\\nnpm install\\nnpm test', align: 'left', position: { x: 20, y: 100 } }], edges: [] })`); await tick();
+    await edit('code-box');
+    await run('window.selectFlowText(11, 31)'); await click('Code block · ⌘E');
+    let coded = await node('code-box');
+    assert.deepEqual(coded.labelRichText, [{ runs: [{ text: 'Install it' }] }, { code: true, runs: [{ text: 'npm install\nnpm test' }] }]);
+    assert.equal(await run('document.querySelector(\'button[aria-label="Code block · ⌘E"]\').getAttribute("aria-pressed")'), 'true');
+    assert.equal(await run('document.querySelectorAll("[data-flow-text] pre").length'), 1);
+    assert.equal(await run('getComputedStyle(document.querySelector("[data-flow-text] pre")).whiteSpace'), 'pre-wrap');
+    await run('window.selectFlowText(31, 31)'); await enter();
+    assert.deepEqual(await tab(), { prevented: true, bubbled: false }, 'Tab in a code block indents rather than adding a box');
+    await run('document.execCommand("insertText", false, "npm run lint")'); await tick();
+    coded = await node('code-box');
+    assert.deepEqual(coded.labelRichText[1], { code: true, runs: [{ text: 'npm install\nnpm test\n  npm run lint' }] }, 'Enter is a new line of code, in the one block');
+    assert.equal(await run('document.querySelectorAll("[data-flow-text] pre").length'), 1, 'still one block');
+    assert.equal(await run('window.editor.current.currentSpec().nodes.length'), 1, 'neither key added a canvas box');
+    await enter(); await enter();
+    await run('document.execCommand("insertText", false, "Then run it")'); await tick();
+    coded = await node('code-box');
+    assert.deepEqual(coded.labelRichText.map(p => p.code), [undefined, true, undefined], 'Enter on an empty line leaves the block');
+    assert.equal(coded.labelRichText.at(-1).runs[0].text, 'Then run it');
+    assert.equal(coded.labelRichText[1].runs[0].text, 'npm install\nnpm test\n  npm run lint', 'the empty line went with it');
+    await run('document.querySelector("[data-flow-text] [data-flow-copy]").click()'); await tick(); await tick();
+    assert.equal(await run('window.copied.at(-1)'), 'npm install\nnpm test\n  npm run lint', 'the button copies the block as typed, mid-edit');
+    assert.equal(await run('document.querySelector("[data-flow-text] [data-flow-copy]").dataset.copied'), 'true');
+    assert.equal(await run('document.querySelector("[data-flow-text]") !== null'), true, 'copying keeps the box in editing');
+    await click('Done · Enter');
+    coded = await node('code-box');
+    assert.equal(coded.label, 'Install it\nnpm install\nnpm test\nnpm run lint\nThen run it', 'the label is tidied as every label is');
+    assert.deepEqual(coded.labelRichText[1], { code: true, runs: [{ text: 'npm install\nnpm test\n  npm run lint' }] }, 'the block keeps its indentation');
+    assert.equal(await run('document.querySelectorAll("[data-id=code-box] pre").length'), 1, 'drawn as a block when not edited');
+    await run('document.querySelector("[data-id=code-box] [data-flow-copy]").click()'); await tick(); await tick();
+    assert.equal(await run('window.copied.at(-1)'), 'npm install\nnpm test\n  npm run lint', 'the drawn block\'s button copies too');
+    assert.equal(await run('document.querySelector("[data-flow-text]")'), null, 'and never opens the box for editing');
+    await run('window.editor.current.flush(); window.snapshot = JSON.parse(JSON.stringify(window.editor.current.currentSpec())); window.mount(window.snapshot)'); await tick();
+    assert.deepEqual((await node('code-box')).labelRichText, coded.labelRichText, 'kept through save and reload');
+    await edit('code-box');
+    assert.deepEqual(await run('window.readRichText(document.querySelector("[data-flow-text]"))'), coded.labelRichText, 'the drawn block reads back as it was saved');
+    await run('window.selectFlowText(15, 15)'); await click('Code block · ⌘E');
+    assert.equal((await node('code-box')).labelRichText, undefined, 'the toolbar takes a block off again: plain paragraphs, which a saved spec carries as words alone');
+    assert.equal(await run('document.querySelectorAll("[data-flow-text] pre").length'), 0);
+    assert.equal((await node('code-box')).label, 'Install it\nnpm install\nnpm test\nnpm run lint\nThen run it', 'the lines are soft breaks of one paragraph');
+    await click('Done · Enter');
     await run('window.mount(window.foldSnapshot)'); await tick();
     if (process.env.SWITCHBOARD_RICH_TEXT_SCREENSHOT) {
       require('node:fs').writeFileSync(process.env.SWITCHBOARD_RICH_TEXT_SCREENSHOT, (await window.webContents.capturePage()).toPNG());
     }
-    console.log('PASS — Chromium: rich text, nested lists, Tab precedence, collapsed-node counts, expand/undo/redo, save/reload, native Edit menu actions, and a YouTube link pasted into a label kept as words until the edit ends');
+    console.log('PASS — Chromium: rich text, code blocks, nested lists, Tab precedence, collapsed-node counts, expand/undo/redo, save/reload, native Edit menu actions, and a YouTube link pasted into a label kept as words until the edit ends');
     app.exit(0);
   } catch (error) {
     console.error(error);

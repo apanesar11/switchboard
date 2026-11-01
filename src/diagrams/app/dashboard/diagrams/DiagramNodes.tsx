@@ -66,7 +66,7 @@ import {
   type FlowRichText,
 } from "@/lib/diagrams/types"
 import { plainTextParagraphs, richTextHtml } from "@/lib/diagrams/rich-text"
-import { flowCheckbox } from "@/lib/diagrams/rich-text-dom"
+import { flowCheckbox, flowCodeCopy, flowCodeText } from "@/lib/diagrams/rich-text-dom"
 import {
   YOUTUBE_PLAYER_ENDED,
   YOUTUBE_PLAYER_ORIGIN,
@@ -230,6 +230,32 @@ export const FLOW_SIDE_POSITIONS: Record<FlowSide, Position> = {
  */
 export const FLOW_TEXT_WRAP = "whitespace-pre-line [overflow-wrap:anywhere]"
 
+/**
+ * Switchboard: a click on a code block's copy button (rich-text.ts richTextHtml) puts
+ * the block's words on the clipboard — through main, as every copy here goes, or
+ * failing that the page's own clipboard — and the button shows a tick for a moment.
+ * Shared by the boxes as drawn (FlowLabelText) and as edited (RichTextField).
+ */
+export async function copyFlowCodeBlock(button: HTMLElement): Promise<void> {
+  const text = flowCodeText(button)
+  let copied = (await call("writeClipboard", text)).ok
+  if (!copied) {
+    try {
+      await navigator.clipboard.writeText(text)
+      copied = true
+    } catch (error) {
+      toast({ title: "Couldn't copy the code", description: error instanceof Error ? error.message : String(error), variant: "error" })
+    }
+  }
+  if (!copied || !button.isConnected) return
+  button.dataset.copied = "true"
+  button.title = "Copied"
+  window.setTimeout(() => {
+    delete button.dataset.copied
+    button.title = "Copy code"
+  }, 1800)
+}
+
 export function FlowLabelText({ text, richText, className, style, onToggleCheck }: {
   text: string
   richText?: FlowRichText
@@ -244,17 +270,26 @@ export function FlowLabelText({ text, richText, className, style, onToggleCheck 
     container.current?.querySelector<HTMLElement>(`[data-flow-checkbox="${focusCheck.current}"]`)?.focus()
     focusCheck.current = null
   }, [richText])
+  // Switchboard: a code block's copy button is a button, on either canvas — never a
+  // press that selects or drags the box, nor a double-click that opens it for editing.
   return <div
     ref={container}
     className={cx("flow-rich-text w-full", FLOW_TEXT_WRAP, className)}
     style={style}
     onPointerDown={(event) => {
-      if (flowCheckbox(event.target)) { event.preventDefault(); event.stopPropagation() }
+      if (flowCheckbox(event.target) || flowCodeCopy(event.target)) { event.preventDefault(); event.stopPropagation() }
     }}
     onDoubleClick={(event) => {
-      if (flowCheckbox(event.target)) event.stopPropagation()
+      if (flowCheckbox(event.target) || flowCodeCopy(event.target)) event.stopPropagation()
     }}
     onClick={(event) => {
+      const copy = flowCodeCopy(event.target)
+      if (copy) {
+        event.preventDefault()
+        event.stopPropagation()
+        void copyFlowCodeBlock(copy)
+        return
+      }
       const checkbox = flowCheckbox(event.target)
       if (!checkbox || !onToggleCheck) return
       event.stopPropagation()

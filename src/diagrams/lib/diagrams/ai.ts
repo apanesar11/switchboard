@@ -196,7 +196,11 @@ export type FlowAiRequest = {
   details?: FlowAiDetails
 }
 
-export type FlowAiPart = { label: string; detail?: string }
+/**
+ * One box of an answer. Switchboard: its label alone — the admin's `detail`, the second
+ * line, is never written by an answer here (see BOX_RULES).
+ */
+export type FlowAiPart = { label: string }
 
 /** What the route answers with. */
 export type FlowAiResponse = { parts: FlowAiPart[] } | { error: string }
@@ -267,27 +271,29 @@ export function parseFlowAiRequest(raw: unknown): Parsed<FlowAiRequest> {
 
 // Switchboard: what a box holds depends on Details, and there is no "at most 4" — a
 // part for every separate thing, so a question with six answers gets six boxes.
+// Switchboard: a box is its "label" alone. The admin's answers write a second line
+// under the label ("detail"); the user found that line unreadable on a board and asked
+// that the AI never write one (2026-11-01) — a box an answer writes has one text, and at
+// Medium and High that text is the explanation itself. The second line a person adds
+// by hand is still drawn, and still goes to the model as part of a question.
 const BOX_RULES: Record<FlowAiDetails, string> = {
-  low: `- "label": the answer itself, at most 8 words. Plain and specific. No trailing full stop.
-- "detail": one short supporting line, at most 12 words, or "" when the label says it all.`,
-  medium: `- "label": the answer itself, at most 12 words. Plain and specific. No trailing full stop.
-- "detail": never "". Two or three full sentences, about 30 to 60 words, that explain the label: how it works or why it holds, with the specifics that make it useful.`,
-  high: `- "label": the answer itself, at most 15 words. Plain and specific. No trailing full stop.
-- "detail": never "". A thorough explanation in one paragraph of five to eight full sentences, about 90 to 160 words: how it works or why it holds, the specifics (names, numbers, examples), and any caveat or trade-off that matters.`,
+  low: `- "label": the answer itself, at most 8 words. Plain and specific. No trailing full stop.`,
+  medium: `- "label": the answer itself, in two or three full sentences, about 30 to 60 words: what it is, and how it works or why it holds, with the specifics that make it useful.`,
+  high: `- "label": the answer itself, in one thorough paragraph of five to eight full sentences, about 90 to 160 words: what it is, how it works or why it holds, the specifics (names, numbers, examples), and any caveat or trade-off that matters.`,
 }
 
 // Switchboard: said again with each question, since a CLI's answers on a board are
 // one conversation and a level changed since its last answer must win over it.
 const BOX_REMINDER: Record<FlowAiDetails, string> = {
-  low: "Details: Low. Keep every box short: a label of at most 8 words, and at most one short line under it.",
-  medium: "Details: Medium. Under every label, two or three sentences that explain it (about 30 to 60 words).",
-  high: "Details: High. Under every label, a thorough paragraph that explains it (about 90 to 160 words).",
+  low: "Details: Low. Keep every box short: a label of at most 8 words, and nothing else.",
+  medium: "Details: Medium. Every box's label is two or three sentences that explain it (about 30 to 60 words).",
+  high: "Details: High. Every box's label is a thorough paragraph that explains it (about 90 to 160 words).",
 }
 
 function systemPrompt(details: FlowAiDetails): string {
-  return `You help someone think through a flowchart. They wrote a question in one box and want the answer as the next box or boxes, drawn to the right of it with an arrow from the question.
+  return `You help someone think through a flowchart. They wrote a question in one box and want the answer as the next box or boxes, drawn beside it with an arrow from the question.
 
-Each part of your answer becomes one box:
+Each part of your answer becomes one box, whose only text is its "label":
 ${BOX_RULES[details]}
 
 When the answer has separate parts — items, reasons, options, steps or outcomes — give one part for each of them, as many as there are: a list of six things is six parts. Never put two of them in one part. Keep their natural order, or put the most important first. When the answer is a single thing, give exactly one part.
@@ -340,11 +346,11 @@ export const FLOW_AI_TEXT_FORMAT = {
         items: {
           type: "object",
           additionalProperties: false,
+          // Switchboard: no "detail" — an answer's box is its label alone (BOX_RULES).
           properties: {
             label: { type: "string" },
-            detail: { type: "string" },
           },
-          required: ["label", "detail"],
+          required: ["label"],
         },
       },
     },
@@ -370,7 +376,8 @@ function unlinked(value: unknown): unknown {
  * validator would, empty parts dropped, at most FLOW_AI_MAX_PARTS (one for
  * "one"). Throws when nothing usable came back.
  * Switchboard: a box's words whole, as long as a box holds — High's paragraph
- * runs well past an arrow's label's length.
+ * runs well past an arrow's label's length. And only the label: a "detail" a model
+ * writes anyway (a CLI carrying on an older conversation) is left out, never drawn.
  */
 export function parseFlowAiAnswer(text: string, split: FlowAiSplit): FlowAiPart[] {
   let data: unknown
@@ -389,7 +396,7 @@ export function parseFlowAiAnswer(text: string, split: FlowAiSplit): FlowAiPart[
     const part = entry as Record<string, unknown>
     const label = tidyBox(unlinked(part.label))
     if (!label) continue
-    parts.push({ label, detail: tidyBox(unlinked(part.detail)) })
+    parts.push({ label })
   }
   if (parts.length === 0) throw new Error("The model came back without an answer — try again.")
   return parts.slice(0, split === "one" ? 1 : FLOW_AI_MAX_PARTS)

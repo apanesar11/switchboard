@@ -165,6 +165,7 @@ import {
   RiBold,
   RiCheckLine,
   RiCheckboxLine,
+  RiCodeBoxLine,
   RiIndentDecrease,
   RiIndentIncrease,
   RiCloseLine,
@@ -216,8 +217,11 @@ import {
 } from "@/lib/diagrams/layout"
 import {
   boxInDirection,
+  branchDirection,
+  branchHandles,
   clearOfBoxes,
   flowSpecFromCanvas,
+  flowTabDirection,
   nextChildPosition,
   FLOW_TAB_GAP_Y,
   nextFlowNodeId,
@@ -234,6 +238,7 @@ import {
   carryFoldedPositions as carryFolded,
   stepTerminalFont,
   UNTITLED_FLOW_LABEL,
+  type FlowBranchDirection,
   type FlowCanvasEdge,
   type FlowCanvasNode,
   type FlowDirection,
@@ -368,7 +373,7 @@ import { PickerGlyph, WorkspacePicker, workspaceDir, workspaceGone } from "./Wor
 import { FLOW_EDGE_THEME } from "./DiagramEdges"
 import { RichTextField } from "./RichTextField"
 import { flowListState, formatActiveFlowText, type FlowTextCommand } from "@/lib/diagrams/rich-text-dom"
-import { parseFlowRichText } from "@/lib/diagrams/rich-text"
+import { parseFlowRichText, richTextPlainText } from "@/lib/diagrams/rich-text"
 
 import "@xyflow/react/dist/style.css"
 
@@ -917,13 +922,21 @@ type FlowCopy = {
 }
 let flowCopy: FlowCopy | null = null
 
-/** A box's words as the clipboard gets them: its label, and its second line under it. */
+/**
+ * A box's words as the clipboard gets them: its label, and its second line under it.
+ * Switchboard: from the rich text where there is one, since a code block in it keeps
+ * the spaces the plain label collapses — pasted into a file, code is still indented.
+ */
 function clipboardWords(box: FlowBoxNodeData): string {
   // Switchboard: a video's are its address on YouTube, so pasted anywhere else it is a
   // link to it (and pasted back here, the copy check knows it).
   if (box.shape === "video" && box.videoId) return youTubeWatchUrl({ videoId: box.videoId, start: box.videoStart })
+  const words = (text: string, rich: FlowBoxNodeData["labelRichText"]) =>
+    rich && normalizeFlowText(richTextPlainText(rich)) === normalizeFlowText(text)
+      ? richTextPlainText(rich).trim()
+      : normalizeFlowText(text)
   const label =
-    normalizeFlowText(box.label) ||
+    words(box.label, box.labelRichText) ||
     (box.shape === "image"
       ? "Image"
       : box.shape === "note"
@@ -936,7 +949,7 @@ function clipboardWords(box: FlowBoxNodeData): string {
           : box.shape === "sheet"
             ? SHEET_LABEL
             : UNTITLED_FLOW_LABEL)
-  const detail = box.detail ? normalizeFlowText(box.detail) : ""
+  const detail = box.detail ? words(box.detail, box.detailRichText) : ""
   return detail ? `${label}\n${detail}` : label
 }
 
@@ -984,15 +997,16 @@ function showing(nodes: Node[], edges: Edge[], hidden: Set<string> = foldOf(node
 
 /**
  * Switchboard: whether `node` is joined into a branch the way Tab joins boxes — an
- * arrow from its right side to another's left, or one into its left — or was
- * detached from one: what the toolbar's Attached / Detached is for.
+ * arrow from its right side to another's left, or one into its left — or the way a
+ * branch goes down, out of a bottom into a top — or was detached from one: what the
+ * toolbar's Attached / Detached is for.
  */
 function inBranch(node: Node, edges: Edge[]): boolean {
   if ((node.data as FlowBoxNodeData).detached) return true
   return edges.some(
     (edge) =>
-      edge.sourceHandle === "right" &&
-      edge.targetHandle === "left" &&
+      ((edge.sourceHandle === "right" && edge.targetHandle === "left") ||
+        (edge.sourceHandle === "bottom" && edge.targetHandle === "top")) &&
       (edge.source === node.id || edge.target === node.id),
   )
 }
@@ -2729,13 +2743,39 @@ function FlowEditorCanvas({
     [],
   )
 
+  // Switchboard: an arrow drawn the way a branch is joined — right side to left side
+  // onto a box further right, or bottom to top onto a box further down — joins the
+  // box it lands on into the branch there and then: the tree is laid out around it
+  // as Tab would lay it out (tidyFlowTree), rather than waiting for the next drag to
+  // settle it. "We need auto-formatting there as well" (2026-11-01). Any other arrow
+  // is just an arrow. One undo step, with the arrow.
   const onConnect = useCallback(
     (connection: Connection) => {
       if (connection.source === connection.target) return
       record()
-      setEdges((current) =>
-        addEdge(editableEdge({ id: newEdgeId(), ...connection }, { dashed: false }), current),
-      )
+      const edge = editableEdge({ id: newEdgeId(), ...connection }, { dashed: false })
+      const next = addEdge(edge, edgesRef.current)
+      edgesRef.current = next
+      setEdges(next)
+      const from = nodesRef.current.find((node) => node.id === connection.source)
+      const to = nodesRef.current.find((node) => node.id === connection.target)
+      if (!from || !to || branchDirection(edge, rectOf(from), rectOf(to)) === null) return
+      setNodes((current) => {
+        const shown = showing(current, next)
+        const moved = tidyFlowTree(shown.boxes, shown.edges, [connection.source])
+        if (moved.size === 0) return current
+        for (const pending of tabMovesRef.current.values()) {
+          for (const id of moved.keys()) pending.delete(id)
+        }
+        return carryFolded(
+          current,
+          current.map((node) => {
+            const at = moved.get(node.id)
+            return at ? { ...node, position: at } : node
+          }),
+          next,
+        )
+      })
     },
     [record],
   )
@@ -3043,7 +3083,7 @@ function FlowEditorCanvas({
         box.label,
       ),
       quiet = false,
-    }: { from?: { id: string; side: "right" }; id?: string; quiet?: boolean } = {},
+    }: { from?: { id: string; direction: FlowBranchDirection }; id?: string; quiet?: boolean } = {},
   ) {
     const { width, height } = boxSize(box)
     const node: Node = {
@@ -3073,8 +3113,9 @@ function FlowEditorCanvas({
             id: newEdgeId(),
             source: from.id,
             target: id,
-            sourceHandle: from.side,
-            targetHandle: "left",
+            // Switchboard: out of the right side into the left, or out of the
+            // bottom into the top, as the branch runs.
+            ...branchHandles(from.direction),
           },
           { dashed: false },
         ),
@@ -3488,6 +3529,9 @@ function FlowEditorCanvas({
   // its right side, under the last box already hanging off that side. The
   // boxes around it shuffle up so each branch stays centred on the box it
   // hangs off — one undo step with the new box.
+  // Switchboard: or joined to its bottom, beside the last box already hanging
+  // there, when everything hanging off the parent hangs below it (flowTabDirection)
+  // — so a branch started downwards by hand goes on downwards.
   function addChild(parent: Node) {
     record()
     const from = parent.data as FlowBoxNodeData
@@ -3530,11 +3574,13 @@ function FlowEditorCanvas({
     const reattach = from.detached === true
     const settle = (node: Node) => (reattach && node.id === parent.id ? attached(node) : node)
     const shown = showing(nodes.map(settle), edges)
+    const direction = flowTabDirection(shown.boxes, shown.edges, parent.id)
     const { position, moved } = placeTabChild(
       shown.boxes,
       shown.edges,
       parent.id,
       { id, ...boxSize(box) },
+      direction,
     )
     if (moved.size > 0 || reattach) {
       if (isText(box) && moved.size > 0) {
@@ -3553,14 +3599,17 @@ function FlowEditorCanvas({
         }),
       )
     }
-    reveal(insertBox(box, position, { from: { id: parent.id, side: "right" }, id }).rect)
+    reveal(insertBox(box, position, { from: { id: parent.id, direction }, id }).rect)
   }
 
   // Shift+Tab: back to the box this one hangs off — the arrow that came in on
-  // its left side, which is the one Tab draws, or failing that any arrow in.
+  // its left side, which is the one Tab draws (Switchboard: or on its top, the one
+  // a branch going down draws), or failing that any arrow in.
   function stepBack(id: string) {
     const incoming = edges.filter((edge) => edge.target === id)
-    const edge = incoming.find((candidate) => candidate.targetHandle === "left") ?? incoming[0]
+    const edge =
+      incoming.find((candidate) => candidate.targetHandle === "left" || candidate.targetHandle === "top") ??
+      incoming[0]
     const parent = edge ? nodes.find((node) => node.id === edge.source) : undefined
     changeEditing(null)
     if (!parent) return
@@ -4590,7 +4639,7 @@ function FlowEditorCanvas({
       const box: FlowBoxNodeData = {
         ...plainBox({ label: part.label, shape: "rounded", tone: "default" }),
         ...(width === undefined ? {} : { size: { width, height: FLOW_NODE_MIN_HEIGHT } }),
-        detail: part.detail,
+        // Switchboard: no second line — an answer's box is its label alone (ai.ts).
         ai: true,
         answeredIn: workspace ?? undefined,
       }
@@ -4599,11 +4648,15 @@ function FlowEditorCanvas({
       return { id, box, ...boxSize(box) }
     })
     const shown = showing(current, edgesRef.current)
+    // Switchboard: below the question when everything hanging off it hangs below it,
+    // as Tab would add the next box (flowTabDirection); otherwise to its right.
+    const direction = flowTabDirection(shown.boxes, shown.edges, parentId)
     const { positions, moved } = placeTabChildren(
       shown.boxes,
       shown.edges,
       parentId,
       fresh.map(({ id, width, height }) => ({ id, width, height })),
+      direction,
     )
     // Switchboard: nor while something other than the question is selected —
     // with several answers on their way, the box you moved on to (and asked
@@ -4625,7 +4678,7 @@ function FlowEditorCanvas({
     }))
     const arrows = fresh.map(({ id }) =>
       editableEdge(
-        { id: newEdgeId(), source: parentId, target: id, sourceHandle: "right", targetHandle: "left" },
+        { id: newEdgeId(), source: parentId, target: id, ...branchHandles(direction) },
         { dashed: false },
       ),
     )
@@ -4857,33 +4910,47 @@ function FlowEditorCanvas({
     const parent = nodes.find((node) => node.id === asking.id)
     if (!parent) return []
     // The boxes hanging off it the way Tab hangs them: right side to left
-    // side, onto a box further right.
-    const children = edges
-      .filter(
-        (edge) =>
-          edge.source === parent.id && edge.sourceHandle === "right" && edge.targetHandle === "left",
-      )
-      .map((edge) => nodes.find((node) => node.id === edge.target))
-      .filter(
-        (node): node is Node =>
-          node !== undefined && !fold.hidden.has(node.id) && node.position.x > parent.position.x,
-      )
-      .map(rectOf)
-    const position = nextChildPosition(
-      rectOf(parent),
-      children,
-      nodes.filter((node) => !fold.hidden.has(node.id)).map(rectOf),
-      ANSWER_GHOST_SIZE,
-    )
+    // side, onto a box further right. Switchboard: or, when everything hanging off
+    // it hangs below it, the way a branch goes down — where the answer will go.
+    const shown = showing(nodes, edges, fold.hidden)
+    const direction = flowTabDirection(shown.boxes, shown.edges, parent.id)
     const from = rectOf(parent)
-    const [path] = getSmoothStepPath({
-      sourceX: from.x + from.width,
-      sourceY: from.y + from.height / 2,
-      sourcePosition: Position.Right,
-      targetX: position.x,
-      targetY: position.y + ANSWER_GHOST_SIZE.height / 2,
-      targetPosition: Position.Left,
-    })
+    const children = edges
+      .filter((edge) => edge.source === parent.id)
+      .map((edge) => ({ edge, node: nodes.find((node) => node.id === edge.target) }))
+      .filter(
+        (hung): hung is { edge: Edge; node: Node } =>
+          hung.node !== undefined &&
+          !fold.hidden.has(hung.node.id) &&
+          branchDirection(hung.edge, from, rectOf(hung.node)) === direction,
+      )
+      .map(({ node }) => rectOf(node))
+    const position = nextChildPosition(
+      from,
+      children,
+      shown.nodes.map(rectOf),
+      ANSWER_GHOST_SIZE,
+      direction,
+    )
+    const [path] = getSmoothStepPath(
+      direction === "right"
+        ? {
+            sourceX: from.x + from.width,
+            sourceY: from.y + from.height / 2,
+            sourcePosition: Position.Right,
+            targetX: position.x,
+            targetY: position.y + ANSWER_GHOST_SIZE.height / 2,
+            targetPosition: Position.Left,
+          }
+        : {
+            sourceX: from.x + from.width / 2,
+            sourceY: from.y + from.height,
+            sourcePosition: Position.Bottom,
+            targetX: position.x + ANSWER_GHOST_SIZE.width / 2,
+            targetY: position.y,
+            targetPosition: Position.Top,
+          },
+    )
     return [{ serial: asking.serial, rect: { ...position, ...ANSWER_GHOST_SIZE }, path, workspace: asking.workspace }]
   }), [askings, nodes, edges, fold])
 
@@ -7721,9 +7788,9 @@ function HowItAnswers({
 
 // What each Details level gives, under its three segments in the ✦ Answer menu.
 const DETAILS_HINTS: Record<FlowAiDetails, string> = {
-  low: "A few words, and a short line when it helps",
-  medium: "Two or three sentences under each box",
-  high: "A full paragraph under each box",
+  low: "A few words in each box",
+  medium: "Two or three sentences in each box",
+  high: "A full paragraph in each box",
 }
 
 const EFFORT_LABELS: Record<string, string> = {
@@ -8024,7 +8091,7 @@ function TextBar({
   onDone: () => void
 }) {
   const size = FLOW_TEXT_SIZES.indexOf(box.textSize)
-  const [marks, setMarks] = useState({ bold: false, italic: false, bullet: false, checklist: false, indent: false, outdent: false })
+  const [marks, setMarks] = useState({ bold: false, italic: false, bullet: false, checklist: false, code: false, indent: false, outdent: false })
   useEffect(() => {
     const refresh = () => {
       const focused = document.activeElement
@@ -8084,6 +8151,11 @@ function TextBar({
       </BarButton>
       <BarButton label="Checkbox list" active={marks.checklist} onClick={() => format("checklist")}>
         <RiCheckboxLine className="size-4" aria-hidden="true" />
+      </BarButton>
+      {/* Switchboard: the selected paragraphs as a code block — monospace, with a copy
+          button — or back to text (rich-text.ts toggleCode). */}
+      <BarButton label="Code block · ⌘E" active={marks.code} onClick={() => format("code")}>
+        <RiCodeBoxLine className="size-4" aria-hidden="true" />
       </BarButton>
       <BarButton label="Indent list · Tab" disabled={!marks.indent} onClick={() => format("indent")}>
         <RiIndentIncrease className="size-4" aria-hidden="true" />

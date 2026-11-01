@@ -23,6 +23,9 @@ try {
     window.readRichText = readRichText;
     window.flowTextSelection = flowTextSelection;
     window.copied = [];
+    // Switchboard: the one bridge call a code block's copy button makes, recorded; every
+    // other call finds no bridge, as before.
+    window.sb = { writeClipboard: async text => { window.copied.push(text); return { ok: true }; } };
     window.editText = (action, text = '') => editFlowText(document.activeElement.closest('[data-flow-text]'), action, text, text => window.copied.push(text));
     window.selectFlowText = (start, end, field = 'label') => {
       const element = document.querySelector('[data-flow-text=' + field + ']');
