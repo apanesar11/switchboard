@@ -34,6 +34,9 @@
 // by its content and shared by every board), which only the app's editor adds — from
 // a file dropped, pasted or picked. Here a "pdf" or "sheet" box is checked and kept as
 // any other is, and its "file" must name one of those, as `show` gives it.
+//
+// scripts/widget.js requires this file for the same parser, layout and board lookup
+// (module.exports, below); run that way, nothing here runs on its own.
 
 const fs = require('fs');
 const path = require('path');
@@ -71,7 +74,7 @@ function editorLib() {
         'export { parseDiagramSpec } from "./validate"',
         'export { layoutDiagram } from "./layout"',
         'export { carryOverFlowLayout } from "./flow-editor"',
-        'export { VIDEO_LABEL, PDF_LABEL, SHEET_LABEL } from "./types"',
+        'export { VIDEO_LABEL, PDF_LABEL, SHEET_LABEL, WIDGET_LABEL, FLOW_WIDGET_DEFAULT_SIZE, FLOW_WIDGET_MIN_SIZE } from "./types"',
       ].join('\n'),
       resolveDir: dir,
       loader: 'ts',
@@ -234,6 +237,8 @@ function describeNode(node) {
   // A PDF's and a spreadsheet's is its file's name, or the word every unnamed one has.
   if (node.shape === 'pdf') return `${node.id} (a PDF${label && label !== editorLib().PDF_LABEL ? ` "${quoted}"` : ''})`;
   if (node.shape === 'sheet') return `${node.id} (a spreadsheet${label && label !== editorLib().SHEET_LABEL ? ` "${quoted}"` : ''})`;
+  // A widget's label is its name, or its id when it has none.
+  if (node.shape === 'widget') return `${node.id} (the ${node.widget || 'unnamed'} widget${label && label !== node.widget ? ` "${quoted}"` : ''})`;
   return `${node.id}${label ? ` ("${quoted}")` : ''}`;
 }
 
@@ -369,7 +374,11 @@ async function main(argv) {
   }
 }
 
-main(process.argv.slice(2)).catch(err => {
-  console.error(err instanceof Refusal ? `whiteboard: ${err.message}` : err.stack || String(err));
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main(process.argv.slice(2)).catch(err => {
+    console.error(err instanceof Refusal ? `whiteboard: ${err.message}` : err.stack || String(err));
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { Refusal, editorLib, parseArgs, readInput, checked, unwrap, index, findBoard, folderName, describeNode };

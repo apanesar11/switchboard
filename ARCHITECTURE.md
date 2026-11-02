@@ -97,6 +97,9 @@ switchboard/
   src/main/videos.js            — YouTube videos on a whiteboard: Referer, guards, title [M14]
   src/main/sheets.js            — a whiteboard's spreadsheets: read once, paged, searched [M15]
   src/main/sheet-worker.js      — reads one spreadsheet in a worker thread           [M15]
+  src/main/widgets.js           — whiteboard widgets: store, sbwidget://, keys, fetch proxy [M16]
+  src/renderer/widget-sdk.js    — window.Switchboard, served into every widget's frame [M16]
+  scripts/widget.js             — the widgets' CLI: create, check, set-secret, add, remove [M16]
   src/main/answer.js            — ✦ Answer: Claude Code / Codex / Claude API / OpenAI [M11]
   src/main/databases.js         — local encrypted connections and read-only browsing [M13]
   src/renderer/views/databases.js — Databases tab: connections, entities, records     [R17]
@@ -1191,6 +1194,218 @@ to show here", "That spreadsheet took too long to read", "That spreadsheet can't
 here", "That spreadsheet is protected with a password", "That file is no longer on this
 Mac") with the Open in … button and Try again. Reading is `main/sheets.js` (M15).
 
+**A widget is a small live page on a board** (added 2026-11-01, the user's ask: widgets
+on a whiteboard, made by an agent, with an API key handed to the app rather than to the
+widget). A `shape: "widget"` node names a widget by its id (`widget`, lowercase — it is a
+URL host: `FLOW_WIDGET_ID_RE`, `/^[a-z][a-z0-9-]{0,62}$/`, mirrored in main), and the
+widget is a folder of plain HTML, CSS and JavaScript kept on this Mac. The whiteboard only
+draws it; the widget holds all of its own logic. The validator requires the id on a widget
+(read in lowercase) and keeps it on nothing else; the label is the widget's name and,
+given none, its id. A widget is one of `FLOW_SIZED_SHAPES`, its `size` the whole node with
+its 30px strip (`WIDGET_BAR`), made at `FLOW_WIDGET_DEFAULT_SIZE` (480×300) unless its
+manifest or the CLI says otherwise, resized from every corner and edge and never under its
+manifest's `minSize`, else `FLOW_WIDGET_MIN_SIZE` (200×120); main's list thumbnail mirrors
+the default. Like a video it has no text to edit, takes no colour, is followed by a plain
+box on Tab, is walked past by ✦ Answer's question path, refused by Condense ("Leave widgets
+out of the selection before condensing."), left where it was by an unfold's re-tidy, and
+copied, pasted, duplicated, deleted and undone as any node is. The CLI names one
+`id (the weather widget "Weather")` in its removal refusal. The app has no in-app way to
+make one: an agent does, through `scripts/widget.js` and the
+`switchboard-create-widget` skill (`.agents/skills/`).
+
+**The store is a folder per widget, beside the config.** `<config dir>/widgets/<id>/`
+holds `widget.json` and the widget's own files (§5 M16):
+
+```json
+{ "name": "Weather", "entry": "index.html",
+  "size": { "width": 480, "height": 300 }, "minSize": { "width": 200, "height": 120 },
+  "api": { "baseUrl": "https://api.example.com/v1/", "secret": "API_KEY",
+           "header": "Authorization", "prefix": "Bearer " } }
+```
+
+`name` (1–60 characters) is required; `entry` defaults to `index.html` and must be an
+.html path inside the folder; `size`/`minSize` are within the editor's limits (a least
+size never under 120×70); `api.baseUrl` is https, or http to `localhost`/`127.0.0.1`/
+`[::1]` only, with no credentials, query or fragment, and is read as a directory (its path
+ends in "/"); `api.secret` is a key's NAME (`/^[A-Z][A-Z0-9_]{0,63}$/`), never a value;
+`header` defaults to Authorization and `prefix` to `"Bearer "` for it (empty for any other
+header). Unknown fields are ignored; a manifest that fails names its problem, and the node
+shows it. Nothing in the folder is ever a key: the folder is served to the page.
+
+**It is served over its own scheme, into a sandboxed frame.** `index.js` registers
+`sbwidget` beside `sbimg` (standard, secure, `supportFetchAPI`) and serves it with
+`widgets.serve`: `sbwidget://<id>/<path>`, each id its own origin (its own `localStorage`).
+A segment that is empty, `.` or `..`, a dotfile, or holds a NUL, a backslash or an
+encoded "/" is refused; the file is resolved under the widget's folder and must still be
+inside it once `realpath` has followed every symlink; only the extensions `MIME` lists
+are served (html, htm, js, mjs, css, json, svg, png, jpg, jpeg, gif, webp, avif, ico,
+woff, woff2, ttf, otf, txt, map, wasm), each with its type, `X-Content-Type-Options:
+nosniff`, `Cache-Control: no-store` and this CSP (on every response, so an SVG opened as a
+page is held to it too): `default-src 'self'; script-src 'self' 'unsafe-inline'
+'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:;
+connect-src 'self'; media-src 'self' blob: data:; frame-src 'none'; object-src 'none';
+form-action 'none'; base-uri 'none'`. `connect-src 'self'` is the point: a widget's data
+comes through the host, never straight from the network. `'wasm-unsafe-eval'` is there
+because `.wasm` is served: without it Chromium refuses every WebAssembly compile under
+this `script-src` (measured, `test:widgets:browser`), and it allows wasm and no eval. "/"
+alone is the entry page, and the reserved
+`__switchboard/widget.js` is the SDK, `src/renderer/widget-sdk.js`, served from the app and
+never from the folder. The face's iframe (`DiagramNodes.tsx WidgetFace`) has `sandbox="allow-
+scripts allow-same-origin"` and nothing else — no popups, top navigation, forms or
+downloads — `referrerpolicy="no-referrer"`, no `allow=`, and its address is the entry with
+the board's theme in the query (`?theme=dark`), built once per frame so the first paint is
+right and a theme change never reloads it. `videos.js permissionAllowed` refuses an
+`sbwidget:` page every permission, media included, and a popup it asks for counts as the
+web's. `will-frame-navigate` (`widgets.frameNavigation`) lets one of the page's own frames
+load a widget and a widget's frame move only within its own id; anything else it tries is
+refused. An http(s) navigation from a widget's frame is refused too, and opened in the
+user's browser only when it is a link the user followed (`widgets.linkGate`): the sandbox
+doesn't stop a page navigating itself — a redirect as it loads, a timer — and Electron's
+navigation event says nothing of a user gesture, so the window must have focus and the
+widget's frame the keyboard (`frameHasKeyboard`: `webContents.focusedFrame`, by process
+and routing id — a click or a key press in the frame puts it there, measured), one link a
+second at most across all widgets. A frame that tries without the user is barred from
+then on, until it is made anew (its files change, ⌥-Reload, the board opened again), so
+a loop can't wait for the user to come back and send them off again.
+
+**The SDK is the whole contract a widget is written against** (`window.Switchboard`):
+`ready()` → `{ widget: { id, name }, theme, size }`; `fetch(path, { method, headers,
+query, body })` → `{ ok, status, statusText, headers, text(), json() }` (rejecting with
+the app's sentence, `error.code` 'needs-secret' when no key is kept); `onTheme`,
+`onResize`, `onRefresh` (each answering an unsubscribe) and `theme`, `size`, `widget`. It
+keeps `<html data-theme>` and `color-scheme` in step with the board — whether or not the
+page calls `ready()`: the SDK posts `ready` itself as it loads (and `ready()` again only
+while no `init` has come), since the face sends `theme` and `resize` only to a page that
+has said it is ready, so a page whose CSS follows `data-theme` and needs nothing else
+still follows the board. Messages are objects
+with `v: 1` and `sb: 'widget'` (to the board) or `sb: 'host'` (to the widget): `ready`,
+`fetch {id, path, init}` one way; `init {widget, theme, size}`, `theme`, `resize`,
+`refresh`, `response {id, ok, status, statusText, headers, body}` or `response {id,
+error, code?}` the other. Measured 2026-11-01 (Electron 44): the board sees a widget's
+messages with `event.origin` `sbwidget://<id>`, and posts to it with that as the target
+origin; the widget sees the board's as `null` (a file:// page's opaque origin), so the SDK
+reads only messages whose source is its parent window and posts to `*` — nothing it sends
+is anything the widget didn't write. The face reads only messages whose source is its own
+frame's window and whose origin is the widget's. Each page numbers its requests from a
+random start, so an answer that lands after its page was reloaded matches nothing in the
+next one. The face sends `init` on the frame's load and again on `ready`, `theme` when the
+board's theme changes (`useBoardTheme`, a MutationObserver on `data-term-theme`), and
+`resize` from a ResizeObserver on the frame.
+
+**The fetch proxy holds the key** (`sb:widgets:fetch`, `createWidgetHost().fetch`). For
+each request main reads the manifest again; needs `api.baseUrl`; builds the URL with `new
+URL(path, baseUrl)` (a leading "/" dropped) plus the query; refuses any URL on another
+origin or whose path is not under the base's directory, and — since a server may decode a
+path again — any segment past the base that, decoded up to three times, holds a NUL or,
+between the "/"s and backslashes it decodes to, a way up: `.`, `..`, or any run of dots
+and trailing spaces, once a `;parameter` is cut off (Tomcat, Jetty and Spring read `..;`
+as `..`). An encoded "/" that leads nowhere up is let be — GitLab's URL-encoded project
+id, `projects/group%2Fproject` — and so are the base's own segments. Allows GET, HEAD,
+POST, PUT, PATCH and DELETE (a GET or HEAD has no body; an object body goes as JSON);
+strips the widget's Authorization, Cookie, Host, Proxy-*, connection headers and the
+manifest's own key header; attaches `header: prefix + key` when the manifest names a key —
+and with none kept for the API it names now answers `{ ok:false, code:'needs-secret',
+error }` (a sentence, naming the host a key was given for when it was another; the face
+then shows the key panel) — then asks Node's own `fetch` (undici; never Electron's
+`net.fetch`, which would carry the app session's cookies) with `redirect: 'manual'` (a 3xx
+comes back as it came), 20 s and at most 5 MB of answer, at most 8 at a time per widget. It
+answers `{ ok, status, statusText, headers, body }` with only content-type, cache-control,
+etag, last-modified, retry-after and `x-ratelimit-*` of the headers. No key, and no URL,
+is ever logged.
+
+**Keys are encrypted beside the config, and the CLI's wait in a pending file.**
+`<config dir>/widget-secrets.json` (`{ version: 1, widgets: { <id>: { <NAME>: { enc,
+last4, savedAt, origin } } } }`, mode 0600, written through a temp file and a rename)
+holds them encrypted with `safeStorage`, as `answer.js` keeps `keys.json`. `widget.js
+set-secret` runs under plain node, which can't reach the system's keychain, so it writes
+the value into `widget-secrets.pending.json` (`{ version: 1, widgets: { <id>: { <NAME>:
+"<value>" } }, origins: { <id>: { <NAME>: "<origin>" } } }`, 0600); main moves pending
+keys into the encrypted file and out of the pending one at startup, whenever the pending
+file changes, and lazily before any request or state that needs one — reading the pending
+file again before removing what it took, so a key the CLI wrote meanwhile stays. With no
+keychain to encrypt with, the proxy reads the pending value as it is (a 0600 file in the
+user's home, like ~/.npmrc) and the state says the key isn't encrypted. The decrypted key
+never crosses IPC to the renderer and never reaches the frame: the renderer sends it once,
+from the key panel (`sb:widgets:setSecret`), and hears back only whether there is one, how
+it is kept and its last four characters.
+
+**A key is kept for the API it was given for.** `origin` is the origin of the manifest's
+`api.baseUrl` when the key was given — the panel's save, or the CLI's prompt, which names
+the host — and the proxy decrypts a key only for a request to that origin. widget.json is
+the agent's to edit: without this, an edit of the base URL (to another provider, or to a
+listener on this machine — http is allowed to loopback) would have sent the user's key
+there on the frame's next load, with no one asked. A widget pointed elsewhere asks again:
+the state's `hasSecret` is false and `secretFor` names the host the kept key was given
+for, which the key panel says; `check` says the same. A pending key with no origin
+(written by hand) is bound to the widget's API when the app first sees it; a kept entry
+with none is never sent.
+
+| `window.sb` | channel | returns |
+|---|---|---|
+| `sb.widgetsList()` | `sb:widgets:list` | `{ ok, data: WidgetState[] }` — every installed widget, by name |
+| `sb.widgetsState(id)` | `sb:widgets:state` | `{ ok, data: { id, name, entry, size, minSize, apiHost, secretName, hasSecret, secretEncrypted, secretLast4, secretFor, keychain, error, code } }` — `code` 'missing' (not installed) or 'manifest' (widget.json wrong), with `error` the sentence; `secretFor` the host a kept key was given for when widget.json now names another API ('' when nothing says), else null. Never a key |
+| `sb.widgetsSetSecret(id, value)` | `sb:widgets:setSecret` | the state — the key the manifest names, checked (non-empty once trimmed, no whitespace, at most 4096 characters) and kept encrypted, for the API widget.json names now |
+| `sb.widgetsClearSecret(id)` | `sb:widgets:clearSecret` | the state — every key of the widget forgotten, kept or waiting |
+| `sb.widgetsOpenFolder(id)` | `sb:widgets:openFolder` | `{ ok }` — `shell.openPath` on the widget's folder; a smoke run logs it instead |
+| `sb.widgetsFetch(req)` | `sb:widgets:fetch` | `req = { id, path, method?, headers?, query?, body? }` → `{ ok, status, statusText, headers, body }` or `{ ok:false, error, code? }` |
+| `sb.onWidgetsChanged(cb)` | `sb:evt:widgetsChanged` | `{ id, reason: 'files' \| 'secret' }` |
+
+**The face.** `WidgetFace` is both canvases' (the editor wraps it in `WidgetNode` with its
+outline, dots, fold badge and resize handles; the read-only canvas draws it in `FlowBox`).
+A 30px strip that drags the node — the widget glyph, its name (the manifest's, live), and
+**Reload** (a page that has said it is ready is sent `refresh`: its `onRefresh`, or the SDK
+loads it again; any other page, or ⌥-click, is loaded afresh in a new frame), the **key**
+(when the manifest names one: the panel, to replace or forget it) and **Open folder** —
+over the frame. In its place: "This widget isn't installed" with its id and how to make it;
+"This widget can't be shown" with main's sentence for a widget.json that's wrong; and
+**Needs a key** — a password field and Save, the manifest's API host and key name, and the
+CLI's way — when the manifest names a key none is kept for (for this API: the panel says
+which host a key was given for when it was another), or a request said so. The frame is
+keyed by the widget's id as well as its generation, so a node switched to another widget
+gets a new frame rather than the old one sent to an address main refuses. The
+faces share one store of widget state (`useWidget`), loaded once and again whenever main
+says the widget changed: `widgets.watch()` (started by `index.js` after `ready`) watches
+`widgets/` recursively and the keys files, and says `{ id, reason }` once the folder has
+been quiet 150 ms — so an agent's edit shows on an open board as it is saved, every face of
+that widget loading its frame again — and a key that came or went, after importing it (a
+write this process made and has told of is not told twice). The frame takes every press
+over it, except while the canvas has a gesture of its own under way — `[data-flow-
+gesture]` as for a video, and `[data-flow-wheel]`, which the editor sets for 300 ms after
+each wheel event that reached the canvas, so a pan or pinch that began on the canvas goes
+on across a widget, while one that begins over the widget is the widget's — or the hand tool
+is out. Measured 2026-11-01: a widget's frame runs in a renderer process of its own (it is
+another site), and a scroll over a page with nothing to scroll is chained out of the frame
+to the canvas by Chromium itself, so only a page that scrolls keeps one; the page's wrapper
+is `nodrag` but neither `nopan` nor `nowheel`, so a wheel that reaches it (the frame having
+let go) pans. An offscreen window routes no input to such a frame, so
+`test:widgets:browser` runs a hidden window and sends wheels through the DevTools protocol. A widget's frame has the keyboard as a video's player does (an IFRAME is
+`document.activeElement`), so the canvas's keys leave it alone. The Edit menu's items are
+clicks, not roles, so their keystrokes never reach a frame by themselves: while a widget's
+frame has the keyboard, `index.js guestEdit` runs the command natively on the page
+(`widgets.editInWidget`) and Chromium sends it to the focused frame — ⌘C, ⌘V, ⌘X, ⌘Z and
+⌘A work in a widget's fields as in a browser (measured with Select All).
+
+**The CLI.** `scripts/widget.js` writes through `widgets.js` and `whiteboards.js`, rooted
+where the app's are: `list [--json]`; `create <id> --name … [--width --height] [--api
+<baseUrl>] [--secret <NAME>]` (widget.json and a responsive starter page using the SDK; an
+existing id is refused); `check <id>` (the manifest, the entry, the files and which are
+not served, the key as kept, waiting, kept for another API or missing — never its value —
+and the `sbwidget://` address); `set-secret <id> [NAME]` (the key from stdin only — hidden
+on a terminal, or piped from the clipboard, `pbpaste | …` on a Mac and `powershell
+-NoProfile -Command Get-Clipboard | …` on Windows, which is what its messages suggest on
+each — never an argument, and an argument that isn't a NAME is never echoed; kept for the
+API origin it named when it asked); `add <id> --board <board> [--folder] [--x --y]
+[--width --height]` (through
+`scripts/whiteboard.js`'s own bundled validator and board lookup: every node kept, a board
+never opened given the places it is drawn at, the widget beside what is there at its
+manifest's size, an open board adopting it as one undo step); and `remove <id> [--yes]`
+(refused while a board shows it, unless --yes; the folder moved aside to
+`widgets/.removed/`, never deleted, and its keys forgotten). `npm run test:widgets` covers
+the module, the editor's shape and the CLI under plain node; `npm run
+test:widgets:browser` the production renderer with the real store, scheme, guard and
+proxy against a local server.
+
 **Condense replaces an explored discussion.** A rectangle selection of connected text
 nodes, or sibling branches sharing an outside parent, gets **✦ Condense** in the
 floating toolbar; ⌘I dispatches to it for multiple selected nodes. The complete selected
@@ -1999,6 +2214,8 @@ sb.onAnswerStatus((status) => {})    // 'sb:evt:answerStatus' — who can answer
 sb.onOpenSettings(() => {})          // 'sb:evt:openSettings' — App ▸ Settings… (⌘,)
 sb.onDiagramsImageOffer((offer) => {}) // 'sb:evt:diagramsImageOffer' — {guestId, url, fallback, referrer}:
                                      // Add Image to Whiteboard, in the Google Images panel; §4.17
+sb.onWidgetsChanged((change) => {})  // 'sb:evt:widgetsChanged' — {id, reason:'files'|'secret'}: a
+                                     // widget's files or key changed; its frames load again; §4.17
 ```
 
 `sb:evt:edit` exists because a menu accelerator wins over the renderer's keydown, and
@@ -2695,6 +2912,20 @@ guards `index.js` calls) and `videoInfo(id)` (the oEmbed title). The id rule mir
 `lib/diagrams/youtube.ts`, since main cannot require TypeScript; the pure helpers load no
 Electron, so `scripts/test-videos.js` (`npm run test:diagrams`) runs them under plain node
 and checks the two id rules agree. Nothing throws across IPC.
+
+### M16 `widgets.js`
+Whiteboard widgets, main's half (§4.17): the store (`readManifest`, `listIds`,
+`parseManifest`), the scheme (`serve`, `parseWidgetUrl`), the frame guard's verdict
+(`frameNavigation`), the pending file the CLI writes (`setPendingSecret`, `secretWhere`,
+`forgetSecrets`), the proxy's pure parts (`requestUrl`, `requestHeaders`) and
+`createWidgetHost({ safeStorage, fetch?, timeoutMs?, maxBytes? })` — `list`, `state`,
+`setSecret`, `clearSecret`, `importPending`, `fetch`, `watch`, `onChange`, `folder` — which
+index.js makes with Electron's safeStorage and wires to `sb:widgets:*`. It never requires
+Electron, so `scripts/widget.js` and `scripts/test-widgets.js` run it under plain node.
+Every path comes from `config.CONFIG_FILE` when it is needed. Nothing throws across IPC,
+and no key or URL is logged. `src/renderer/widget-sdk.js` is the SDK it serves at
+`__switchboard/widget.js`: a classic script, loaded by the widget, never by the app's own
+page.
 
 ### M15 `sheets.js`, `sheet-worker.js`
 A whiteboard's spreadsheets, read for their panel (§4.17): `info(file, ext)`,

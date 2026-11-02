@@ -45,6 +45,7 @@ import {
   VIDEO_LABEL,
   VIDEO_START_MAX,
   isFlowSizedShape,
+  isFlowWidgetId,
   type DiagramKind,
   type DiagramSpec,
   type FlowEdgeSpec,
@@ -374,6 +375,23 @@ function flowFile(raw: unknown, where: string, shape: "pdf" | "sheet"): string {
   return value
 }
 
+// Switchboard: the widget a "widget" node draws — its id, which names its folder under
+// <config dir>/widgets/ and is the host of its sbwidget:// address, so lowercase (an id
+// given in capitals is read in lowercase). A widget is nothing without one, as a video is
+// nothing without its id. Whether that widget is installed is the face's to say: a board
+// keeps a widget that isn't there yet, and draws a card saying so.
+function widgetId(raw: unknown, where: string): string {
+  if (raw === undefined || raw === null || raw === "") {
+    fail(where, 'a "widget" node needs "widget", the id of a widget (scripts/widget.js list shows them)')
+  }
+  if (typeof raw !== "string") fail(where, '"widget" must be text')
+  const value = raw.trim().toLowerCase()
+  if (!isFlowWidgetId(value)) {
+    fail(where, '"widget" must be a widget id: lowercase letters, digits and dashes, starting with a letter, at most 63 characters')
+  }
+  return value
+}
+
 // A flow with no nodes is allowed: it is what a brand-new diagram is before
 // anything has been put on it, and what is left after deleting every box to
 // start over.
@@ -406,6 +424,8 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
     const file = shape === "pdf" || shape === "sheet" ? flowFile(entry.file, where, shape) : undefined
     // Switchboard: a terminal is labelled with its workspace's id, whatever it says.
     const workspace = shape === "terminal" ? terminalWorkspace(entry.workspace, where) : undefined
+    // Switchboard: the widget a widget draws; with no label of its own it says its id.
+    const widget = shape === "widget" ? widgetId(entry.widget, where) : undefined
     // Switchboard: and a teleport always says "Teleport", and a video with no title
     // says "YouTube video" — never its link. A PDF or a spreadsheet whose file's name
     // gave nothing says "PDF" or "Spreadsheet", as the editor names one.
@@ -421,6 +441,8 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? SHEET_LABEL)
       : shape === "timer"
       ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? "Timer")
+      : widget !== undefined
+      ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? widget)
       : shape === "note"
       ? (optionalText(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText) ?? "")
       : text(entry.label, where, "label", FLOW_BOX_TEXT_MAX_LENGTH, normalizeFlowText)
@@ -489,6 +511,8 @@ function parseFlow(raw: Record<string, unknown>): FlowSpec {
       // image's is; a spreadsheet's card is the one size, as a document's is.
       file,
       timer,
+      // Switchboard: a widget's id. Its size is kept above, as a video's is.
+      widget,
     }
   })
 

@@ -239,6 +239,22 @@ Mac shell script does not become a Windows command automatically.
   `npm run test:timers:browser` checks timer controls and background completion in an
   isolated Electron profile.
 
+  **Widgets** are small live pages on a board — a clock, a weather card, a status panel
+  drawn from an API. Each is a folder of plain HTML, CSS and JavaScript in
+  `~/.switchboard/widgets/<id>/`, drawn in a sandboxed frame inside a node you can move
+  and resize; it follows the board's light or dark look, and reloads by itself as its
+  files are saved. An agent makes one with the `switchboard-create-widget` skill and
+  `scripts/widget.js` (`create`, `check`, `add` to a board); there is no in-app maker. A
+  widget never holds an API key: it asks Switchboard for data, and Switchboard adds the
+  key and talks only to the base URL in its `widget.json`. Give the key yourself — paste
+  it into the widget's **Needs a key** panel, or run
+  `node scripts/widget.js set-secret <id>` and paste it at the hidden prompt (or pipe it
+  from the clipboard: `pbpaste | …` on a Mac, `powershell -NoProfile -Command
+  Get-Clipboard | …` on Windows) — never in a chat. A key is sent only to the API it was
+  given for: a widget whose `widget.json` is pointed somewhere else asks for it again. The
+  node's strip has **Reload**, the key, and **Open folder**. `npm run test:widgets` and
+  `npm run test:widgets:browser` cover them.
+
   **Terminals** float over a whiteboard: **Open terminal…** asks which workspace — the
   whiteboard's own first, then the ones you used recently, then the rest, with a search
   box — and any number can be open at once, one per workspace. Each is that workspace's
@@ -500,7 +516,10 @@ loads nothing until you open it. A board's file keeps a YouTube video as its id,
 it starts and its title, never an address. Its picture comes from YouTube's image
 server (i.ytimg.com) whenever the board is drawn; its title is asked of YouTube once,
 when the video is made (an oEmbed request to www.youtube.com, sent without cookies); and
-YouTube's player, from www.youtube-nocookie.com, loads only when you press Play. Database browsing connects directly to the database
+YouTube's player, from www.youtube-nocookie.com, loads only when you press Play. A
+widget's page is served by the app from `~/.switchboard/widgets/` over its own
+`sbwidget://` scheme and may connect to nothing itself; the requests it asks for are made
+by the main process, to its manifest's base URL alone, with its key added there. Database browsing connects directly to the database
 URI you supply, from the main process; credentials never return to the renderer.
 Dev commands also run in local shells. Claude usage
 uses the direct request described above; local port checks use sockets and system
@@ -510,7 +529,10 @@ The source does not need account credentials. Each computer uses its own Git/Git
 and coding CLI sign-ins. Switchboard's configuration stays in
 `~/.switchboard/config.json`, your whiteboards beside it in
 `~/.switchboard/whiteboards/`, and any API keys for ✦ Answer, encrypted with the
-Keychain, in `~/.switchboard/keys.json`. Diagrams from before Whiteboards were copied
+Keychain, in `~/.switchboard/keys.json`. Widgets are in `~/.switchboard/widgets/`, and
+their keys, encrypted the same way, in `~/.switchboard/widget-secrets.json`; a key handed
+to `scripts/widget.js set-secret` waits in `widget-secrets.pending.json` (readable only by
+you) until the app encrypts it, which it does as soon as it sees it. Diagrams from before Whiteboards were copied
 into `~/.switchboard/whiteboards/` once, and their old folder renamed
 `~/.switchboard/diagrams-before-whiteboards/`, where they still are; nothing reads it
 again but a picture or document the copy missed (a document is copied in when first

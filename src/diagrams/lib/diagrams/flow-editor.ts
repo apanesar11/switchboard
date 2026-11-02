@@ -38,6 +38,7 @@ import {
   TERMINAL_HEADER,
   TERMINAL_MIN_FONT,
   VIDEO_LABEL,
+  WIDGET_LABEL,
   isFlowBoxShape,
   isFlowSizedShape,
   type FlowEdgeSpec,
@@ -119,7 +120,7 @@ export function flowSpecFromCanvas(
   const kept = new Set(nodes.filter((node) => !blank.has(node.id)).map((node) => node.id))
 
   const specNodes: FlowNodeSpec[] = nodes.filter((node) => !blank.has(node.id)).map((node) => {
-    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, answeredIn, detached, workspace, font, minimized, teleportTo, videoId, videoSrc, videoStart, file, timer } =
+    const { label, detail, labelRichText, detailRichText, shape, tone, dashed, textSize, align, bold, italic, src, documentId, size, ai, answeredIn, detached, workspace, font, minimized, teleportTo, videoId, videoSrc, videoStart, file, timer, widget } =
       node.data
     // Switchboard: a pinned terminal is labelled with its workspace, as the
     // validator labels it — a teleport "Teleport", a video with no title
@@ -139,6 +140,9 @@ export function flowSpecFromCanvas(
         ? SHEET_LABEL
         : shape === "timer"
         ? "Timer"
+        // Switchboard: and a widget with no name of its own says its id.
+        : shape === "widget"
+        ? (widget ?? WIDGET_LABEL)
         : UNTITLED_FLOW_LABEL)
     const cleanDetail = cleanBoxText(detail)
     return {
@@ -189,6 +193,8 @@ export function flowSpecFromCanvas(
       // Switchboard: the file a PDF or a spreadsheet shows.
       file: shape === "pdf" || shape === "sheet" ? file : undefined,
       timer: shape === "timer" ? { ...(timer ?? createFlowTimer()) } : undefined,
+      // Switchboard: the widget a widget draws.
+      widget: shape === "widget" ? widget : undefined,
     }
   })
 
@@ -1057,7 +1063,7 @@ export function tidyFlowTree(
   const pinned = pinImages
     ? new Set(
         boxes
-          .filter((box) => box.shape === "image" || box.shape === "video" || box.shape === "pdf" || box.shape === "timer")
+          .filter((box) => box.shape === "image" || box.shape === "video" || box.shape === "pdf" || box.shape === "timer" || box.shape === "widget")
           .map((box) => box.id),
       )
     : new Set<string>()

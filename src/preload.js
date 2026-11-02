@@ -185,6 +185,27 @@ contextBridge.exposeInMainWorld('sb', {
   diagramsSheetInfo: src => ipcRenderer.invoke('sb:diagrams:sheetInfo', src),
   diagramsSheetRows: (src, sheet, start, count) => ipcRenderer.invoke('sb:diagrams:sheetRows', src, sheet, start, count),
   diagramsSheetFind: (src, sheet, query, limit) => ipcRenderer.invoke('sb:diagrams:sheetFind', src, sheet, query, limit),
+  // Widgets on a whiteboard (§4.17): a folder of HTML main serves over sbwidget:// into a
+  // sandboxed iframe. State: { id, name, entry, size, minSize, apiHost, secretName,
+  // hasSecret, secretEncrypted, secretLast4, secretFor, keychain, error, code } — never a
+  // key; code 'missing' for a widget that isn't installed, 'manifest' for a widget.json
+  // that's wrong; secretFor the host a kept key was given for when widget.json now names
+  // another API (the key isn't sent there until it is given again).
+  widgetsList: () => ipcRenderer.invoke('sb:widgets:list'),
+  widgetsState: id => ipcRenderer.invoke('sb:widgets:state', id),
+  // The key the widget's manifest names, from its "Needs a key" panel: encrypted with the
+  // system's keychain, kept for the API widget.json names now, and never handed back — the
+  // answer is the widget's state.
+  widgetsSetSecret: (id, value) => ipcRenderer.invoke('sb:widgets:setSecret', id, value),
+  widgetsClearSecret: id => ipcRenderer.invoke('sb:widgets:clearSecret', id),
+  widgetsOpenFolder: id => ipcRenderer.invoke('sb:widgets:openFolder', id),
+  // A widget's request, relayed from its iframe: { id, path, method, headers, query, body }
+  // → { ok, status, statusText, headers, body } or { ok:false, error, code? } (code
+  // 'needs-secret' when no key is kept). Main attaches the key and keeps to the manifest's
+  // api.baseUrl.
+  widgetsFetch: req => ipcRenderer.invoke('sb:widgets:fetch', req || {}),
+  // A widget's files or keys changed: { id, reason: 'files' | 'secret' }.
+  onWidgetsChanged: cb => subscribe('sb:evt:widgetsChanged', cb),
 
   // ✦ Answer (§4.18) — who answers a box's question on this Mac, and the asking.
   // answerStatus: { ok, settings, providers, keysSafe }; `opts.fresh` looks for the

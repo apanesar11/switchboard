@@ -43,7 +43,7 @@ esbuild.buildSync({
   entryPoints: [path.join(__dirname, '..', 'src', 'diagrams', 'lib', 'diagrams', 'types.ts')],
   outfile: typesFile, bundle: true, format: 'cjs', platform: 'node', logLevel: 'error',
 });
-const { FLOW_VIDEO_DEFAULT_SIZE, FLOW_PDF_DEFAULT_SIZE, FLOW_SHEET_SIZE } = require(typesFile);
+const { FLOW_VIDEO_DEFAULT_SIZE, FLOW_PDF_DEFAULT_SIZE, FLOW_SHEET_SIZE, FLOW_WIDGET_DEFAULT_SIZE } = require(typesFile);
 
 after(() => {
   if (previousConfig === undefined) delete process.env.SWITCHBOARD_CONFIG;
@@ -485,6 +485,28 @@ test('a PDF in the thumbnail is the size it was given, else the editor\'s portra
   const fileThumb = (await wb.create({ folderId: null, name: 'Thumb files', spec: files })).data.thumb;
   assert.equal(fileThumb.length, 3);
   assert.deepEqual(fileThumb, (await wb.create({ folderId: null, name: 'Thumb file pictures', spec: pictures })).data.thumb);
+});
+
+test('a widget in the thumbnail is the size it was given, else the editor\'s default', async () => {
+  // The editor's size, as main mirrors it: 480×300, its 30px strip included.
+  assert.deepEqual(FLOW_WIDGET_DEFAULT_SIZE, { width: 480, height: 300 });
+  const shown = {
+    kind: 'flow',
+    nodes: [
+      { id: 'w', label: 'Weather', shape: 'widget', widget: 'weather', position: { x: 0, y: 0 } },
+      { id: 'c', label: 'Desk clock', shape: 'widget', widget: 'desk-clock', size: { width: 320, height: 200 }, position: { x: 600, y: 80 } },
+    ],
+    edges: [],
+  };
+  const picture = (id, size, position) => ({ id, label: 'Picture', shape: 'image', src: 'https://example.com/fictional.png', size, position });
+  const pictures = {
+    kind: 'flow',
+    nodes: [picture('w', FLOW_WIDGET_DEFAULT_SIZE, { x: 0, y: 0 }), picture('c', { width: 320, height: 200 }, { x: 600, y: 80 })],
+    edges: [],
+  };
+  const widgetThumb = (await wb.create({ folderId: null, name: 'Thumb widgets', spec: shown })).data.thumb;
+  assert.equal(widgetThumb.length, 2);
+  assert.deepEqual(widgetThumb, (await wb.create({ folderId: null, name: 'Thumb widget pictures', spec: pictures })).data.thumb);
 });
 
 // ---------------------------------------------------------------------------

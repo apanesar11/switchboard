@@ -76,6 +76,13 @@
 // a panel beside the canvas (FilePanel.tsx) — Chromium's own viewer for a PDF, a grid
 // to page through for a spreadsheet — the one panel there with a document's: opening
 // either puts the other away. Its name is changed there, as a document's title is.
+// Switchboard: a widget ("widget") is a folder of HTML kept on this Mac, drawn live in a
+// sandboxed frame inside its node (DiagramNodes.tsx WidgetFace), under a strip that
+// drags it; resized from its corners and edges, never smaller than its widget.json
+// allows. An agent puts one on a board (scripts/widget.js add); here it is moved, sized,
+// copied, deleted and undone like any other node. While the canvas has a gesture under
+// way — a press, a drag over the window, a scroll that began on the canvas — its frame
+// lets go of the pointer, so the gesture carries on across it.
 //
 // It edits the SAME spec every other part of the Diagrams feature reads.
 // layoutDiagram() turns the spec into the canvas, and flowSpecFromCanvas()
@@ -257,6 +264,7 @@ import {
   FLOW_TERMINAL_FLOOR,
   FLOW_TERMINAL_MIN_SIZE,
   FLOW_TIMER_MIN_SIZE,
+  FLOW_WIDGET_MIN_SIZE,
   FLOW_TEXT_ALIGNS,
   FLOW_TEXT_SIZES,
   FLOW_TONES,
@@ -365,8 +373,10 @@ import {
   TONE_STYLES,
   VideoBoardContext,
   VideoFace,
+  WidgetFace,
   WorkspaceTag,
   forgetVideoPlace,
+  useWidget,
   videoPlaceKey,
 } from "./DiagramNodes"
 import { PickerGlyph, WorkspacePicker, workspaceDir, workspaceGone } from "./WorkspacePicker"
@@ -788,7 +798,9 @@ function hasText(box: FlowBoxNodeData): boolean {
     box.shape !== "video" &&
     box.shape !== "pdf" &&
     box.shape !== "sheet" &&
-    box.shape !== "timer"
+    box.shape !== "timer" &&
+    // Switchboard: nor a widget, whose label is its name and whose words are its page's.
+    box.shape !== "widget"
   )
 }
 
@@ -944,6 +956,8 @@ function clipboardWords(box: FlowBoxNodeData): string {
         // Switchboard: and a PDF or a spreadsheet with no name says what it is.
         : box.shape === "timer"
           ? "Timer"
+          : box.shape === "widget"
+          ? (box.widget ?? "Widget")
           : box.shape === "pdf"
           ? PDF_LABEL
           : box.shape === "sheet"
@@ -1271,10 +1285,13 @@ function Resizer({
   id,
   box,
   editor,
+  least: given,
 }: {
   id: string
   box: FlowBoxNodeData
   editor: EditorContextValue
+  /** Switchboard: the least size, where the node's kind says it — a widget's widget.json. */
+  least?: FlowSize
 }) {
   // Kept the same between renders: the resize controls rebuild their drag
   // handling whenever these change, which every step of a resize would
@@ -1328,17 +1345,20 @@ function Resizer({
   // Switchboard: a PDF keeps its proportions as a picture does, and never gets so small
   // that its strip is all there is of it.
   const least =
-    box.shape === "image"
+    given ??
+    (box.shape === "image"
       ? { width: 24, height: 24 }
       : box.shape === "timer"
         ? FLOW_TIMER_MIN_SIZE
+        : box.shape === "widget"
+        ? FLOW_WIDGET_MIN_SIZE
         : box.shape === "pdf"
         ? { width: 96, height: PDF_BAR + 48 }
         : box.shape === "diamond"
           ? FLOW_DIAMOND_MIN_SIZE
           : isFlowBoxShape(box.shape)
             ? FLOW_BOX_MIN_SIZE
-            : { width: 80, height: 48 }
+            : { width: 80, height: 48 })
   return (
     <NodeResizer
       isVisible
@@ -1361,7 +1381,59 @@ function EditableFlowNode(props: NodeProps) {
   const box = props.data as FlowBoxNodeData
   if (box.shape === "terminal") return <TerminalNode id={props.id} box={box} selected={Boolean(props.selected)} />
   if (box.shape === "video") return <VideoNode id={props.id} box={box} selected={Boolean(props.selected)} />
+  if (box.shape === "widget") return <WidgetNode id={props.id} box={box} selected={Boolean(props.selected)} />
   return <EditableBoxNode {...props} />
+}
+
+/**
+ * Switchboard: a widget on the board — its face (DiagramNodes.tsx WidgetFace) inside the
+ * editor's outline, dots and fold badge, with every corner and edge resizing it while it
+ * is the only thing selected, never smaller than its widget.json's minSize (or
+ * FLOW_WIDGET_MIN_SIZE). A click on its page is the page's; its strip selects and drags it.
+ */
+function WidgetNode({ id, box, selected }: { id: string; box: FlowBoxNodeData; selected: boolean }) {
+  const editor = useContext(EditorContext)
+  const connecting = useConnection((connection) => connection.inProgress)
+  const selectionRect = useStore((state) => state.nodesSelectionActive)
+  const interactive = editor?.interactive ?? true
+  const { state } = useWidget(box.widget)
+  const resizable = editor !== null && selected && editor.soleNodeId === id && !selectionRect && !connecting
+  const least = state?.minSize ?? FLOW_WIDGET_MIN_SIZE
+
+  return (
+    <div className={cx("relative size-full", interactive && "group")}>
+      <WidgetFace widget={box.widget} label={box.label} interactive={interactive} />
+      {resizable ? <Resizer id={id} box={box} editor={editor} least={least} /> : null}
+      <div
+        aria-hidden="true"
+        className={cx(
+          "pointer-events-none absolute -inset-1 rounded-[13px] border-2 transition-opacity",
+          selected ? "border-brand opacity-100" : "border-brand/40 opacity-0 group-hover:opacity-100",
+        )}
+      />
+      {editor !== null && (editor.folds.get(id)?.arrows ?? 0) > 0 ? (
+        <FoldButton
+          fold={editor.folds.get(id)!}
+          label={box.label}
+          disabled={!interactive}
+          onClick={() => editor.expandFold(id)}
+        />
+      ) : null}
+      {FLOW_SIDES.map((side) => (
+        <Handle
+          key={side}
+          id={side}
+          type="source"
+          position={FLOW_SIDE_POSITIONS[side]}
+          style={HANDLE_STYLE}
+          className={cx(
+            "transition-opacity",
+            selected || connecting ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+          )}
+        />
+      ))}
+    </div>
+  )
 }
 
 /**
@@ -3550,7 +3622,9 @@ function FlowEditorCanvas({
       from.shape === "timer" ||
       from.shape === "video" ||
       from.shape === "pdf" ||
-      from.shape === "sheet"
+      from.shape === "sheet" ||
+      // Switchboard: and after a widget, which is its own page, not a step.
+      from.shape === "widget"
         ? plainBox({ label: "", shape: "rounded", tone: "default" })
         : {
             ...from,
@@ -3872,6 +3946,18 @@ function FlowEditorCanvas({
     if (!wrapper) return
     let pressed = false
     let dragged = 0
+    // Switchboard: a scroll that began on the canvas (a pan, a pinch) carries on across a
+    // widget rather than ending in its page: its wrapper is marked data-flow-wheel until
+    // the wheel has been still a moment, and a widget's frame lets go of the pointer
+    // meanwhile (styles.css). A scroll that begins over the page is the page's — the
+    // wrapper never hears it.
+    let wheelTimer: ReturnType<typeof setTimeout> | undefined
+    const wheel = () => {
+      if (!wrapper.hasAttribute("data-flow-wheel")) wrapper.setAttribute("data-flow-wheel", "")
+      clearTimeout(wheelTimer)
+      wheelTimer = setTimeout(() => wrapper.removeAttribute("data-flow-wheel"), 300)
+    }
+    wrapper.addEventListener("wheel", wheel, { capture: true, passive: true })
     const mark = () => wrapper.toggleAttribute("data-flow-gesture", pressed || dragged > 0)
     // A press means no drag is on its way, whatever the count missed.
     const press = () => { pressed = true; dragged = 0; mark() }
@@ -3894,7 +3980,10 @@ function FlowEditorCanvas({
       window.removeEventListener("dragleave", leave, true)
       window.removeEventListener("drop", over, true)
       window.removeEventListener("dragend", over, true)
+      wrapper.removeEventListener("wheel", wheel, { capture: true })
+      clearTimeout(wheelTimer)
       wrapper.removeAttribute("data-flow-gesture")
+      wrapper.removeAttribute("data-flow-wheel")
     }
   }, [])
 
@@ -6892,7 +6981,9 @@ function BoxBar({
       box.shape !== "video" &&
       box.shape !== "pdf" &&
       box.shape !== "sheet" &&
-      box.shape !== "timer",
+      box.shape !== "timer" &&
+      // Switchboard: nor a widget, whose colours are its page's own.
+      box.shape !== "widget",
   )
   // Swatches drawn as notes or ink only when every node selected is one.
   const swatch: "box" | "note" | "text" =

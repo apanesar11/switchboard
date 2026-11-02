@@ -176,6 +176,8 @@ test('a popup is the player\'s, another page\'s from the web, or the app\'s own'
     { url: 'http://www.youtube-nocookie.com/', policy: 'strict-origin-when-cross-origin' },
     'https://www.youtube-nocookie.com.evil.test/',
   ]) assert.equal(videos.popupSource(web), 'web', JSON.stringify(web));
+  // A whiteboard widget's page is no more the app than a page from the web is.
+  assert.equal(videos.popupSource({ url: 'sbwidget://weather/index.html', policy: 'strict-origin-when-cross-origin' }), 'web');
   // No referrer under a policy the app's page never sets: a page that hid where it was.
   for (const policy of ['no-referrer', 'same-origin', 'strict-origin', 'origin', 'no-referrer-when-downgrade']) {
     assert.equal(videos.popupSource({ url: '', policy }), 'web', policy);
@@ -323,6 +325,15 @@ test('any other page from the web in the window gets nothing at all', () => {
     for (const permission of ['fullscreen', 'notifications', 'openExternal', 'clipboard-sanitized-write']) {
       assert.equal(videos.permissionAllowed(permission, url), false, permission + ' from ' + url);
     }
+  }
+});
+
+test('a whiteboard widget\'s page gets nothing at all, media included', () => {
+  for (const url of ['sbwidget://weather/index.html', 'sbwidget://weather', 'sbwidget://desk-clock/sub/page.html']) {
+    for (const permission of ['fullscreen', 'notifications', 'openExternal', 'clipboard-sanitized-write', 'clipboard-read', 'geolocation']) {
+      assert.equal(videos.permissionAllowed(permission, url), false, permission + ' from ' + url);
+    }
+    assert.equal(videos.permissionAllowed('media', url, { isMainFrame: true, mediaTypes: ['audio', 'video'] }), false, url);
   }
 });
 

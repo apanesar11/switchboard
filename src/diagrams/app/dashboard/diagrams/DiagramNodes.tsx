@@ -24,16 +24,27 @@
 // strip with its name (PdfFace), and a spreadsheet as a card, as a document is. Either
 // opens beside the canvas on a double-click: the editor's FilePanel, or the read-only
 // canvas's, which can't rename it.
+// A widget draws here for both canvases too (WidgetFace): a strip that drags it, with
+// its name, Reload, its key and its folder, over the widget's own page in a sandboxed
+// frame. The face relays the page's requests to main (which holds the key) and answers
+// them, keeps the page told of the board's theme and its own size, and stands in with a
+// card for a widget that isn't installed, a widget.json that is wrong, or a key not yet
+// given — the "Needs a key" panel, whose key goes to main once and never to the frame.
 
-import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react"
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
 import { Handle, Position, getViewportForBounds, useReactFlow, useStore, useStoreApi, type NodeProps, type Viewport } from "@xyflow/react"
 import {
+  RiApps2Line,
   RiDoorOpenLine,
+  RiErrorWarningLine,
   RiExternalLinkLine,
   RiFileExcel2Line,
   RiFilePdf2Line,
+  RiFolderOpenLine,
   RiImageLine,
+  RiKey2Line,
   RiPlayFill,
+  RiRefreshLine,
   RiSparkling2Fill,
   RiStopFill,
   RiFileTextLine,
@@ -41,7 +52,7 @@ import {
   RiYoutubeFill,
 } from "@remixicon/react"
 import { toast } from "@/components/Toast"
-import { call } from "@/lib/bridge"
+import { call, listen, type WidgetState, type WidgetsChange } from "@/lib/bridge"
 import { cx, focusRing } from "@/lib/utils"
 import {
   FLOW_TEXT_METRICS,
@@ -58,7 +69,10 @@ import {
   TERMINAL_HEADER,
   VIDEO_BAR,
   VIDEO_LABEL,
+  WIDGET_BAR,
+  WIDGET_LABEL,
   isFlowBoxShape,
+  isFlowWidgetId,
   type FlowBoxShape,
   type FlowSide,
   type FlowTextAlign,
@@ -349,7 +363,9 @@ export function teleportDestinationName(box: FlowBoxNodeData | undefined): strin
   if (box.shape === "teleport") return TELEPORT_LABEL
   const words = box.label.replace(/\s+/g, " ").trim()
   if (words) return words
-  return box.shape === "image"
+  return box.shape === "widget"
+    ? WIDGET_LABEL
+    : box.shape === "image"
     ? "Image"
     : box.shape === "video"
       ? "Video"
@@ -862,6 +878,17 @@ export function FlowBox({
     )
   }
 
+  // Switchboard: a widget, live in its frame. This is the read-only canvas's; the editor
+  // draws its own (FlowEditor.tsx WidgetNode) around the same face, with resize handles.
+  if (shape === "widget") {
+    return (
+      <div className={cx("relative size-full", className)}>
+        <WidgetFace widget={box.widget} label={label} />
+        {children}
+      </div>
+    )
+  }
+
   // Switchboard: a YouTube video, played where it is. This is the read-only canvas's;
   // the editor draws its own (FlowEditor.tsx VideoNode), whose playing is the editor's.
   if (shape === "video") {
@@ -991,6 +1018,557 @@ function PdfFace({ cover, name }: { cover?: string; name: string }) {
         <span className="min-w-0 flex-1 truncate text-xs font-medium text-gray-900 dark:text-gray-50">{name}</span>
       </div>
     </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Switchboard: widgets
+// ─────────────────────────────────────────────────────────────────────
+
+/** The protocol version every widget message carries (src/renderer/widget-sdk.js). */
+const WIDGET_PROTOCOL = 1
+
+/**
+ * What the faces know of one widget, shared by every face that shows it (two boards, or a
+ * copy pasted beside it): main's word on it (`state`, or `error` when main couldn't say),
+ * and `generation`, which moves whenever its files or its key change — every face then
+ * loads its frame again.
+ */
+export type WidgetEntry = { state: WidgetState | null; error: string | null; generation: number }
+
+const NO_WIDGET: WidgetEntry = { state: null, error: null, generation: 0 }
+const widgetEntries = new Map<string, WidgetEntry>()
+const widgetWatchers = new Map<string, Set<() => void>>()
+const widgetLoading = new Set<string>()
+let widgetEventsHeard = false
+
+function tellWidget(id: string) {
+  for (const watcher of Array.from(widgetWatchers.get(id) ?? [])) watcher()
+}
+
+/** Asks main for the widget's state again; every face showing it redraws with the answer. */
+async function loadWidget(id: string) {
+  if (widgetLoading.has(id)) return
+  widgetLoading.add(id)
+  const result = await call("widgetsState", id)
+  widgetLoading.delete(id)
+  const before = widgetEntries.get(id) ?? NO_WIDGET
+  widgetEntries.set(id, result.ok
+    ? { ...before, state: result.data, error: null }
+    : { ...before, state: null, error: result.error })
+  tellWidget(id)
+}
+
+/** Loads every face of the widget again — its frame, and its state. */
+function bumpWidget(id: string) {
+  const before = widgetEntries.get(id) ?? NO_WIDGET
+  widgetEntries.set(id, { ...before, generation: before.generation + 1 })
+  tellWidget(id)
+  void loadWidget(id)
+}
+
+/**
+ * Main says a widget's files or key changed (sb:evt:widgetsChanged): an agent saving its
+ * page, a key set in a terminal or in a panel. Heard once for the whole bundle, and only
+ * for widgets a face is showing.
+ */
+function hearWidgetChanges() {
+  if (widgetEventsHeard) return
+  widgetEventsHeard = true
+  listen("onWidgetsChanged", (change: WidgetsChange) => {
+    if (change && typeof change.id === "string" && widgetEntries.has(change.id)) bumpWidget(change.id)
+  })
+}
+
+/**
+ * Switchboard: the widget `id` as the faces share it — its state from main, loaded the
+ * first time anything asks, and kept up to date as its files and key change. Exported for
+ * the editor's widget node, whose resize handles keep to the widget's least size.
+ */
+export function useWidget(id: string | null | undefined): WidgetEntry {
+  const subscribe = useMemo(() => (onChange: () => void) => {
+    if (!id) return () => {}
+    hearWidgetChanges()
+    let watchers = widgetWatchers.get(id)
+    if (!watchers) widgetWatchers.set(id, (watchers = new Set()))
+    watchers.add(onChange)
+    if (!widgetEntries.has(id)) {
+      widgetEntries.set(id, NO_WIDGET)
+      void loadWidget(id)
+    }
+    return () => {
+      watchers.delete(onChange)
+      if (watchers.size === 0) widgetWatchers.delete(id)
+    }
+  }, [id])
+  return useSyncExternalStore(subscribe, () => (id ? widgetEntries.get(id) ?? NO_WIDGET : NO_WIDGET), () => NO_WIDGET)
+}
+
+// The board's theme: View ▸ Terminal appearance, which term-theme.js keeps on <html> as
+// data-term-theme — the same word the canvas's own dark: styles follow.
+const themeWatchers = new Set<() => void>()
+let themeObserver: MutationObserver | null = null
+
+function boardTheme(): "light" | "dark" {
+  return document.documentElement.getAttribute("data-term-theme") === "dark" ? "dark" : "light"
+}
+
+function watchTheme(onChange: () => void) {
+  themeWatchers.add(onChange)
+  if (!themeObserver) {
+    themeObserver = new MutationObserver(() => themeWatchers.forEach((watcher) => watcher()))
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-term-theme"] })
+  }
+  return () => {
+    themeWatchers.delete(onChange)
+    if (themeWatchers.size === 0 && themeObserver) {
+      themeObserver.disconnect()
+      themeObserver = null
+    }
+  }
+}
+
+/** Switchboard: whether the board is drawn light or dark, as the canvas is. */
+export function useBoardTheme(): "light" | "dark" {
+  return useSyncExternalStore(watchTheme, boardTheme, () => "light")
+}
+
+/** A message from a widget's page, as the SDK posts one — or null for anything else. */
+function widgetMessage(data: unknown): { type: string; [key: string]: unknown } | null {
+  if (!data || typeof data !== "object") return null
+  const message = data as Record<string, unknown>
+  if (message.sb !== "widget" || message.v !== WIDGET_PROTOCOL || typeof message.type !== "string") return null
+  return message as { type: string }
+}
+
+/**
+ * Switchboard: a widget's face, on either canvas. A strip across the top that drags the
+ * node, with the widget's name and its buttons — Reload, the key (when its widget.json
+ * names one) and Open folder — and under it the widget's own page, in an iframe:
+ * sandbox "allow-scripts allow-same-origin" and nothing else (no popups, no top
+ * navigation, no forms, no downloads), no permissions (main refuses them all to
+ * sbwidget:), no referrer, its address sbwidget://<id>/<entry> with the board's theme in
+ * its query so the first paint is right.
+ *
+ * The page talks to the board through the SDK's messages, and only messages from that
+ * very frame's window and from the widget's own origin are read. A request it makes
+ * (`fetch`) is relayed to main (sb:widgets:fetch), which reads the manifest, attaches the
+ * key and keeps to its base URL; the answer goes back to the window that asked, posted to
+ * the widget's origin alone. The page is told of the theme and of its size as they
+ * change.
+ *
+ * In place of the page: a card for a widget that isn't installed, or whose widget.json is
+ * wrong (with main's sentence); and the "Needs a key" panel when the manifest names a key
+ * that isn't kept, or a request said so — or, from the key button, to replace or forget
+ * one. Every press over the page is the page's, except while the canvas has a gesture of
+ * its own under way (styles.css: [data-flow-gesture], [data-flow-wheel]) or the hand tool
+ * is out (`interactive` false).
+ */
+export function WidgetFace({
+  widget,
+  label,
+  interactive = true,
+}: {
+  widget?: string
+  label: string
+  /** False while the editor's hand tool is out: the page takes no pointer then. */
+  interactive?: boolean
+}) {
+  const id = isFlowWidgetId(widget) ? widget : null
+  const entry = useWidget(id)
+  const theme = useBoardTheme()
+  const state = entry.state
+  const [keyOpen, setKeyOpen] = useState(false)
+  const [keyAsked, setKeyAsked] = useState(false)
+  const [own, setOwn] = useState(0)
+  const frameRef = useRef<HTMLIFrameElement>(null)
+  // Whether the page now in the frame has said it is ready. (An answer that lands after
+  // its page was left goes to the next page, which ignores it: the SDK numbers each page's
+  // requests from a random start.)
+  const readyRef = useRef(false)
+
+  const name = (state && !state.error ? state.name : null) ?? (label.replace(/\s+/g, " ").trim() || id || WIDGET_LABEL)
+  const origin = id ? `sbwidget://${id}` : ""
+  const missing = state?.code === "missing"
+  const broken = !!state?.error && !missing
+  const needsKey = !!state && !state.error && !!state.secretName && (!state.hasSecret || keyAsked)
+  // The widget's id in it too: a node switched to another widget (an agent's update, or an
+  // Undo of one) gets a new frame, never the old one sent to the other widget's address —
+  // which main refuses, as a widget's frame keeps to its own id.
+  const frameKey = `${id ?? ""}:${entry.generation}:${own}`
+  // Whether the page is on show now. The key panel takes the frame out, so the page put
+  // back after it is a new frame, as one with a new frameKey is.
+  const framed = !!id && !entry.error && !!state && !state.error && !needsKey && !keyOpen
+  const live = useRef({ id, name, theme, origin })
+  live.current = { id, name, theme, origin }
+
+  // A key saved or forgotten moves the generation: the next request is asked afresh. A
+  // node switched to another widget starts from that widget's own state.
+  useEffect(() => {
+    setKeyAsked(false)
+  }, [id, entry.generation])
+  useEffect(() => {
+    setKeyOpen(false)
+  }, [id])
+  useEffect(() => {
+    readyRef.current = false
+  }, [frameKey, framed])
+
+  // Built once per frame: a theme change after that is a message, never a new address.
+  const src = useMemo(
+    () => (id && state?.entry ? `${origin}/${state.entry.split("/").map(encodeURIComponent).join("/")}?theme=${live.current.theme}` : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- frameKey is what loads a new page
+    [id, origin, state?.entry, frameKey],
+  )
+
+  function post(message: Record<string, unknown>) {
+    const win = frameRef.current?.contentWindow
+    if (!win || !live.current.origin) return
+    try {
+      win.postMessage({ ...message, sb: "host", v: WIDGET_PROTOCOL }, live.current.origin)
+    } catch {
+      // The page went as it was being answered.
+    }
+  }
+
+  function frameSize() {
+    const frame = frameRef.current
+    return { width: frame?.clientWidth ?? 0, height: frame?.clientHeight ?? 0 }
+  }
+
+  function init() {
+    post({ type: "init", widget: { id: live.current.id, name: live.current.name }, theme: live.current.theme, size: frameSize() })
+  }
+
+  async function relay(message: Record<string, unknown>) {
+    const requestId = message.id
+    if (typeof requestId !== "number" || !Number.isFinite(requestId) || !live.current.id) return
+    const ask = message.init && typeof message.init === "object" ? (message.init as Record<string, unknown>) : {}
+    const result = await call("widgetsFetch", {
+      id: live.current.id,
+      path: typeof message.path === "string" ? message.path : "",
+      method: typeof ask.method === "string" ? ask.method : undefined,
+      headers: ask.headers && typeof ask.headers === "object" ? (ask.headers as Record<string, string>) : undefined,
+      query: ask.query && typeof ask.query === "object" ? (ask.query as Record<string, unknown>) : undefined,
+      body: typeof ask.body === "string" ? ask.body : undefined,
+    })
+    if (result.ok) {
+      post({
+        type: "response",
+        id: requestId,
+        ok: result.status >= 200 && result.status < 300,
+        status: result.status,
+        statusText: result.statusText,
+        headers: result.headers,
+        body: result.body,
+      })
+      return
+    }
+    const code = "code" in result ? result.code : undefined
+    post({ type: "response", id: requestId, error: result.error, code })
+    if (code === "needs-secret") setKeyAsked(true)
+  }
+
+  useEffect(() => {
+    if (!id) return
+    function hear(event: MessageEvent) {
+      const frame = frameRef.current
+      // Only this frame's own window, and only from the widget's origin: the page gets
+      // messages from other widgets and players, and from anything that cares to post.
+      if (!frame || event.source === null || event.source !== frame.contentWindow) return
+      if (event.origin !== live.current.origin) return
+      const message = widgetMessage(event.data)
+      if (!message) return
+      if (message.type === "ready") {
+        readyRef.current = true
+        init()
+      } else if (message.type === "fetch") {
+        void relay(message)
+      }
+    }
+    window.addEventListener("message", hear)
+    return () => window.removeEventListener("message", hear)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- init and relay read live.current
+  }, [id])
+
+  useEffect(() => {
+    if (readyRef.current) post({ type: "theme", theme })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- post reads live.current
+  }, [theme])
+
+  // The frame's own size, in canvas pixels (a zoom changes nothing the page lays out by).
+  useEffect(() => {
+    const frame = frameRef.current
+    if (!frame || typeof ResizeObserver === "undefined") return
+    let last = ""
+    const observer = new ResizeObserver(() => {
+      const size = frameSize()
+      const key = `${size.width}x${size.height}`
+      if (key === last || !readyRef.current) return
+      last = key
+      post({ type: "resize", size })
+    })
+    observer.observe(frame)
+    return () => observer.disconnect()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- a new frame is a new element
+  }, [frameKey, src, framed])
+
+  // Reload: a page that has said it is ready is asked to refresh its data (onRefresh, or
+  // the SDK loads it again); any other — or with ⌥ held — is loaded afresh in a new frame.
+  function reload(whole: boolean) {
+    if (!whole && readyRef.current && frameRef.current?.contentWindow) post({ type: "refresh" })
+    else setOwn((count) => count + 1)
+    if (id) void loadWidget(id)
+  }
+
+  async function openFolder() {
+    if (!id) return
+    const result = await call("widgetsOpenFolder", id)
+    if (!result.ok) toast({ title: "Couldn't open the widget's folder", description: result.error, variant: "error" })
+  }
+
+  // A button in the strip: never a drag, nor a click on the node beneath it — as a
+  // video's strip's are.
+  const action = (what: string, run: (event: React.MouseEvent) => void, icon: React.ReactNode, pressed?: boolean) => (
+    <button
+      type="button"
+      aria-label={what}
+      title={what}
+      aria-pressed={pressed}
+      disabled={!interactive}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation()
+        run(event)
+      }}
+      onDoubleClick={(event) => event.stopPropagation()}
+      className={cx("nodrag nopan flow-widget-btn", focusRing)}
+    >
+      {icon}
+    </button>
+  )
+
+  let body: React.ReactNode
+  if (!id) {
+    body = <WidgetCard title="No widget" detail="This node names no widget." />
+  } else if (entry.error) {
+    body = <WidgetCard tone="error" title="This widget can't be shown" detail={entry.error} />
+  } else if (!state) {
+    body = null
+  } else if (missing) {
+    body = (
+      <WidgetCard
+        title="This widget isn't installed"
+        code={id}
+        hint={`Make it with node scripts/widget.js create ${id}`}
+      />
+    )
+  } else if (broken) {
+    body = (
+      <WidgetCard
+        tone="error"
+        title="This widget can't be shown"
+        detail={state.error ?? ""}
+        hint="Fix it in the widget's folder — it loads again as you save."
+      />
+    )
+  } else if (needsKey || keyOpen) {
+    body = (
+      <WidgetKeyPanel
+        state={state}
+        replacing={!needsKey}
+        disabled={!interactive}
+        onDone={() => setKeyOpen(false)}
+      />
+    )
+  } else if (framed && src) {
+    body = (
+      // nodrag, and not nopan or nowheel: a wheel over the page goes to the page anyway (it
+      // is another document), and only reaches this wrapper while the frame has let go of
+      // the pointer — a scroll that began on the canvas, or the hand tool — and then it is
+      // the canvas's, to go on panning.
+      <div className={cx("flow-widget-page nodrag", !interactive && "flow-widget-still")}>
+        <iframe
+          key={frameKey}
+          ref={frameRef}
+          className="flow-widget-frame"
+          src={src}
+          title={name}
+          sandbox="allow-scripts allow-same-origin"
+          referrerPolicy="no-referrer"
+          onLoad={init}
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div className="flow-widget" data-widget={id ?? ""} role="group" aria-label={name}>
+      <div className="flow-widget-head" style={{ height: WIDGET_BAR }}>
+        <RiApps2Line className="flow-widget-glyph" aria-hidden="true" />
+        <b title={name}>{name}</b>
+        <span className="flow-widget-actions">
+          {id && state && !state.error
+            ? action("Reload · ⌥-click loads it afresh", (event) => reload(event.altKey), <RiRefreshLine className="size-3.5" aria-hidden="true" />)
+            : null}
+          {state?.secretName && !state.error
+            ? action(
+                state.hasSecret ? `Key · ${state.secretName}` : `Add the ${state.secretName} key`,
+                () => setKeyOpen((open) => !open),
+                <RiKey2Line className="size-3.5" aria-hidden="true" />,
+                keyOpen || needsKey,
+              )
+            : null}
+          {id && state && !missing
+            ? action("Open the widget's folder", () => void openFolder(), <RiFolderOpenLine className="size-3.5" aria-hidden="true" />)
+            : null}
+        </span>
+      </div>
+      <div className="flow-widget-body">{body}</div>
+    </div>
+  )
+}
+
+/** What stands in for a widget's page when there is none to show. */
+function WidgetCard({ title, detail, code, hint, tone }: { title: string; detail?: string; code?: string; hint?: string; tone?: "error" }) {
+  return (
+    <div className="flow-widget-card" data-tone={tone ?? "plain"} role="status">
+      {tone === "error" ? (
+        <RiErrorWarningLine className="size-6 shrink-0" aria-hidden="true" />
+      ) : (
+        <RiApps2Line className="size-6 shrink-0" aria-hidden="true" />
+      )}
+      <b>{title}</b>
+      {code ? <code>{code}</code> : null}
+      {detail ? <p>{detail}</p> : null}
+      {hint ? <small>{hint}</small> : null}
+    </div>
+  )
+}
+
+/**
+ * The widget's key, asked for in place of its page: a password field and Save, which hands
+ * the key to main (sb:widgets:setSecret) to keep encrypted — the one time it crosses, and
+ * never into the frame. `replacing` is the key button's: it also offers Forget and Cancel.
+ * main then says the widget's key changed, and every face of it loads again.
+ */
+function WidgetKeyPanel({
+  state,
+  replacing,
+  disabled,
+  onDone,
+}: {
+  state: WidgetState
+  replacing: boolean
+  disabled: boolean
+  onDone: () => void
+}) {
+  const [value, setValue] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const fieldId = `flow-widget-key-${state.id}`
+
+  async function save(event: React.FormEvent) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (busy || disabled) return
+    setBusy(true)
+    const result = await call("widgetsSetSecret", state.id, value)
+    setBusy(false)
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    setValue("")
+    setError(null)
+    // main says the key changed (sb:evt:widgetsChanged) and every face loads again; this
+    // is in case that word is slow, so the panel never waits on it.
+    void loadWidget(state.id)
+    onDone()
+  }
+
+  async function forget() {
+    if (busy || disabled) return
+    setBusy(true)
+    const result = await call("widgetsClearSecret", state.id)
+    setBusy(false)
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    void loadWidget(state.id)
+    onDone()
+  }
+
+  return (
+    <form
+      className="flow-widget-key nodrag nopan nowheel"
+      onSubmit={save}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        event.stopPropagation()
+        if (event.key === "Escape" && replacing) onDone()
+      }}
+    >
+      <div className="flow-widget-key-title">
+        <RiKey2Line className="size-4 shrink-0" aria-hidden="true" />
+        <b>{replacing ? "Replace the key" : "Needs a key"}</b>
+      </div>
+      <p>
+        {state.name} reads <b>{state.apiHost}</b> with your <code>{state.secretName}</code>. It is kept
+        encrypted on this computer, sent only to {state.apiHost}, and never reaches the widget.
+      </p>
+      {state.secretFor !== null ? (
+        <p className="flow-widget-key-note">
+          The key saved for it was given for {state.secretFor ? <b>{state.secretFor}</b> : "another address"}, and
+          widget.json now reads {state.apiHost} — so it isn't sent there until you give it again.
+        </p>
+      ) : null}
+      {replacing && state.hasSecret ? (
+        <p className="flow-widget-key-note">
+          A key is saved{state.secretLast4 ? `, ending ${state.secretLast4}` : ""}
+          {state.secretEncrypted ? "." : " — not encrypted, as this computer's keychain can't be reached."}
+        </p>
+      ) : null}
+      {!state.keychain ? (
+        <p className="flow-widget-key-note">This computer's keychain can't be reached, so the key will be kept in a file only you can read.</p>
+      ) : null}
+      <div className="flow-widget-key-row">
+        <input
+          id={fieldId}
+          type="password"
+          aria-label={`${state.secretName} for ${state.name}`}
+          autoComplete="off"
+          spellCheck={false}
+          placeholder={`Paste ${state.secretName}`}
+          value={value}
+          disabled={disabled || busy}
+          onChange={(event) => {
+            setValue(event.target.value)
+            setError(null)
+          }}
+        />
+        <button type="submit" className="flow-widget-key-save" disabled={disabled || busy || !value.trim()}>
+          Save
+        </button>
+      </div>
+      {error ? <p className="flow-widget-key-error" role="alert">{error}</p> : null}
+      {replacing ? (
+        <div className="flow-widget-key-row">
+          {state.hasSecret ? (
+            <button type="button" onClick={() => void forget()} disabled={disabled || busy}>
+              Forget the key
+            </button>
+          ) : null}
+          <button type="button" onClick={onDone} disabled={busy}>
+            Cancel
+          </button>
+        </div>
+      ) : null}
+      <small>
+        Or in a terminal: <code>node scripts/widget.js set-secret {state.id}</code>
+      </small>
+    </form>
   )
 }
 

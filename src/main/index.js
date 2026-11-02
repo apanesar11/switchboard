@@ -48,6 +48,11 @@ const videos = require('./videos.js');
 // PDFs and spreadsheets on a whiteboard (§4.17): a spreadsheet's sheets, rows and search,
 // read in a worker thread so a huge one can't stall this process.
 const sheets = require('./sheets.js');
+// Widgets on a whiteboard (§4.17): a folder of HTML served over sbwidget:// into a
+// sandboxed iframe, and the fetch proxy that holds the widget's key and keeps to its
+// manifest's base URL — so the key never reaches the renderer or the widget.
+const widgets = require('./widgets.js');
+const widgetHost = widgets.createWidgetHost({ safeStorage });
 const answer = require('./answer.js');
 const { Publisher } = require('./publisher.js');
 const { installTarget } = require('./platform.js');
@@ -465,7 +470,22 @@ function createWindow() {
   // which will-navigate above sends to the browser; should one take the viewer's frame
   // instead, it goes to the browser too, one link a second at most.
   const pdfLinks = pdfLinkGate();
+  // A widget's frame (§4.17) loads its own widget and stays on it. A link the user follows
+  // in one goes to the browser — only while this window has focus and that frame has the
+  // keyboard, one a second at most (widgets.linkGate) — and the page's own redirects and
+  // timers go nowhere: a frame that tries one is not let out again.
+  const widgetLinks = widgets.linkGate();
   mainWindow.webContents.on('will-frame-navigate', event => {
+    const widgetVerdict = widgets.frameNavigation(event, mainWindow.webContents);
+    if (widgetVerdict === 'allow') return;
+    if (widgetVerdict === 'external' || widgetVerdict === 'refuse') {
+      event.preventDefault();
+      const withUser = widgetVerdict === 'external' && mainWindow.isFocused() &&
+        widgets.frameHasKeyboard(mainWindow.webContents, event.frame);
+      if (widgetVerdict === 'external' && widgetLinks.allow(event.frame, withUser)) openExternal(event.url);
+      else console.error('[switchboard] kept a widget\'s frame from leaving for', String(event.url || '').split(/[?#]/)[0].slice(0, 120));
+      return;
+    }
     if (!videos.leavesThePlayer(event, mainWindow.webContents)) return;
     if (isPdfAddress(event.url)) return;
     event.preventDefault();
@@ -847,16 +867,19 @@ async function clipboardImagePaste() {
 // ---------------------------------------------------------------------------
 
 /**
- * The Google Images panel's page, when it has the keyboard: run the native editing command
- * (copy, cut, paste, selectAll, undo, redo) there and answer true; false leaves the item
- * to the renderer. images.focusedGuest() says why focus has to be asked the way it is.
- * Never while the DevTools have it: the page keeps its focused frame behind them, and a
- * ⌘V meant for the Console would land in Google's search box.
+ * The Google Images panel's page, or a whiteboard widget's (§4.17), when it has the
+ * keyboard: run the native editing command (copy, cut, paste, selectAll, undo, redo)
+ * there and answer true; false leaves the item to the renderer. images.focusedGuest() says
+ * why focus has to be asked the way it is; a widget is a frame of the page itself, so the
+ * command runs on the page and Chromium sends it to the focused frame
+ * (widgets.editInWidget). Never while the DevTools have it: the page keeps its focused
+ * frame behind them, and a ⌘V meant for the Console would land in Google's search box.
  */
 function guestEdit(action) {
   const host = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null;
-  const guest = host && !host.isDevToolsFocused() ? images.focusedGuest(host) : null;
-  if (!guest) return false;
+  if (!host || host.isDevToolsFocused()) return false;
+  const guest = images.focusedGuest(host);
+  if (!guest) return widgets.editInWidget(host, action);
   guest[action]();
   return true;
 }
@@ -881,7 +904,9 @@ function guestEdit(action) {
  * kind: a <webview> guest the renderer cannot reach into. While its page has the keyboard
  * Undo, Redo and Cut — and Copy, Paste and Select All, through guestEdit() — run the
  * native command on it, so ⌘V pastes into Google's search box instead of putting copied
- * boxes on the canvas behind it. ⌘W is not the page's: it keeps the path below.
+ * boxes on the canvas behind it. A widget's frame is another page the renderer can't
+ * reach into, and guestEdit() runs them in it the same way. ⌘W is not the page's: it
+ * keeps the path below.
  */
 function editItem(action) {
   const wc = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null;
@@ -963,8 +988,9 @@ function buildMenu() {
         // Both directions of the clipboard are main's: Chromium refuses
         // document.execCommand('copy') outside a user gesture, and the renderer would
         // otherwise need clipboard-read permission to paste.
-        // The Google Images panel's page takes all three natively while it has the
-        // keyboard (guestEdit), as it does Undo, Redo and Cut through editItem().
+        // The Google Images panel's page, and a whiteboard widget's, take all three
+        // natively while they have the keyboard (guestEdit), as they do Undo, Redo and
+        // Cut through editItem().
         {
           label: 'Copy',
           accelerator: 'CmdOrCtrl+C',
@@ -1572,6 +1598,29 @@ handle('sb:diagrams:sheetFind', async (src, sheet, query, limit) => {
   return found.ok ? sheets.find(found.file, found.ext, sheet, query, limit) : found;
 });
 
+// Widgets (§4.17). A widget's files are served over sbwidget:// (below); these are what a
+// whiteboard's widget node asks of main. None of them ever answers a key: the state says
+// whether there is one, how it is kept and its last four characters, and setSecret takes a
+// key in once, from the node's "Needs a key" panel. The widget's own requests come through
+// sb:widgets:fetch — the face relays them from the iframe — and main makes them with the
+// key attached, to the manifest's base URL alone.
+handle('sb:widgets:list', () => widgetHost.list());
+handle('sb:widgets:state', id => widgetHost.state(id));
+handle('sb:widgets:setSecret', (id, value) => widgetHost.setSecret(id, value));
+handle('sb:widgets:clearSecret', id => widgetHost.clearSecret(id));
+handle('sb:widgets:fetch', req => widgetHost.fetch(req));
+handle('sb:widgets:openFolder', async id => {
+  const found = widgetHost.folder(id);
+  if (!found.ok) return found;
+  if (process.env.SB_SMOKE) { console.log('SMOKE openFolder:', JSON.stringify(found.data)); return { ok: true }; }
+  const problem = await shell.openPath(found.data);
+  return problem ? { ok: false, error: `Couldn't open the folder: ${problem}` } : { ok: true };
+});
+// A widget's files or keys changed — an agent editing it, set-secret in a terminal, a key
+// saved or forgotten here: { id, reason: 'files' | 'secret' }. An open board reloads that
+// widget's frame on it, which is what makes "ask the agent to tweak it" show at once.
+widgetHost.onChange(change => send('sb:evt:widgetsChanged', change));
+
 /** The kept spreadsheet a sheet node's address names: { ok, file, ext } — never a PDF. */
 async function sheetFile(src) {
   const parsed = whiteboards.parseFileSrc(src);
@@ -1971,11 +2020,14 @@ async function stopEverything() {
 // Only a PDF is ever served, for its panel's <iframe>, and streamed: Chromium's own viewer
 // reads it as it comes. A spreadsheet is read over IPC (sheets.js), never loaded as a page.
 // sbvideo://recording/<file> streams finished local camera recordings.
+// sbwidget://<id>/<path> — a whiteboard widget's own files, each id its own origin (its
+// own localStorage), and the app's SDK at __switchboard/widget.js (widgets.js serve()).
 // Electron takes this list once, so all schemes are in the one call.
 protocol.registerSchemesAsPrivileged([
   { scheme: 'sbimg', privileges: { standard: true, secure: true, supportFetchAPI: true } },
   { scheme: 'sbfile', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
   { scheme: 'sbvideo', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+  { scheme: 'sbwidget', privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ]);
 
 function serveDiagramImage(request) {
@@ -2047,6 +2099,11 @@ if (!app.requestSingleInstanceLock()) {
     protocol.handle('sbimg', serveDiagramImage);
     protocol.handle('sbfile', serveDiagramFile);
     protocol.handle('sbvideo', require('./recordings.js').createRecordingVideoHandler({ directory: recordingDirectory, net }));
+    protocol.handle('sbwidget', widgets.serve);
+    // After `ready`, which safeStorage needs: keys `widget.js set-secret` left waiting are
+    // encrypted now, and from here on as they land; widget folders are watched so an open
+    // board shows an agent's edit as it is saved.
+    widgetHost.watch();
     // Before the window, so the panel's first page already goes out as Chrome would ask
     // for it, with no permission to grant and nowhere to download to.
     images.setupImagesSession();

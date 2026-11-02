@@ -58,6 +58,10 @@ export type DiagramSpec = FlowSpec
 // could be made) over its name; a spreadsheet as a card with its name, as a document
 // is. Either opens beside the canvas. Only the editor makes one, from a file dropped,
 // pasted or picked; their label is the file's name.
+// Switchboard: and a "widget" — a folder of HTML, CSS and JavaScript kept on this Mac
+// (src/main/widgets.js), drawn live in a sandboxed frame inside its node (it needs
+// `widget`, the widget's id). An agent makes one with scripts/widget.js and puts it on a
+// board with that CLI; its label is the widget's name.
 export const FLOW_SHAPES = [
   "box",
   "rounded",
@@ -73,6 +77,7 @@ export const FLOW_SHAPES = [
   "pdf",
   "sheet",
   "timer",
+  "widget",
 ] as const
 
 export type FlowShape = (typeof FLOW_SHAPES)[number]
@@ -93,7 +98,7 @@ export function isFlowBoxShape(shape: FlowShape): shape is FlowBoxShape {
  * Switchboard: a pinned terminal and a video are sized by hand too, and so is a
  * box — one never resized is as wide as every other box and as tall as its text.
  */
-export const FLOW_SIZED_SHAPES = [...FLOW_BOX_SHAPES, "note", "text", "image", "terminal", "video", "pdf", "timer"] as const
+export const FLOW_SIZED_SHAPES = [...FLOW_BOX_SHAPES, "note", "text", "image", "terminal", "video", "pdf", "timer", "widget"] as const
 
 export function isFlowSizedShape(shape: FlowShape): boolean {
   return (FLOW_SIZED_SHAPES as readonly FlowShape[]).includes(shape)
@@ -268,6 +273,13 @@ export type FlowNodeSpec = {
   file?: string
   /** An embedded countdown. Running timers keep an absolute deadline. */
   timer?: FlowTimer
+  /**
+   * Switchboard: the widget a "widget" node draws — its id, the name of its folder under
+   * <config dir>/widgets/ and the host of its sbwidget:// address (FLOW_WIDGET_ID_RE).
+   * Required on a widget, and only kept on one. Like a video's id it is what the node is,
+   * so a republish that leaves it out has no widget.
+   */
+  widget?: string
 }
 
 export type FlowTimer = {
@@ -480,6 +492,35 @@ export const FLOW_PDF_DEFAULT_SIZE: FlowSize = { width: 240, height: 311 + PDF_B
 export const FLOW_SHEET_SIZE: FlowSize = { width: 240, height: 76 }
 /** A file's address, at most — sbfile://file/ and a 32-character name and extension. */
 export const FLOW_FILE_SRC_MAX_LENGTH = 120
+
+// ─────────────────────────────────────────────────────────────────────
+// Switchboard: widgets
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * A widget's id: lowercase, since it is the host of the widget's sbwidget:// address.
+ * Mirrors src/main/widgets.js WIDGET_ID_RE.
+ */
+export const FLOW_WIDGET_ID_RE = /^[a-z][a-z0-9-]{0,62}$/
+
+export function isFlowWidgetId(value: unknown): value is string {
+  return typeof value === "string" && FLOW_WIDGET_ID_RE.test(value)
+}
+
+/** What a widget is labelled when it has no name of its own. */
+export const WIDGET_LABEL = "Widget"
+/**
+ * The strip across a widget's top that drags it, with its name and its buttons — as tall
+ * as a video's. A widget's `size` includes it.
+ */
+export const WIDGET_BAR = 30
+/**
+ * A widget made with no size of its own, and the least its resize handles go to unless
+ * its widget.json says otherwise (minSize). Mirrored in src/main/whiteboards.js for the
+ * list's thumbnail, and in scripts/widget.js.
+ */
+export const FLOW_WIDGET_DEFAULT_SIZE: FlowSize = { width: 480, height: 300 }
+export const FLOW_WIDGET_MIN_SIZE: FlowSize = { width: 200, height: 120 }
 
 /** A rectangle on screen, in client (window) pixels. */
 export type ClientRect = { left: number; top: number; width: number; height: number }

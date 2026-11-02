@@ -27,6 +27,7 @@ import {
   FLOW_TERMINAL_DEFAULT_SIZE,
   FLOW_TERMINAL_FLOOR,
   FLOW_VIDEO_DEFAULT_SIZE,
+  FLOW_WIDGET_DEFAULT_SIZE,
   TERMINAL_HEADER,
   type DiagramSpec,
   type FlowNodeSpec,
@@ -277,6 +278,8 @@ export type FlowBoxNodeData = {
   /** Switchboard: the PDF or spreadsheet a "pdf" or "sheet" shows — see FlowNodeSpec.file. */
   file?: string
   timer?: FlowTimer
+  /** Switchboard: the widget a "widget" draws — see FlowNodeSpec.widget. */
+  widget?: string
 }
 
 /** What a flow edge carries, so the editor can read an edge back into a spec. */
@@ -518,6 +521,11 @@ export function flowNodeSize(node: FlowSizing): FlowSize {
     width: Math.max(FLOW_TIMER_MIN_SIZE.width, node.size?.width ?? FLOW_TIMER_DEFAULT_SIZE.width),
     height: Math.max(FLOW_TIMER_MIN_SIZE.height, node.size?.height ?? FLOW_TIMER_DEFAULT_SIZE.height),
   }
+  // Switchboard: a widget is the size it was given, its bar included — the editor's
+  // handles keep it to the widget's own least size — or, never given one, the default.
+  // A size under the editor's least one (a hand-edited board) is drawn as stated: the
+  // widget's frame is what fills it, and a widget's widget.json may allow it.
+  if (shape === "widget") return node.size ?? FLOW_WIDGET_DEFAULT_SIZE
   // Switchboard: a pinned terminal is the size it was given — pinned at a high zoom,
   // that can be less than its resize handles allow, so only the floor of a header
   // and a sliver of body binds here — and folded, only its header, in place.
@@ -801,6 +809,7 @@ function layoutFlow(spec: FlowSpec): DiagramLayout {
       videoStart: node.videoStart,
       file: node.file,
       timer: node.shape === "timer" ? { ...(node.timer ?? createFlowTimer()) } : undefined,
+      widget: node.widget,
     } satisfies FlowBoxNodeData,
     draggable: false,
     selectable: false,

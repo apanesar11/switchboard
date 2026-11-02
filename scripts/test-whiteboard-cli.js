@@ -243,6 +243,51 @@ test('a PDF and a spreadsheet are checked and kept like any node, a PDF keeps it
   assert.equal(fs.readFileSync(file(), 'utf8'), before);
 });
 
+test('a widget is checked and kept like any node, keeps its place and size, and is named when it would go', () => {
+  // Fictional widget ids: the CLI never reads a widget's folder, a spec only names it.
+  const WIDGETS = {
+    kind: 'flow',
+    nodes: [
+      { id: 'intro', label: 'Today at a glance' },
+      { id: 'clock', shape: 'widget', widget: 'desk-clock', label: 'Desk clock', size: { width: 320, height: 200 } },
+      { id: 'weather', shape: 'widget', widget: 'Weather' },
+    ],
+    edges: [{ from: 'intro', to: 'clock' }],
+  };
+  const ok = run(['check', '-'], { input: json(WIDGETS) });
+  assert.equal(ok.code, 0, ok.err);
+  assert.match(ok.out, /^Valid: 3 nodes, 1 arrow, laid out \d+×\d+\./);
+  const noId = run(['check', '-'], { input: json({ ...WIDGETS, nodes: WIDGETS.nodes.map(n => n.id === 'clock' ? { ...n, widget: undefined } : n) }) });
+  assert.match(noId.err, /Node 2: a "widget" node needs "widget", the id of a widget/);
+  const badId = run(['check', '-'], { input: json({ ...WIDGETS, nodes: WIDGETS.nodes.map(n => n.id === 'clock' ? { ...n, widget: 'desk/clock' } : n) }) });
+  assert.match(badId.err, /Node 2: "widget" must be a widget id/);
+
+  const made = run(['create', '-', '--name', 'Example widgets', '--workspace', 'none'], { input: json(WIDGETS) });
+  assert.equal(made.code, 0, made.err);
+  const id = /id ([0-9a-f-]{36})/.exec(made.out)[1];
+  const file = () => path.join(temp, 'whiteboards', 'boards', id + '.json');
+  const stored = new Map(boardFile(id).spec.nodes.map(n => [n.id, n]));
+  assert.deepEqual([stored.get('clock').widget, stored.get('clock').size], ['desk-clock', { width: 320, height: 200 }]);
+  // An id given in capitals is read in lowercase, and with no label of its own the node says its id.
+  assert.deepEqual([stored.get('weather').widget, stored.get('weather').label], ['weather', 'weather']);
+
+  // Arranged in the editor, then rewritten from memory: the widget keeps its place and size.
+  const arranged = boardFile(id);
+  arranged.spec.nodes = arranged.spec.nodes.map((node, i) => ({ ...node, position: { x: 40 + i * 400, y: 40 } }));
+  fs.writeFileSync(file(), JSON.stringify(arranged));
+  const fromMemory = { ...WIDGETS, nodes: WIDGETS.nodes.map(n => n.id === 'clock' ? { id: 'clock', shape: 'widget', widget: 'desk-clock', label: 'Desk clock' } : n) };
+  const updated = run(['update', id, '-'], { input: json(fromMemory) });
+  assert.equal(updated.code, 0, updated.err);
+  const clock = boardFile(id).spec.nodes.find(n => n.id === 'clock');
+  assert.deepEqual([clock.widget, clock.position, clock.size], ['desk-clock', { x: 440, y: 40 }, { width: 320, height: 200 }]);
+
+  const before = fs.readFileSync(file(), 'utf8');
+  const refused = run(['update', id, '-'], { input: json({ kind: 'flow', nodes: [WIDGETS.nodes[0]], edges: [] }) });
+  assert.equal(refused.code, 1);
+  assert.match(refused.err, /would remove 2 of "Example widgets"'s nodes: clock \(the desk-clock widget "Desk clock"\), weather \(the weather widget\)\./);
+  assert.equal(fs.readFileSync(file(), 'utf8'), before);
+});
+
 test('new-document stores Markdown a document box can show', async () => {
   const made = run(['new-document', '-'], { input: '# Example brief\n\nWhy the card is charged first.\n' });
   assert.equal(made.code, 0, made.err);

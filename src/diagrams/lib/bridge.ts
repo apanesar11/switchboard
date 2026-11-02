@@ -228,6 +228,56 @@ export type SheetMatches = { matches: { row: number; col: number }[]; more: bool
  */
 export type PastedFile = { name: string; type: string; bytes: Uint8Array | null } | { name: string; error: string }
 
+/**
+ * A widget as a whiteboard's widget node needs it (main/widgets.js): what its widget.json
+ * says — its name, entry page, default and least size, the host its API is on and the
+ * NAME of the key it needs — and whether a key is kept for that API (encrypted, or
+ * waiting in the CLI's pending file when this computer's keychain can't be reached), with
+ * its last four characters. Never the key itself. `code` is "missing" for a widget that
+ * isn't installed and "manifest" for one whose widget.json is wrong, `error` then the
+ * sentence to show.
+ */
+export type WidgetState = {
+  id: string
+  name: string
+  entry: string | null
+  size: { width: number; height: number } | null
+  minSize: { width: number; height: number } | null
+  apiHost: string | null
+  secretName: string | null
+  hasSecret: boolean
+  secretEncrypted: boolean
+  secretLast4: string | null
+  /**
+   * When a key is kept but was given for another API than the one widget.json names now:
+   * the host it was given for ("" when nothing says). It isn't sent — `hasSecret` is false
+   * — until the user gives it again. Null otherwise.
+   */
+  secretFor: string | null
+  /** Whether this computer's keychain can encrypt a key now. */
+  keychain: boolean
+  error: string | null
+  code: "missing" | "manifest" | "id" | null
+}
+
+/** A widget's request, as its iframe asked for it — main reads the manifest and adds the key. */
+export type WidgetRequest = {
+  id: string
+  path: string
+  method?: string
+  headers?: Record<string, string>
+  query?: Record<string, unknown>
+  body?: string
+}
+
+/** Main's answer to a widget's request: any status, the body as text, a few headers. */
+export type WidgetResponse =
+  | { ok: true; status: number; statusText: string; headers: Record<string, string>; body: string }
+  | { ok: false; error: string; code?: string }
+
+/** A widget's files or keys changed (sb:evt:widgetsChanged): its frame loads again. */
+export type WidgetsChange = { id: string; reason: "files" | "secret" }
+
 type Bridge = {
   recordingPermissions(): Promise<Result<null>>
   recordingStart(mimeType: string): Promise<Result<{ id: string; path: string; mimeType: string }>>
@@ -325,6 +375,15 @@ type Bridge = {
   /** Every cell whose text holds `query`, ignoring case, at most `limit` (≤ 1000). */
   diagramsSheetFind(src: string, sheet: number, query: string, limit: number): Promise<Result<SheetMatches>>
   openExternal(url: string): Promise<{ ok: true } | { ok: false; error: string }>
+  // Switchboard: widgets (main/widgets.js). No call here ever answers a key.
+  widgetsList(): Promise<Result<WidgetState[]>>
+  widgetsState(id: string): Promise<Result<WidgetState>>
+  /** The key the widget's manifest names, kept encrypted — the value goes in once, never back. */
+  widgetsSetSecret(id: string, value: string): Promise<Result<WidgetState>>
+  widgetsClearSecret(id: string): Promise<Result<WidgetState>>
+  widgetsOpenFolder(id: string): Promise<{ ok: true } | { ok: false; error: string }>
+  widgetsFetch(req: WidgetRequest): Promise<WidgetResponse>
+  onWidgetsChanged(cb: (change: WidgetsChange) => void): () => void
 }
 
 declare global {
@@ -376,7 +435,7 @@ export function writeClipboard(text: string): void {
 
 /** A push event's subscription, or a no-op when the preload has none. */
 export function listen<
-  K extends "onAnswerStep" | "onAnswerStatus" | "onDiagramsImageOffer" | "onWhiteboardsChanged" | "onRecordingFlush",
+  K extends "onAnswerStep" | "onAnswerStatus" | "onDiagramsImageOffer" | "onWhiteboardsChanged" | "onRecordingFlush" | "onWidgetsChanged",
 >(
   name: K,
   cb: Parameters<Bridge[K]>[0],

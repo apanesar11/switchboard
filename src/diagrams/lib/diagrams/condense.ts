@@ -85,6 +85,10 @@ export function inspectFlowCondenseSelection(
   if (selected.some((node) => node.shape === "timer")) {
     throw new Error("Leave timers out of the selection before condensing.")
   }
+  // Switchboard: nor a widget, whose only words are its name.
+  if (selected.some((node) => node.shape === "widget")) {
+    throw new Error("Leave widgets out of the selection before condensing.")
+  }
   if (selected.some((node) => !(node.label.trim() || node.detail?.trim()))) {
     throw new Error("Every selected node needs text before it can be condensed.")
   }

@@ -18,7 +18,9 @@
 //     stays on the player (leavesThePlayer).
 //   * A page from the web in the app's window is granted one permission: fullscreen, to
 //     the player (permissionAllowed). Camera and microphone access belong only to the
-//     app's own top-level document, for its local recording controls.
+//     app's own top-level document, for its local recording controls. A whiteboard
+//     widget's page (sbwidget://, widgets.js) is granted nothing at all, and a popup it
+//     asks for counts as one from the web (popupSource) — its sandbox allows none anyway.
 //   * A video's title is asked of YouTube's oEmbed endpoint once, when the video is made
 //     (videoInfo).
 //
@@ -61,6 +63,9 @@ const INFO_TEXT_MAX = 200;
 const APP_RENDERER_URL = require('node:url').pathToFileURL(
   require('node:path').join(__dirname, '..', 'renderer', 'index.html')).href;
 const CAMERA_MEDIA_TYPES = new Set(['audio', 'video']);
+// A whiteboard widget's pages (widgets.js): the app's own content, but nothing the app
+// trusts with a permission.
+const WIDGET_PROTOCOL = 'sbwidget:';
 
 // ── pure helpers ────────────────────────────────────────────────────────────
 
@@ -113,6 +118,7 @@ function embedRequestHeaders(details) {
 function popupSource(referrer) {
   const r = referrer && typeof referrer === 'object' ? referrer : { url: referrer };
   const u = parseUrl(r.url);
+  if (u && u.protocol === WIDGET_PROTOCOL) return 'web';
   if (u && (u.protocol === 'https:' || u.protocol === 'http:')) return u.origin === PLAYER_ORIGIN ? 'player' : 'web';
   return !r.policy || APP_REFERRER_POLICIES.has(r.policy) ? 'app' : 'web';
 }
@@ -192,9 +198,12 @@ function leavesThePlayer(event, wc) {
  * otherwise opens in that app). Media needs the exact app document in the main frame
  * and an explicit audio/video type; an opaque file:// origin or a missing URL is never
  * enough. Other permissions for local pages keep Electron's default answer: the app's
- * navigator.clipboard fallbacks ask for clipboard-sanitized-write.
+ * navigator.clipboard fallbacks ask for clipboard-sanitized-write. A widget's page
+ * (sbwidget://) is refused every permission, media included.
  */
 function permissionAllowed(permission, requestingUrl, details = {}) {
+  const from = parseUrl(requestingUrl);
+  if (from && from.protocol === WIDGET_PROTOCOL) return false;
   if (permission === 'media') {
     details = details || {};
     const page = parseUrl(requestingUrl);

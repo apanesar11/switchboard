@@ -133,7 +133,7 @@ const THUMB_STRETCH = 2;
 // wide and as tall as its text until someone resizes it; a box, a note, a text, an
 // image, a video and a PDF keep the size someone gave them in `size`. Main has no fonts to measure with, so a label's lines are counted
 // at an average glyph width: exact for the usual one-line box, and close enough for the
-// rest at a twentieth of the size.
+// rest at a twentieth of the size. A widget keeps its size too.
 const FLOW_BOX_WIDTH = 200;
 const FLOW_BOX_MIN_HEIGHT = 52;
 const FLOW_DIAMOND_HEIGHT = 92;
@@ -152,6 +152,9 @@ const FLOW_VIDEO_SIZE = { width: 480, height: 300 };
 // FLOW_SHEET_SIZE.
 const FLOW_PDF_SIZE = { width: 240, height: 341 };
 const FLOW_SHEET_SIZE = { width: 240, height: 76 };
+// A widget with no size of its own — types.ts FLOW_WIDGET_DEFAULT_SIZE, its 30-high bar
+// included.
+const FLOW_WIDGET_SIZE = { width: 480, height: 300 };
 const FLOW_TEXT_MAX_WIDTH = 320;
 const FLOW_TEXT_MIN_WIDTH = 40;
 const FLOW_TEXT_PAD_X = 4;
@@ -677,6 +680,7 @@ function flowNodeSize(node) {
   if (shape === 'video') return size ? { width: size.width, height: size.height } : FLOW_VIDEO_SIZE;
   if (shape === 'pdf') return size ? { width: size.width, height: size.height } : FLOW_PDF_SIZE;
   if (shape === 'sheet') return FLOW_SHEET_SIZE;
+  if (shape === 'widget') return size ? { width: size.width, height: size.height } : FLOW_WIDGET_SIZE;
 
   const label = typeof node.label === 'string' ? node.label : '';
   const detail = typeof node.detail === 'string' ? node.detail : '';
