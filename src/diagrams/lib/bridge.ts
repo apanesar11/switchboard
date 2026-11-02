@@ -256,6 +256,17 @@ export type WidgetState = {
   secretFor: string | null
   /** Whether this computer's keychain can encrypt a key now. */
   keychain: boolean
+  /**
+   * The NAME of the saved database connection widget.json's "database" names — one in the
+   * Databases tab of the board's workspace — or null for a widget that reads none.
+   */
+  database: string | null
+  /** Whether the board's workspace has exactly one connection of that name. */
+  databaseConnected: boolean
+  /** Whether it has more than one, so the widget can't tell which to read. */
+  databaseDuplicate: boolean
+  /** The board's workspace the state was asked for, or null. */
+  workspace: string | null
   error: string | null
   code: "missing" | "manifest" | "id" | null
 }
@@ -275,8 +286,26 @@ export type WidgetResponse =
   | { ok: true; status: number; statusText: string; headers: Record<string, string>; body: string }
   | { ok: false; error: string; code?: string }
 
-/** A widget's files or keys changed (sb:evt:widgetsChanged): its frame loads again. */
-export type WidgetsChange = { id: string; reason: "files" | "secret" }
+/**
+ * A widget's database batch, relayed from its iframe: the widget's id and the board's
+ * workspace come from the node and the board, never from the frame; `ops` is the frame's,
+ * which main checks (main/databases.js query()).
+ */
+export type WidgetQuery = { id: string; workspace: string | null; ops: unknown }
+
+/** Main's answer to a widget's database batch: its results in order, or why not. */
+export type WidgetQueryResult =
+  | { ok: true; data: unknown[] }
+  | { ok: false; error: string; code?: "needs-connection" | "refused" | "too-large" | "timeout" | "database" }
+
+/**
+ * A widget's files or keys changed (sb:evt:widgetsChanged): its frame loads again. Or a
+ * database connection was added or removed in `workspace`: widgets that read one look
+ * again for theirs.
+ */
+export type WidgetsChange =
+  | { id: string; reason: "files" | "secret" }
+  | { id: null; reason: "database"; workspace: string }
 
 type Bridge = {
   recordingPermissions(): Promise<Result<null>>
@@ -377,12 +406,14 @@ type Bridge = {
   openExternal(url: string): Promise<{ ok: true } | { ok: false; error: string }>
   // Switchboard: widgets (main/widgets.js). No call here ever answers a key.
   widgetsList(): Promise<Result<WidgetState[]>>
-  widgetsState(id: string): Promise<Result<WidgetState>>
+  /** `workspace`: the board's, for whether its Databases tab has the connection widget.json names. */
+  widgetsState(id: string, workspace?: string | null): Promise<Result<WidgetState>>
   /** The key the widget's manifest names, kept encrypted — the value goes in once, never back. */
   widgetsSetSecret(id: string, value: string): Promise<Result<WidgetState>>
   widgetsClearSecret(id: string): Promise<Result<WidgetState>>
   widgetsOpenFolder(id: string): Promise<{ ok: true } | { ok: false; error: string }>
   widgetsFetch(req: WidgetRequest): Promise<WidgetResponse>
+  widgetsQuery(req: WidgetQuery): Promise<WidgetQueryResult>
   onWidgetsChanged(cb: (change: WidgetsChange) => void): () => void
 }
 

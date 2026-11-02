@@ -30,11 +30,15 @@
 // them, keeps the page told of the board's theme and its own size, and stands in with a
 // card for a widget that isn't installed, a widget.json that is wrong, or a key not yet
 // given — the "Needs a key" panel, whose key goes to main once and never to the frame.
+// A widget that reads a database has its queries relayed too, with the board's workspace
+// attached here (WidgetBoardContext), and a "Needs a connection" panel while that
+// workspace's Databases tab has no connection of the name its widget.json gives.
 
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
 import { Handle, Position, getViewportForBounds, useReactFlow, useStore, useStoreApi, type NodeProps, type Viewport } from "@xyflow/react"
 import {
   RiApps2Line,
+  RiDatabase2Line,
   RiDoorOpenLine,
   RiErrorWarningLine,
   RiExternalLinkLine,
@@ -1029,10 +1033,20 @@ function PdfFace({ cover, name }: { cover?: string; name: string }) {
 const WIDGET_PROTOCOL = 1
 
 /**
- * What the faces know of one widget, shared by every face that shows it (two boards, or a
- * copy pasted beside it): main's word on it (`state`, or `error` when main couldn't say),
- * and `generation`, which moves whenever its files or its key change — every face then
- * loads its frame again.
+ * Switchboard: the board a widget is drawn on, as its face needs it — the board's
+ * workspace (whose Databases tab holds the connection a widget's "database" names; null
+ * when the board has none), and how to open that tab in the main window. DiagramsPage
+ * provides it for both canvases.
+ */
+export type WidgetBoard = { workspace: string | null; openDatabases?: (wsId: string) => void }
+export const WidgetBoardContext = createContext<WidgetBoard>({ workspace: null })
+
+/**
+ * What the faces know of one widget on boards of one workspace, shared by every face that
+ * shows it (two boards, or a copy pasted beside it): main's word on it (`state`, or
+ * `error` when main couldn't say), and `generation`, which moves whenever its files or its
+ * key change — every face then loads its frame again. Kept by widget and workspace, as
+ * whether its database connection is there depends on the board's workspace.
  */
 export type WidgetEntry = { state: WidgetState | null; error: string | null; generation: number }
 
@@ -1040,68 +1054,103 @@ const NO_WIDGET: WidgetEntry = { state: null, error: null, generation: 0 }
 const widgetEntries = new Map<string, WidgetEntry>()
 const widgetWatchers = new Map<string, Set<() => void>>()
 const widgetLoading = new Set<string>()
+// Asked for again while a load was on its way: that load may have read what was there
+// before the change that asked, so another follows it.
+const widgetAgain = new Set<string>()
 let widgetEventsHeard = false
 
-function tellWidget(id: string) {
-  for (const watcher of Array.from(widgetWatchers.get(id) ?? [])) watcher()
+/** The store's key for widget `id` on boards of `workspace`. */
+function widgetKey(id: string, workspace: string | null): string {
+  return `${id}\n${workspace ?? ""}`
+}
+
+function keyParts(key: string): { id: string; workspace: string | null } {
+  const at = key.indexOf("\n")
+  return { id: key.slice(0, at), workspace: key.slice(at + 1) || null }
+}
+
+function tellWidget(key: string) {
+  for (const watcher of Array.from(widgetWatchers.get(key) ?? [])) watcher()
 }
 
 /** Asks main for the widget's state again; every face showing it redraws with the answer. */
-async function loadWidget(id: string) {
-  if (widgetLoading.has(id)) return
-  widgetLoading.add(id)
-  const result = await call("widgetsState", id)
-  widgetLoading.delete(id)
-  const before = widgetEntries.get(id) ?? NO_WIDGET
-  widgetEntries.set(id, result.ok
+async function loadWidget(id: string, workspace: string | null) {
+  const key = widgetKey(id, workspace)
+  if (widgetLoading.has(key)) {
+    widgetAgain.add(key)
+    return
+  }
+  widgetLoading.add(key)
+  const result = await call("widgetsState", id, workspace)
+  widgetLoading.delete(key)
+  const before = widgetEntries.get(key) ?? NO_WIDGET
+  widgetEntries.set(key, result.ok
     ? { ...before, state: result.data, error: null }
     : { ...before, state: null, error: result.error })
-  tellWidget(id)
+  tellWidget(key)
+  if (widgetAgain.delete(key)) void loadWidget(id, workspace)
 }
 
-/** Loads every face of the widget again — its frame, and its state. */
+/** Loads every face of the widget again, on every board — its frame, and its state. */
 function bumpWidget(id: string) {
-  const before = widgetEntries.get(id) ?? NO_WIDGET
-  widgetEntries.set(id, { ...before, generation: before.generation + 1 })
-  tellWidget(id)
-  void loadWidget(id)
+  for (const key of Array.from(widgetEntries.keys())) {
+    const parts = keyParts(key)
+    if (parts.id !== id) continue
+    const before = widgetEntries.get(key) ?? NO_WIDGET
+    widgetEntries.set(key, { ...before, generation: before.generation + 1 })
+    tellWidget(key)
+    void loadWidget(id, parts.workspace)
+  }
 }
 
 /**
  * Main says a widget's files or key changed (sb:evt:widgetsChanged): an agent saving its
  * page, a key set in a terminal or in a panel. Heard once for the whole bundle, and only
- * for widgets a face is showing.
+ * for widgets a face is showing. A connection added or removed in a workspace's Databases
+ * tab has the widgets there that read a database ask again whether theirs is there — their
+ * state only: the face sends a page that was waiting for it a refresh.
  */
 function hearWidgetChanges() {
   if (widgetEventsHeard) return
   widgetEventsHeard = true
   listen("onWidgetsChanged", (change: WidgetsChange) => {
-    if (change && typeof change.id === "string" && widgetEntries.has(change.id)) bumpWidget(change.id)
+    if (!change) return
+    if (change.reason === "database") {
+      for (const [key, entry] of Array.from(widgetEntries)) {
+        const parts = keyParts(key)
+        if (entry.state?.database && (!change.workspace || change.workspace === parts.workspace)) void loadWidget(parts.id, parts.workspace)
+      }
+      return
+    }
+    if (typeof change.id === "string") bumpWidget(change.id)
   })
 }
 
 /**
- * Switchboard: the widget `id` as the faces share it — its state from main, loaded the
- * first time anything asks, and kept up to date as its files and key change. Exported for
- * the editor's widget node, whose resize handles keep to the widget's least size.
+ * Switchboard: the widget `id` as the faces on this board share it — its state from main
+ * for the board's workspace (WidgetBoardContext), loaded the first time anything asks, and
+ * kept up to date as its files, its key and its workspace's connections change. Exported
+ * for the editor's widget node, whose resize handles keep to the widget's least size.
  */
 export function useWidget(id: string | null | undefined): WidgetEntry {
+  const { workspace } = useContext(WidgetBoardContext)
+  const key = id ? widgetKey(id, workspace) : null
   const subscribe = useMemo(() => (onChange: () => void) => {
-    if (!id) return () => {}
+    if (!id || !key) return () => {}
     hearWidgetChanges()
-    let watchers = widgetWatchers.get(id)
-    if (!watchers) widgetWatchers.set(id, (watchers = new Set()))
+    let watchers = widgetWatchers.get(key)
+    if (!watchers) widgetWatchers.set(key, (watchers = new Set()))
     watchers.add(onChange)
-    if (!widgetEntries.has(id)) {
-      widgetEntries.set(id, NO_WIDGET)
-      void loadWidget(id)
+    if (!widgetEntries.has(key)) {
+      widgetEntries.set(key, NO_WIDGET)
+      void loadWidget(id, workspace)
     }
     return () => {
       watchers.delete(onChange)
-      if (watchers.size === 0) widgetWatchers.delete(id)
+      if (watchers.size === 0) widgetWatchers.delete(key)
     }
-  }, [id])
-  return useSyncExternalStore(subscribe, () => (id ? widgetEntries.get(id) ?? NO_WIDGET : NO_WIDGET), () => NO_WIDGET)
+  }, [id, key, workspace])
+  return useSyncExternalStore(subscribe, () => (key ? widgetEntries.get(key) ?? NO_WIDGET : NO_WIDGET), () => NO_WIDGET)
 }
 
 // The board's theme: View ▸ Terminal appearance, which term-theme.js keeps on <html> as
@@ -1154,13 +1203,17 @@ function widgetMessage(data: unknown): { type: string; [key: string]: unknown } 
  * very frame's window and from the widget's own origin are read. A request it makes
  * (`fetch`) is relayed to main (sb:widgets:fetch), which reads the manifest, attaches the
  * key and keeps to its base URL; the answer goes back to the window that asked, posted to
- * the widget's origin alone. The page is told of the theme and of its size as they
- * change.
+ * the widget's origin alone. A database batch (`query`) is relayed to main
+ * (sb:widgets:query) with the widget's id and the board's workspace from here — never
+ * from the message — and main reads the connection's name from the manifest. The page is
+ * told of the theme and of its size as they change.
  *
  * In place of the page: a card for a widget that isn't installed, or whose widget.json is
- * wrong (with main's sentence); and the "Needs a key" panel when the manifest names a key
+ * wrong (with main's sentence); the "Needs a key" panel when the manifest names a key
  * that isn't kept, or a request said so — or, from the key button, to replace or forget
- * one. Every press over the page is the page's, except while the canvas has a gesture of
+ * one; and the "Needs a connection" panel when widget.json names a database connection
+ * the board's workspace hasn't got (or has twice), which goes, and the page with it
+ * loads, once the user adds it. Every press over the page is the page's, except while the canvas has a gesture of
  * its own under way (styles.css: [data-flow-gesture], [data-flow-wheel]) or the hand tool
  * is out (`interactive` false).
  */
@@ -1175,6 +1228,8 @@ export function WidgetFace({
   interactive?: boolean
 }) {
   const id = isFlowWidgetId(widget) ? widget : null
+  const board = useContext(WidgetBoardContext)
+  const workspace = board.workspace
   const entry = useWidget(id)
   const theme = useBoardTheme()
   const state = entry.state
@@ -1192,15 +1247,17 @@ export function WidgetFace({
   const missing = state?.code === "missing"
   const broken = !!state?.error && !missing
   const needsKey = !!state && !state.error && !!state.secretName && (!state.hasSecret || keyAsked)
+  const needsConnection = !!state && !state.error && !!state.database && !state.databaseConnected
   // The widget's id in it too: a node switched to another widget (an agent's update, or an
   // Undo of one) gets a new frame, never the old one sent to the other widget's address —
-  // which main refuses, as a widget's frame keeps to its own id.
-  const frameKey = `${id ?? ""}:${entry.generation}:${own}`
-  // Whether the page is on show now. The key panel takes the frame out, so the page put
-  // back after it is a new frame, as one with a new frameKey is.
-  const framed = !!id && !entry.error && !!state && !state.error && !needsKey && !keyOpen
-  const live = useRef({ id, name, theme, origin })
-  live.current = { id, name, theme, origin }
+  // which main refuses, as a widget's frame keeps to its own id. And the board's
+  // workspace: another workspace is another database, so the page starts again.
+  const frameKey = `${id ?? ""}:${workspace ?? ""}:${entry.generation}:${own}`
+  // Whether the page is on show now. The key and connection panels take the frame out, so
+  // the page put back after one is a new frame, as one with a new frameKey is.
+  const framed = !!id && !entry.error && !!state && !state.error && !needsKey && !keyOpen && !needsConnection
+  const live = useRef({ id, name, theme, origin, workspace })
+  live.current = { id, name, theme, origin, workspace }
 
   // A key saved or forgotten moves the generation: the next request is asked afresh. A
   // node switched to another widget starts from that widget's own state.
@@ -1269,6 +1326,25 @@ export function WidgetFace({
     if (code === "needs-secret") setKeyAsked(true)
   }
 
+  // A database batch: the widget's id and the board's workspace are this node's and this
+  // board's, never the message's — main reads the connection's name from widget.json.
+  async function relayQuery(message: Record<string, unknown>) {
+    const requestId = message.id
+    const widgetId = live.current.id
+    if (typeof requestId !== "number" || !Number.isFinite(requestId) || !widgetId) return
+    const asked = live.current.workspace
+    const result = await call("widgetsQuery", { id: widgetId, workspace: asked, ops: message.ops })
+    if (result.ok) {
+      post({ type: "result", id: requestId, results: result.data })
+      return
+    }
+    const code = ("code" in result ? result.code : undefined) ?? "database"
+    post({ type: "result", id: requestId, error: result.error, code })
+    // The connection may have gone since the state was read: ask again, and the panel
+    // shows if it has.
+    if (code === "needs-connection") void loadWidget(widgetId, asked)
+  }
+
   useEffect(() => {
     if (!id) return
     function hear(event: MessageEvent) {
@@ -1284,6 +1360,8 @@ export function WidgetFace({
         init()
       } else if (message.type === "fetch") {
         void relay(message)
+      } else if (message.type === "query") {
+        void relayQuery(message)
       }
     }
     window.addEventListener("message", hear)
@@ -1295,6 +1373,17 @@ export function WidgetFace({
     if (readyRef.current) post({ type: "theme", theme })
     // eslint-disable-next-line react-hooks/exhaustive-deps -- post reads live.current
   }, [theme])
+
+  // The connection widget.json names came into the board's workspace: a page already on
+  // show (one whose queries began failing before the state caught up) is asked to refresh.
+  // One the panel stood in for loads afresh as the panel goes.
+  const connected = !!state?.databaseConnected
+  const wasConnected = useRef(connected)
+  useEffect(() => {
+    if (connected && !wasConnected.current && readyRef.current) post({ type: "refresh" })
+    wasConnected.current = connected
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- post reads live.current
+  }, [connected])
 
   // The frame's own size, in canvas pixels (a zoom changes nothing the page lays out by).
   useEffect(() => {
@@ -1318,7 +1407,7 @@ export function WidgetFace({
   function reload(whole: boolean) {
     if (!whole && readyRef.current && frameRef.current?.contentWindow) post({ type: "refresh" })
     else setOwn((count) => count + 1)
-    if (id) void loadWidget(id)
+    if (id) void loadWidget(id, workspace)
   }
 
   async function openFolder() {
@@ -1376,9 +1465,19 @@ export function WidgetFace({
     body = (
       <WidgetKeyPanel
         state={state}
+        workspace={workspace}
         replacing={!needsKey}
         disabled={!interactive}
         onDone={() => setKeyOpen(false)}
+      />
+    )
+  } else if (needsConnection) {
+    body = (
+      <WidgetConnectionPanel
+        state={state}
+        workspace={workspace}
+        disabled={!interactive}
+        onOpen={workspace && board.openDatabases ? () => board.openDatabases?.(workspace) : undefined}
       />
     )
   } else if (framed && src) {
@@ -1454,11 +1553,13 @@ function WidgetCard({ title, detail, code, hint, tone }: { title: string; detail
  */
 function WidgetKeyPanel({
   state,
+  workspace,
   replacing,
   disabled,
   onDone,
 }: {
   state: WidgetState
+  workspace: string | null
   replacing: boolean
   disabled: boolean
   onDone: () => void
@@ -1483,7 +1584,7 @@ function WidgetKeyPanel({
     setError(null)
     // main says the key changed (sb:evt:widgetsChanged) and every face loads again; this
     // is in case that word is slow, so the panel never waits on it.
-    void loadWidget(state.id)
+    void loadWidget(state.id, workspace)
     onDone()
   }
 
@@ -1496,7 +1597,7 @@ function WidgetKeyPanel({
       setError(result.error)
       return
     }
-    void loadWidget(state.id)
+    void loadWidget(state.id, workspace)
     onDone()
   }
 
@@ -1569,6 +1670,74 @@ function WidgetKeyPanel({
         Or in a terminal: <code>node scripts/widget.js set-secret {state.id}</code>
       </small>
     </form>
+  )
+}
+
+/**
+ * The widget's database connection, asked for in place of its page: widget.json names a
+ * connection (its "database") that the board's workspace's Databases tab hasn't got — or
+ * has more than one of. The user adds it there, from where the button opens; no address
+ * or password is ever typed here, and the widget never sees one. Main then says the
+ * workspace's connections changed, and the panel goes as the state says it is there.
+ */
+function WidgetConnectionPanel({
+  state,
+  workspace,
+  disabled,
+  onOpen,
+}: {
+  state: WidgetState
+  workspace: string | null
+  disabled: boolean
+  onOpen?: () => void
+}) {
+  const name = state.database ?? ""
+  return (
+    <div
+      className="flow-widget-key nodrag nopan nowheel"
+      role="status"
+      onDoubleClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      <div className="flow-widget-key-title">
+        <RiDatabase2Line className="size-4 shrink-0" aria-hidden="true" />
+        <b>Needs a connection</b>
+      </div>
+      {!workspace ? (
+        <p>
+          {state.name} reads the database connection named <b>“{name}”</b>, but this board has no workspace yet. Pick
+          one in the ✦ Answer menu&apos;s Workspace row, then add a connection named “{name}” in its Databases tab.
+        </p>
+      ) : state.databaseDuplicate ? (
+        <p>
+          <b>{workspace}</b> has more than one connection named <b>“{name}”</b>. Remove all but one in its Databases tab
+          so {state.name} knows which to read.
+        </p>
+      ) : (
+        <p>
+          Add a connection named <b>“{name}”</b> in <b>{workspace}</b>&apos;s Databases tab.
+        </p>
+      )}
+      <p className="flow-widget-key-note">
+        {state.name} only reads it, through Switchboard, and never sees its address or password.
+      </p>
+      {onOpen ? (
+        <div className="flow-widget-key-row">
+          <button
+            type="button"
+            className="flow-widget-key-save"
+            disabled={disabled}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation()
+              onOpen()
+            }}
+          >
+            Open {workspace}&apos;s Databases tab
+          </button>
+        </div>
+      ) : null}
+    </div>
   )
 }
 

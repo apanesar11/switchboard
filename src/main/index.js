@@ -50,9 +50,10 @@ const videos = require('./videos.js');
 const sheets = require('./sheets.js');
 // Widgets on a whiteboard (§4.17): a folder of HTML served over sbwidget:// into a
 // sandboxed iframe, and the fetch proxy that holds the widget's key and keeps to its
-// manifest's base URL — so the key never reaches the renderer or the widget.
+// manifest's base URL — so the key never reaches the renderer or the widget. A widget
+// that names a saved database connection reads it through `databases` (query()).
 const widgets = require('./widgets.js');
-const widgetHost = widgets.createWidgetHost({ safeStorage });
+const widgetHost = widgets.createWidgetHost({ safeStorage, databases });
 const answer = require('./answer.js');
 const { Publisher } = require('./publisher.js');
 const { installTarget } = require('./platform.js');
@@ -1177,10 +1178,16 @@ function resolvedIds(threads) {
 
 handle('sb:ws:list', () => workspaces.discover());
 
-// Database browsing (§4.19): secrets and drivers stay in the main process.
+// Database browsing (§4.19): secrets and drivers stay in the main process. A connection
+// added or removed may be the one a widget on an open board names (§4.17), so the boards
+// are told to look again: { id: null, reason: 'database', workspace }.
+function databasesChanged(wsId, result) {
+  if (result && result.ok) send('sb:evt:widgetsChanged', { id: null, reason: 'database', workspace: wsId });
+  return result;
+}
 handle('sb:db:list', id => databases.list(id));
-handle('sb:db:add', (id, connection) => databases.add(id, connection));
-handle('sb:db:remove', (id, connectionId) => databases.remove(id, connectionId));
+handle('sb:db:add', async (id, connection) => databasesChanged(id, await databases.add(id, connection)));
+handle('sb:db:remove', async (id, connectionId) => databasesChanged(id, await databases.remove(id, connectionId)));
 handle('sb:db:entities', (id, connectionId) => databases.entities(id, connectionId));
 handle('sb:db:records', (id, connectionId, entityId) => databases.records(id, connectionId, entityId));
 
@@ -1603,12 +1610,15 @@ handle('sb:diagrams:sheetFind', async (src, sheet, query, limit) => {
 // whether there is one, how it is kept and its last four characters, and setSecret takes a
 // key in once, from the node's "Needs a key" panel. The widget's own requests come through
 // sb:widgets:fetch — the face relays them from the iframe — and main makes them with the
-// key attached, to the manifest's base URL alone.
+// key attached, to the manifest's base URL alone. A widget's database queries come through
+// sb:widgets:query, with the board's workspace the face attaches; the connection is the one
+// widget.json names in that workspace's Databases tab.
 handle('sb:widgets:list', () => widgetHost.list());
-handle('sb:widgets:state', id => widgetHost.state(id));
+handle('sb:widgets:state', (id, workspace) => widgetHost.state(id, workspace));
 handle('sb:widgets:setSecret', (id, value) => widgetHost.setSecret(id, value));
 handle('sb:widgets:clearSecret', id => widgetHost.clearSecret(id));
 handle('sb:widgets:fetch', req => widgetHost.fetch(req));
+handle('sb:widgets:query', req => widgetHost.query(req));
 handle('sb:widgets:openFolder', async id => {
   const found = widgetHost.folder(id);
   if (!found.ok) return found;
@@ -1619,6 +1629,7 @@ handle('sb:widgets:openFolder', async id => {
 // A widget's files or keys changed — an agent editing it, set-secret in a terminal, a key
 // saved or forgotten here: { id, reason: 'files' | 'secret' }. An open board reloads that
 // widget's frame on it, which is what makes "ask the agent to tweak it" show at once.
+// (A connection added or removed is { id: null, reason: 'database', workspace }, above.)
 widgetHost.onChange(change => send('sb:evt:widgetsChanged', change));
 
 /** The kept spreadsheet a sheet node's address names: { ok, file, ext } — never a PDF. */

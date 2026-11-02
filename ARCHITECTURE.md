@@ -97,7 +97,7 @@ switchboard/
   src/main/videos.js            — YouTube videos on a whiteboard: Referer, guards, title [M14]
   src/main/sheets.js            — a whiteboard's spreadsheets: read once, paged, searched [M15]
   src/main/sheet-worker.js      — reads one spreadsheet in a worker thread           [M15]
-  src/main/widgets.js           — whiteboard widgets: store, sbwidget://, keys, fetch proxy [M16]
+  src/main/widgets.js           — whiteboard widgets: store, sbwidget://, keys, fetch proxy, database relay [M16]
   src/renderer/widget-sdk.js    — window.Switchboard, served into every widget's frame [M16]
   scripts/widget.js             — the widgets' CLI: create, check, set-secret, add, remove [M16]
   src/main/answer.js            — ✦ Answer: Claude Code / Codex / Claude API / OpenAI [M11]
@@ -1220,7 +1220,8 @@ holds `widget.json` and the widget's own files (§5 M16):
 { "name": "Weather", "entry": "index.html",
   "size": { "width": 480, "height": 300 }, "minSize": { "width": 200, "height": 120 },
   "api": { "baseUrl": "https://api.example.com/v1/", "secret": "API_KEY",
-           "header": "Authorization", "prefix": "Bearer " } }
+           "header": "Authorization", "prefix": "Bearer " },
+  "database": "Main database" }
 ```
 
 `name` (1–60 characters) is required; `entry` defaults to `index.html` and must be an
@@ -1229,8 +1230,12 @@ size never under 120×70); `api.baseUrl` is https, or http to `localhost`/`127.0
 `[::1]` only, with no credentials, query or fragment, and is read as a directory (its path
 ends in "/"); `api.secret` is a key's NAME (`/^[A-Z][A-Z0-9_]{0,63}$/`), never a value;
 `header` defaults to Authorization and `prefix` to `"Bearer "` for it (empty for any other
-header). Unknown fields are ignored; a manifest that fails names its problem, and the node
-shows it. Nothing in the folder is ever a key: the folder is served to the page.
+header). `database` is the NAME of a connection saved in the Databases tab (§4.19) of the
+board's workspace — 1–80 characters, no control characters, no space at either end (the
+tab keeps names trimmed), and never anything shaped like a URI — beside `api` or alone.
+Unknown fields are ignored; a manifest that fails names its problem, and the node shows
+it. Nothing in the folder is ever a key or a connection string: the folder is served to
+the page.
 
 **It is served over its own scheme, into a sandboxed frame.** `index.js` registers
 `sbwidget` beside `sbimg` (standard, secure, `supportFetchAPI`) and serves it with
@@ -1272,7 +1277,9 @@ a loop can't wait for the user to come back and send them off again.
 **The SDK is the whole contract a widget is written against** (`window.Switchboard`):
 `ready()` → `{ widget: { id, name }, theme, size }`; `fetch(path, { method, headers,
 query, body })` → `{ ok, status, statusText, headers, text(), json() }` (rejecting with
-the app's sentence, `error.code` 'needs-secret' when no key is kept); `onTheme`,
+the app's sentence, `error.code` 'needs-secret' when no key is kept); `db.find(collection,
+filter?, { projection, sort, limit, skip }?)`, `db.aggregate(collection, pipeline)`,
+`db.count(collection, filter?)`, `db.sql(text, params?)` and `db.batch(ops)` (below); `onTheme`,
 `onResize`, `onRefresh` (each answering an unsubscribe) and `theme`, `size`, `widget`. It
 keeps `<html data-theme>` and `color-scheme` in step with the board — whether or not the
 page calls `ready()`: the SDK posts `ready` itself as it loads (and `ready()` again only
@@ -1280,9 +1287,9 @@ while no `init` has come), since the face sends `theme` and `resize` only to a p
 has said it is ready, so a page whose CSS follows `data-theme` and needs nothing else
 still follows the board. Messages are objects
 with `v: 1` and `sb: 'widget'` (to the board) or `sb: 'host'` (to the widget): `ready`,
-`fetch {id, path, init}` one way; `init {widget, theme, size}`, `theme`, `resize`,
-`refresh`, `response {id, ok, status, statusText, headers, body}` or `response {id,
-error, code?}` the other. Measured 2026-11-01 (Electron 44): the board sees a widget's
+`fetch {id, path, init}`, `query {id, ops}` one way; `init {widget, theme, size}`, `theme`,
+`resize`, `refresh`, `response {id, ok, status, statusText, headers, body}` or `response
+{id, error, code?}`, `result {id, results}` or `result {id, error, code}` the other. Measured 2026-11-01 (Electron 44): the board sees a widget's
 messages with `event.origin` `sbwidget://<id>`, and posts to it with that as the target
 origin; the widget sees the board's as `null` (a file:// page's opaque origin), so the SDK
 reads only messages whose source is its parent window and posts to `*` — nothing it sends
@@ -1341,15 +1348,94 @@ for, which the key panel says; `check` says the same. A pending key with no orig
 (written by hand) is bound to the widget's API when the app first sees it; a kept entry
 with none is never sent.
 
+**A widget may read a database the user saved, instead of an API** (added 2026-11-01).
+widget.json's `database` names a connection in the Databases tab (§4.19) of the board's
+workspace — the board file's `workspace`, the rail workspace its ✦ Answer reads. The SDK's
+`Switchboard.db` posts `query {id, ops}`; the face relays it (`sb:widgets:query`) with the
+widget's id from its node and the workspace from its board (`WidgetBoardContext`, which
+`DiagramsPage` provides for both canvases) — never either from the message — and
+`createWidgetHost().query` reads the connection's name from the manifest, now, and hands
+`(workspace, name, ops)` to `databases.query`. Nothing the frame sends can choose another
+connection or workspace. `ops` is an array of `{ find, filter?, projection?, sort?, limit?,
+skip? }`, `{ aggregate, pipeline }`, `{ count, filter? }` or `{ sql, params? }`, at most 20
+(a single call is a one-op batch), run in order on ONE client — one read-only transaction
+for PostgreSQL — and answered `{ ok, data: results }` in the same order, or `{ ok:false,
+code, error }` with `code` one of `needs-connection` (no workspace; none, or more than one,
+of that name; no `database` in widget.json), `refused` (turned down before running),
+`too-large`, `timeout` or `database` (the database's own message — a server error's text on
+one line with anything address-shaped taken out; a connection or authentication failure
+is `errorMessage`'s credential-free sentence). The SDK rejects with an `Error` carrying that
+`code`.
+
+The checks are `databases.js`'s (`planBatch`), before any connection is looked up: the
+ops survive a JSON round trip and are at most 256 KB; each names one kind and only that
+kind's keys. MongoDB — only `find`, `aggregate` and `countDocuments` are ever called, each
+with `maxTimeMS`; every filter, projection, sort and pipeline is walked to any depth and
+refused if a key is `$where`, `$function`, `$accumulator`, `$out`, `$merge` or starts with `$_`
+(MongoDB's internals, some of which run JavaScript); `{"$numberLong"}` arrives as a BigInt so
+a 64-bit id is never rounded; every stage,
+including those in `$lookup.pipeline`, `$facet` branches and `$unionWith.pipeline`, must be
+one of `$match $project $addFields $set $unset $group $sort $limit $skip $unwind $lookup
+$count $facet $bucket $bucketAuto $sortByCount $replaceRoot $replaceWith $sample $unionWith
+$densify $fill $setWindowFields $graphLookup $redact`; collection names (and `$lookup`/
+`$graphLookup` `from`, `$unionWith`'s collection) are non-empty and never `system.*`. The
+inputs are then MongoDB Extended JSON, deserialized with the driver's own `BSON.EJSON`
+(relaxed): `{"$oid"}` an ObjectId, `{"$date"}` a Date. A find's limit defaults to 1,000 and
+is capped at 10,000. PostgreSQL — each `sql`'s first word, past whitespace and `--` and
+(nested) `/* */` comments, must be SELECT, WITH, VALUES or TABLE (`sqlLead`); it runs as a
+pg-cursor (`new Cursor(sql, params)`, read `BATCH_SIZE` rows at a time), which always speaks
+the extended protocol, so the server refuses a second statement (answered `refused`),
+inside the module's `BEGIN READ ONLY` with its statement and lock timeouts. SET, RESET,
+BEGIN, COMMIT, ROLLBACK and everything else fail the first-word rule, so nothing in a batch
+can turn read-only off, and a write the server refuses as read-only (`25006`, a
+data-modifying CTE) is answered `refused`. READ ONLY does not stop every function a SELECT
+can call, so SQL naming one that acts outside the transaction is `refused` by its text
+(`WIDGET_SQL_BLOCKED`: `dblink`/`dblink_*`, which commits over a connection of its own,
+`pg_terminate_backend`, `pg_cancel_backend`, `pg_advisory_*`/`pg_try_advisory_*`, the
+large-object writers and `lo_export`, and `set_config`, which could switch the statement
+timeout off). A text check misses SQL built from strings (`query_to_xml`), so the real
+guard is the connection's role — the README and the widget skill ask for one with only
+SELECT grants and no `pg_signal_backend`. A MongoDB op on a PostgreSQL
+connection, or `sql` on MongoDB, is `refused`. Results go through the browser's own
+`normalize()` (an ObjectId its hex string, a Date its ISO string, a Long or Decimal128 a
+string, binary `{ $binary }`); more than 10,000 rows from any op, or 8 MB in all, is
+`too-large`, with no partial results — counted row by row as cursor reads arrive, never
+after a whole result is in memory. One row can still be too wide (a value hundreds of MB
+long is one message the driver buffers whole), so `wireGuard` also counts the bytes the
+client's socket receives during the batch and, past twice the byte cap (a row's text on
+the wire is no longer than its JSON, bytea aside at 1.5 times), closes the socket and
+answers `too-large`. A batch has 15 s (`application_name`/`appName`
+`Switchboard widget`), and shares the browser's four slots: where the browser is refused
+when all four are busy, a widget's batch waits its turn, up to 15 s, then answers
+`timeout`; quitting wakes and ends the waiters. `widgets.js` lets a widget have at most 8
+batches on their way at once (`QUERY_MAX_INFLIGHT`, then `refused`), so a page that loops
+can't pile up waiters.
+
+The state answers whether the board's workspace has exactly one connection of the name
+(`databaseConnected`, `databaseDuplicate`) from that workspace's metadata file alone —
+`databases.connectionNames`, names only, nothing decrypted. The faces' store is kept by
+widget and workspace (`useWidget`). While the connection isn't there the face stands in
+with **Needs a connection** — "Add a connection named “<name>” in <workspace>'s Databases
+tab.", or more than one of that name, or a note that the board has no workspace yet — and
+a button that opens that workspace's Databases tab in the main window (`onOpenDatabases`,
+which `views/whiteboards.js` answers with `SB.go({ view: 'workspace', wsId, tab:
+'databases' })`). `index.js` sends `{ id: null, reason: 'database', workspace }` on
+`sb:evt:widgetsChanged` whenever a connection is added or removed (`sb:db:add`,
+`sb:db:remove`); the faces of widgets that read a database in that workspace ask for their
+state again — the panel goes, the page loads, and a page already on show is sent `refresh`.
+A query answered `needs-connection` has the face ask again too. Widgets with only `api`
+behave as before.
+
 | `window.sb` | channel | returns |
 |---|---|---|
 | `sb.widgetsList()` | `sb:widgets:list` | `{ ok, data: WidgetState[] }` — every installed widget, by name |
-| `sb.widgetsState(id)` | `sb:widgets:state` | `{ ok, data: { id, name, entry, size, minSize, apiHost, secretName, hasSecret, secretEncrypted, secretLast4, secretFor, keychain, error, code } }` — `code` 'missing' (not installed) or 'manifest' (widget.json wrong), with `error` the sentence; `secretFor` the host a kept key was given for when widget.json now names another API ('' when nothing says), else null. Never a key |
+| `sb.widgetsState(id, workspace?)` | `sb:widgets:state` | `{ ok, data: { id, name, entry, size, minSize, apiHost, secretName, hasSecret, secretEncrypted, secretLast4, secretFor, keychain, database, databaseConnected, databaseDuplicate, workspace, error, code } }` — `code` 'missing' (not installed) or 'manifest' (widget.json wrong), with `error` the sentence; `secretFor` the host a kept key was given for when widget.json now names another API ('' when nothing says), else null; `database` the connection name widget.json gives, `databaseConnected` whether the board's `workspace` has exactly one of that name. Never a key, nor anything of a connection but its name |
 | `sb.widgetsSetSecret(id, value)` | `sb:widgets:setSecret` | the state — the key the manifest names, checked (non-empty once trimmed, no whitespace, at most 4096 characters) and kept encrypted, for the API widget.json names now |
 | `sb.widgetsClearSecret(id)` | `sb:widgets:clearSecret` | the state — every key of the widget forgotten, kept or waiting |
 | `sb.widgetsOpenFolder(id)` | `sb:widgets:openFolder` | `{ ok }` — `shell.openPath` on the widget's folder; a smoke run logs it instead |
 | `sb.widgetsFetch(req)` | `sb:widgets:fetch` | `req = { id, path, method?, headers?, query?, body? }` → `{ ok, status, statusText, headers, body }` or `{ ok:false, error, code? }` |
-| `sb.onWidgetsChanged(cb)` | `sb:evt:widgetsChanged` | `{ id, reason: 'files' \| 'secret' }` |
+| `sb.widgetsQuery(req)` | `sb:widgets:query` | `req = { id, workspace, ops }` — id and workspace the node's and the board's → `{ ok, data: results }` or `{ ok:false, error, code }`, code `needs-connection` \| `refused` \| `too-large` \| `timeout` \| `database` |
+| `sb.onWidgetsChanged(cb)` | `sb:evt:widgetsChanged` | `{ id, reason: 'files' \| 'secret' }`, or `{ id: null, reason: 'database', workspace }` when a connection is added or removed |
 
 **The face.** `WidgetFace` is both canvases' (the editor wraps it in `WidgetNode` with its
 outline, dots, fold badge and resize handles; the read-only canvas draws it in `FlowBox`).
@@ -1401,8 +1487,14 @@ API origin it named when it asked); `add <id> --board <board> [--folder] [--x --
 never opened given the places it is drawn at, the widget beside what is there at its
 manifest's size, an open board adopting it as one undo step); and `remove <id> [--yes]`
 (refused while a board shows it, unless --yes; the folder moved aside to
-`widgets/.removed/`, never deleted, and its keys forgotten). `npm run test:widgets` covers
-the module, the editor's shape and the CLI under plain node; `npm run
+`widgets/.removed/`, never deleted, and its keys forgotten). `create --database <name>`
+writes `database` and a starter page that points at `Switchboard.db`; `check` prints the
+widget's database and, for each board it is on, whether that board's workspace has a
+connection of that name, and `add` says the same for the board it adds to — from the
+names in the workspace's metadata file alone (`databases.connectionNames`), never
+decrypting anything. `npm run test:widgets` covers the module, the editor's shape and the
+CLI under plain node (`npm run test:databases` the widget query's checks, with fictional
+drivers); `npm run
 test:widgets:browser` the production renderer with the real store, scheme, guard and
 proxy against a local server.
 
@@ -2215,7 +2307,9 @@ sb.onOpenSettings(() => {})          // 'sb:evt:openSettings' — App ▸ Settin
 sb.onDiagramsImageOffer((offer) => {}) // 'sb:evt:diagramsImageOffer' — {guestId, url, fallback, referrer}:
                                      // Add Image to Whiteboard, in the Google Images panel; §4.17
 sb.onWidgetsChanged((change) => {})  // 'sb:evt:widgetsChanged' — {id, reason:'files'|'secret'}: a
-                                     // widget's files or key changed; its frames load again; §4.17
+                                     // widget's files or key changed; its frames load again; or
+                                     // {id:null, reason:'database', workspace}: a connection was
+                                     // added or removed there; §4.17
 ```
 
 `sb:evt:edit` exists because a menu accelerator wins over the renderer's keydown, and
@@ -2579,7 +2673,10 @@ editor or database write action.
 The service is `createDatabases({ directory, resolveWorkspace, safeStorage, drivers? })`
 in `src/main/databases.js`. Main supplies a `databases/` directory beside
 `config.CONFIG_FILE`, a workspace lookup, and Electron's safeStorage. The injectable
-`drivers` are for fictional test fixtures. Renderer calls are:
+`drivers` are for fictional test fixtures. Its `query(wsId, name, ops)` is a whiteboard
+widget's read of a saved connection by name — checked, read-only, and answered as plain
+JSON (§4.17, Widgets); it has no renderer call of its own, only `sb:widgets:query`.
+Renderer calls are:
 
 | Bridge | IPC | Result |
 | --- | --- | --- |
@@ -2600,7 +2697,12 @@ connection metadata never drops a database, table or collection.
 Entities are `{ id, name, schema?, kind: 'table' | 'view' | 'collection' }`. PostgreSQL
 entity IDs encode their schema/name; the service revalidates them against accessible
 catalog entries before quoting identifiers and selecting. Every PostgreSQL operation
-uses a read-only transaction. MongoDB uses collection listing and `find({})` only.
+uses a read-only transaction. A PostgreSQL request stopped before its task finished —
+its time limit, its connection's removal, quitting — also gets a CancelRequest
+(`cancelStatement`: the client's process ID and secret key on a connection of its own,
+best effort within 3 s, run beside `client.end()`), since closing the socket alone leaves
+a busy backend running until it next writes. MongoDB uses collection listing and
+`find({})` only.
 Drivers and database cursors are closed in finally paths and at app teardown. Results
 normalize dates, large integers and BSON values into IPC-safe objects while preserving
 nested fields. Columns are `{ name, type }`.

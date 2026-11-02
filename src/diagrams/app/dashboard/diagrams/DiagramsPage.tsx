@@ -19,7 +19,9 @@
 //     Duplicate, which the admin doesn't have. Terminals float over the board in the
 //     host's layer (views/wbterminals.js); this page only asks for them.
 //   * ✦ Answer reads the board's own workspace (`board.workspace`), changed from the
-//     editor's AI menu and remembered with the board.
+//     editor's AI menu and remembered with the board. A widget that reads a database
+//     finds its connection in that workspace's Databases tab (WidgetBoardContext, for
+//     both canvases), which `onOpenDatabases` opens in the main window.
 //   * `active`: false while off screen. Each board's tree stays mounted (the host
 //     keeps it), but may not answer keys meant for a terminal or another canvas. The
 //     editor hears it too (`shown`) so its Google Images panel stops accepting input
@@ -77,6 +79,7 @@ import {
 } from "@/components/Dropdown"
 import { toast } from "@/components/Toast"
 import { DiagramCanvas } from "./DiagramCanvas"
+import { WidgetBoardContext, type WidgetBoard } from "./DiagramNodes"
 import { DeleteDiagramDialog } from "./DeleteDiagramDialog"
 import { FlowEditor, type FlowEditorHandle } from "./FlowEditor"
 import { RenameDiagramDialog } from "./RenameDiagramDialog"
@@ -108,6 +111,8 @@ export type DiagramsPageProps = {
   /** False while off screen. */
   active: boolean
   onOpenSettings?: () => void
+  /** A workspace's Databases tab, in the main window: a widget's "Needs a connection". */
+  onOpenDatabases?: (wsId: string) => void
   /** Open another board: Duplicate's copy. The host gives it a tab of its own. */
   onOpenBoard: (id: string) => void
   /** Leave the board for `folderId`'s list: Delete, or Back. */
@@ -160,6 +165,7 @@ export function DiagramsPage({
   boardId,
   active,
   onOpenSettings,
+  onOpenDatabases,
   onOpenBoard,
   onClosed,
   onBoardChange,
@@ -245,6 +251,12 @@ export function DiagramsPage({
 
   const isArchived = board !== null && board.archivedAt !== null
   const editorShown = board !== null && board.spec !== null && !isArchived
+  // Switchboard: what a widget on either canvas knows of the board — its workspace.
+  const boardWorkspace = board?.workspace ?? null
+  const widgetBoard = useMemo<WidgetBoard>(
+    () => ({ workspace: boardWorkspace, openDatabases: onOpenDatabases }),
+    [boardWorkspace, onOpenDatabases],
+  )
 
   // ── Loading ──────────────────────────────────────────────────────────
 
@@ -1065,6 +1077,7 @@ export function DiagramsPage({
           ) : null}
 
           <div className="min-h-0 flex-1">
+            <WidgetBoardContext.Provider value={widgetBoard}>
             {board.spec === null ? (
               <div className="flex size-full items-center justify-center p-6">
                 <div className="max-w-md rounded-md border border-red-200 bg-red-50 p-4 text-center dark:border-red-900/50 dark:bg-red-950/40">
@@ -1109,6 +1122,7 @@ export function DiagramsPage({
                 boardId={board.id}
               />
             )}
+            </WidgetBoardContext.Provider>
           </div>
         </div>
       </div>

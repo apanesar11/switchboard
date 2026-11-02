@@ -27,6 +27,12 @@
 // the manifest's api.baseUrl at the time — and sent to no other: widget.json is the
 // agent's to edit, and a widget pointed elsewhere asks the user for its key again.
 //
+// A widget may read a database instead of an API: widget.json's "database" names a
+// connection the user saved in the Databases tab of the board's workspace
+// (src/main/databases.js), and Switchboard.db asks the host, which reads the name from
+// the manifest here (createWidgetHost().query) — never from the frame — and runs the
+// widget's read-only queries in main. The connection's URI never leaves main either.
+//
 // Keys are encrypted with Electron's safeStorage (the macOS Keychain), as answer.js keeps
 // keys.json. The CLI is plain node and cannot use safeStorage, so `widget.js set-secret`
 // writes the value into the pending file instead (setPendingSecret, here, so the CLI and
@@ -50,6 +56,7 @@ const fs = require('fs');
 const path = require('path');
 
 const config = require('./config.js');
+const databaseStore = require('./databases.js');
 
 // The id is the sbwidget:// host, and a URL host is lowercase — so is the id.
 const WIDGET_ID_RE = /^[a-z][a-z0-9-]{0,62}$/;
@@ -57,6 +64,8 @@ const WIDGET_ID_RE = /^[a-z][a-z0-9-]{0,62}$/;
 const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const SECRET_MAX = 4096;
 const NAME_MAX = 60;
+// A saved connection's name, as the Databases tab allows one (databases.js add()).
+const DATABASE_NAME_MAX = 80;
 const ENTRY_MAX = 200;
 const PREFIX_MAX = 64;
 const MANIFEST_FILE = 'widget.json';
@@ -133,6 +142,9 @@ const FETCH_TIMEOUT_MS = 20 * 1000;
 const FETCH_MAX_BYTES = 5 * 1024 * 1024;
 const FETCH_BODY_MAX_BYTES = 1024 * 1024;
 const FETCH_MAX_INFLIGHT = 8;
+// Database batches on their way at once, per widget (each may wait for a free slot): a
+// page that loops can't pile up waiters. Switchboard.db.batch groups what belongs together.
+const QUERY_MAX_INFLIGHT = 8;
 const FETCH_PATH_MAX = 4096;
 const FETCH_MAX_HEADERS = 40;
 const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}$/;
@@ -184,6 +196,11 @@ function secretsFile() {
 
 function pendingFile() {
   return path.join(configDir(), PENDING_NAME);
+}
+
+/** Where the Databases tab keeps each workspace's connections — index.js hands databases.js the same. */
+function databasesDir() {
+  return path.join(configDir(), 'databases');
 }
 
 // ── small helpers ───────────────────────────────────────────────────────────
@@ -330,8 +347,22 @@ function manifestApi(raw) {
 }
 
 /**
- * widget.json, read: `{ ok, manifest: { name, entry, size?, minSize?, api? } }` or `{ ok:
- * false, error }` naming the problem. Unknown fields are ignored.
+ * The manifest's database: the NAME of a connection saved in the Databases tab of the
+ * board's workspace, exactly as it is saved there (names are kept trimmed, so a space at
+ * either end could never match). Never a connection string.
+ */
+function manifestDatabase(raw) {
+  if (typeof raw !== 'string' || !raw) return { error: '"database" must be the name of a connection saved in the workspace\'s Databases tab, like "Main database"' };
+  if (raw.length > DATABASE_NAME_MAX) return { error: `"database" must be ${DATABASE_NAME_MAX} characters or fewer` };
+  if (/[\u0000-\u001f\u007f]/.test(raw)) return { error: '"database" has no line breaks or control characters in it' };
+  if (raw !== raw.trim()) return { error: '"database" has no spaces at either end — it must match the connection\'s name exactly' };
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return { error: '"database" is a connection\'s NAME, never its address: the user adds the connection in the workspace\'s Databases tab' };
+  return { value: raw };
+}
+
+/**
+ * widget.json, read: `{ ok, manifest: { name, entry, size?, minSize?, api?, database? } }`
+ * or `{ ok: false, error }` naming the problem. Unknown fields are ignored.
  */
 function parseManifest(raw) {
   const fail = error => ({ ok: false, error: `widget.json: ${error}` });
@@ -358,7 +389,17 @@ function parseManifest(raw) {
     if (api.error) return fail(api.error);
     manifest.api = api.value;
   }
+  if (raw.database !== undefined && raw.database !== null) {
+    const database = manifestDatabase(raw.database);
+    if (database.error) return fail(database.error);
+    manifest.database = database.value;
+  }
   return { ok: true, manifest };
+}
+
+/** A board's workspace as a request names one — a rail workspace id — or null. */
+function cleanWorkspace(value) {
+  return typeof value === 'string' && value && value === value.trim() && value.length <= 4096 ? value : null;
 }
 
 /**
@@ -910,18 +951,25 @@ function reachError(err, host) {
 
 /**
  * Main's widgets, with what plain node hasn't got handed in: `safeStorage` (Electron's),
- * and for a test `fetch` (Node's global fetch by default — never Electron's net.fetch,
- * which would carry the app session's cookies), `timeoutMs` and `maxBytes`.
+ * `databases` (index.js's createDatabases(), whose query() runs a widget's batch), and
+ * for a test `fetch` (Node's global fetch by default — never Electron's net.fetch, which
+ * would carry the app session's cookies), `timeoutMs`, `maxBytes` and `connectionNames`
+ * (wsId → the names saved in that workspace's Databases tab; read from databasesDir() by
+ * default, without decrypting anything).
  *
- * Answers: list(), state(id), setSecret(id, value), clearSecret(id), importPending(),
- * fetch(req), watch(), onChange(fn), folder(id). Each resolves to a value; none throws.
+ * Answers: list(), state(id, workspace?), setSecret(id, value), clearSecret(id),
+ * importPending(), fetch(req), query(req), watch(), onChange(fn), folder(id). Each
+ * resolves to a value; none throws.
  */
 function createWidgetHost(opts = {}) {
   const safeStorage = opts.safeStorage || null;
+  const databases = opts.databases || null;
+  const connectionNames = opts.connectionNames || (wsId => databaseStore.connectionNames(databasesDir(), wsId));
   const fetchFn = opts.fetch || ((...args) => globalThis.fetch(...args));
   const timeoutMs = opts.timeoutMs || FETCH_TIMEOUT_MS;
   const maxBytes = opts.maxBytes || FETCH_MAX_BYTES;
   const inflight = new Map();
+  const queries = new Map();
   const listeners = new Set();
   // What each widget's keys looked like when last told of (prints), so watch() says
   // nothing of a write this process made and has already told of.
@@ -1099,11 +1147,12 @@ function createWidgetHost(opts = {}) {
     };
   }
 
-  function stateOf(id) {
+  function stateOf(id, workspace = null) {
     const out = {
       id, name: id, entry: null, size: null, minSize: null, apiHost: null,
       secretName: null, hasSecret: false, secretEncrypted: false, secretLast4: null, secretFor: null,
-      keychain: encrypting(), error: null, code: null,
+      keychain: encrypting(), database: null, databaseConnected: false, databaseDuplicate: false,
+      workspace, error: null, code: null,
     };
     const read = readManifest(id);
     if (!read.ok) return Object.assign(out, { error: read.error, code: read.code });
@@ -1113,25 +1162,36 @@ function createWidgetHost(opts = {}) {
       out.apiHost = m.api.host;
       if (m.api.secret) Object.assign(out, { secretName: m.api.secret }, secretInfo(id, m.api.secret, m.api.origin));
     }
+    if (m.database) {
+      // Names only: whether the board's workspace has exactly one connection called this.
+      let names = [];
+      try { names = workspace ? connectionNames(workspace) : []; } catch (_) { names = []; }
+      const count = Array.isArray(names) ? names.filter(name => name === m.database).length : 0;
+      Object.assign(out, { database: m.database, databaseConnected: count === 1, databaseDuplicate: count > 1 });
+    }
     return out;
   }
 
   /**
-   * One widget as a node's face needs it: `{ ok, data: { id, name, entry, size, minSize,
-   * apiHost, secretName, hasSecret, secretEncrypted, secretLast4, secretFor, keychain,
-   * error, code } }` — `error`/`code` set (and the rest blank) for a widget that isn't
-   * installed ('missing') or whose widget.json is wrong ('manifest'). Never a key.
+   * One widget as a node's face on a board in `workspace` (a rail workspace id, or none)
+   * needs it: `{ ok, data: { id, name, entry, size, minSize, apiHost, secretName,
+   * hasSecret, secretEncrypted, secretLast4, secretFor, keychain, database,
+   * databaseConnected, databaseDuplicate, workspace, error, code } }` — `error`/`code` set
+   * (and the rest blank) for a widget that isn't installed ('missing') or whose widget.json
+   * is wrong ('manifest'); `database` the connection name widget.json gives, and
+   * `databaseConnected` whether that workspace has exactly one connection of that name.
+   * Never a key, nor anything of a connection but its name.
    */
-  function state(id) {
+  function state(id, workspace) {
     if (!isWidgetId(id)) return { ok: false, error: 'A widget id is lowercase letters, digits and dashes, starting with a letter' };
     importPending();
-    return { ok: true, data: stateOf(id) };
+    return { ok: true, data: stateOf(id, cleanWorkspace(workspace)) };
   }
 
   /** Every installed widget's state, by name. */
   function list() {
     importPending();
-    const data = listIds().map(stateOf);
+    const data = listIds().map(id => stateOf(id));
     data.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id.localeCompare(b.id));
     return { ok: true, data };
   }
@@ -1304,6 +1364,43 @@ function createWidgetHost(opts = {}) {
   }
 
   /**
+   * A widget's database batch, made here: `req = { id, workspace, ops }` — `workspace` the
+   * board's, which the face attaches, never the frame — → `{ ok, data: results }` (one per
+   * op, in order) or `{ ok:false, error, code }`, code one of 'needs-connection',
+   * 'refused', 'too-large', 'timeout', 'database'. The connection is the one widget.json
+   * names, read again now: nothing the frame sends can choose another.
+   */
+  async function query(req) {
+    const r = isObject(req) ? req : {};
+    const read = readManifest(r.id);
+    if (!read.ok) return { ok: false, code: 'refused', error: read.error };
+    const name = read.manifest.database;
+    if (!name) return { ok: false, code: 'needs-connection', error: 'This widget\'s widget.json names no "database", so it has no connection to read' };
+    const workspace = cleanWorkspace(r.workspace);
+    if (!workspace) return { ok: false, code: 'needs-connection', error: `This board has no workspace, so there is no Databases tab to find “${name}” in — pick the board's workspace first` };
+    if (!databases || typeof databases.query !== 'function') return { ok: false, code: 'database', error: 'This build of Switchboard can\'t reach databases' };
+    const busy = queries.get(r.id) || 0;
+    if (busy >= QUERY_MAX_INFLIGHT) {
+      return { ok: false, code: 'refused', error: `This widget already has ${QUERY_MAX_INFLIGHT} database queries on their way — wait for one to finish, or group them with Switchboard.db.batch` };
+    }
+    queries.set(r.id, busy + 1);
+    let result;
+    try {
+      result = await databases.query(workspace, name, r.ops);
+    } catch (err) {
+      // Never the error's message: a driver's may carry the connection's address.
+      console.error('[switchboard] widgets: a database query failed:', (err && err.name) || 'error');
+      return { ok: false, code: 'database', error: 'The database request failed' };
+    } finally {
+      const left = (queries.get(r.id) || 1) - 1;
+      if (left > 0) queries.set(r.id, left);
+      else queries.delete(r.id);
+    }
+    if (result && result.ok) return { ok: true, data: result.results };
+    return { ok: false, code: (result && result.code) || 'database', error: (result && result.error) || 'The database request failed' };
+  }
+
+  /**
    * Watches widgets/ (recursively) and the keys files beside the config: a widget whose
    * files changed is told of as `{ id, reason: 'files' }` once its folder has been quiet
    * for WATCH_SETTLE_MS — what makes an agent's edit show on an open board at once — and
@@ -1361,7 +1458,7 @@ function createWidgetHost(opts = {}) {
     return stop;
   }
 
-  return { list, state, setSecret, clearSecret, importPending, fetch: proxyFetch, watch, onChange, folder };
+  return { list, state, setSecret, clearSecret, importPending, fetch: proxyFetch, query, watch, onChange, folder };
 }
 
 module.exports = {
@@ -1396,6 +1493,7 @@ module.exports = {
   widgetDir,
   secretsFile,
   pendingFile,
+  databasesDir,
   WIDGET_ID_RE,
   SECRET_NAME_RE,
   MIME,
@@ -1404,4 +1502,5 @@ module.exports = {
   RESERVED,
   SDK_FILE,
   FETCH_MAX_INFLIGHT,
+  QUERY_MAX_INFLIGHT,
 };

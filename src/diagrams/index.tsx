@@ -32,6 +32,8 @@ type Props = {
   boardId: string
   active: boolean
   onOpenSettings(): void
+  /** A widget's "Needs a connection": the host shows that workspace's Databases tab. */
+  onOpenDatabases?(wsId: string): void
   /** Duplicate: the host opens the copy in a tab of its own, which changes the route. */
   onOpenBoard(id: string): void
   /** After Delete, and Back on a board that no longer exists or couldn't be read. */
@@ -75,6 +77,7 @@ type PickRequest = {
 
 type Callbacks = {
   onOpenSettings: () => void
+  onOpenDatabases: (wsId: string) => void
   onOpenBoard: (id: string) => void
   onClosed: (folderId: string | null) => void
   onBoardChange: (board: WhiteboardSummary | null, folder: WhiteboardFolder | null) => void
@@ -133,6 +136,7 @@ function callbacksFor(instance: Instance): Callbacks {
   const onBoardChange = relay("onBoardChange")
   return {
     onOpenSettings: relay("onOpenSettings"),
+    onOpenDatabases: relay("onOpenDatabases"),
     onOpenBoard: relay("onOpenBoard"),
     onClosed: relay("onClosed"),
     onBoardChange: (board, folder) => {
@@ -325,6 +329,7 @@ function render(instance: Instance) {
         boardId={current.boardId}
         active={current.active}
         onOpenSettings={callbacks.onOpenSettings}
+        onOpenDatabases={callbacks.onOpenDatabases}
         onOpenBoard={callbacks.onOpenBoard}
         onClosed={callbacks.onClosed}
         onBoardChange={callbacks.onBoardChange}

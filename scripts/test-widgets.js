@@ -160,6 +160,27 @@ test('readManifest tells a widget that is not installed from one whose widget.js
   assert.equal(widgets.readManifest('Bad').code, 'id');
 });
 
+test('a manifest may name a saved database connection — its exact name, never an address', () => {
+  const alone = widgets.parseManifest({ name: 'Ledger', database: 'Main database' });
+  assert.deepEqual(alone, { ok: true, manifest: { name: 'Ledger', entry: 'index.html', database: 'Main database' } });
+  const both = widgets.parseManifest({ name: 'Ledger', database: 'D', api: { baseUrl: 'https://api.example.com/' } });
+  assert.equal(both.manifest.database, 'D');
+  assert.equal(both.manifest.api.host, 'api.example.com');
+  assert.equal(widgets.parseManifest({ name: 'Ledger', database: 'x'.repeat(80) }).ok, true);
+  for (const [database, message] of [
+    ['', /name of a connection/],
+    [7, /name of a connection/],
+    ['x'.repeat(81), /80 characters or fewer/],
+    ['Main\ndatabase', /control characters/],
+    [' Main database', /no spaces at either end/],
+    ['postgresql://reader:secret@db.example.test/sample', /NAME, never its address/],
+  ]) {
+    const result = widgets.parseManifest({ name: 'Ledger', database });
+    assert.equal(result.ok, false, JSON.stringify(database));
+    assert.match(result.error, message, JSON.stringify(database));
+  }
+});
+
 // ── the scheme ─────────────────────────────────────────────────────────────
 
 const PAGE = '<!doctype html><title>Demo</title><script src="/__switchboard/widget.js"></script><p>Demo</p>';
@@ -684,6 +705,83 @@ test('a "widget" node needs its id, is labelled with its id by default, and is 4
   assert.throws(() => inspectFlowCondenseSelection(pair, ['w', 'q']), /Leave widgets out of the selection/);
 });
 
+// ── database connections ───────────────────────────────────────────────────
+
+/** A workspace's Databases-tab metadata, as databases.js writes it — names only matter here. */
+function writeConnections(dir, wsId, names) {
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, require('node:crypto').createHash('sha256').update(wsId).digest('hex') + '.json');
+  const connections = names.map((name, i) => ({
+    id: `00000000-0000-4000-8000-00000000000${i}`, name, provider: 'postgres', host: 'db.example.test', database: 'sample',
+    createdAt: '2026-01-01T00:00:00.000Z', encryptedUri: 'bm90LWEtcmVhbC1zZWNyZXQ=',
+  }));
+  fs.writeFileSync(file, JSON.stringify({ version: 1, connections }));
+}
+
+test('a widget\'s state says whether the board\'s workspace has the connection its widget.json names', () => {
+  makeWidget('ledger', { name: 'Ledger', database: 'Main database' }, { 'index.html': PAGE });
+  const names = { 'sample-workspace': ['Main database', 'Other'], 'twice-workspace': ['Main database', 'Main database'], 'empty-workspace': [] };
+  const host = widgets.createWidgetHost({ safeStorage: fakeSafeStorage(), connectionNames: ws => names[ws] || [] });
+  const pick = data => ({ database: data.database, connected: data.databaseConnected, duplicate: data.databaseDuplicate, workspace: data.workspace });
+  assert.deepEqual(pick(host.state('ledger', 'sample-workspace').data), { database: 'Main database', connected: true, duplicate: false, workspace: 'sample-workspace' });
+  assert.deepEqual(pick(host.state('ledger', 'empty-workspace').data), { database: 'Main database', connected: false, duplicate: false, workspace: 'empty-workspace' });
+  assert.deepEqual(pick(host.state('ledger', 'twice-workspace').data), { database: 'Main database', connected: false, duplicate: true, workspace: 'twice-workspace' });
+  assert.deepEqual(pick(host.state('ledger').data), { database: 'Main database', connected: false, duplicate: false, workspace: null });
+  assert.deepEqual(pick(host.state('ledger', ' sample-workspace').data).workspace, null, 'a workspace id is taken as it is, or not at all');
+  makeWidget('clock-face', { name: 'Clock' }, { 'index.html': PAGE });
+  assert.deepEqual(pick(host.state('clock-face', 'sample-workspace').data), { database: null, connected: false, duplicate: false, workspace: 'sample-workspace' });
+  assert.equal(host.list().data.find(w => w.id === 'ledger').workspace, null);
+
+  // By default the names come from the Databases tab's own files beside the config, read
+  // without decrypting anything.
+  writeConnections(widgets.databasesDir(), 'disk-workspace', ['Main database']);
+  const plain = widgets.createWidgetHost({ safeStorage: fakeSafeStorage() });
+  assert.equal(plain.state('ledger', 'disk-workspace').data.databaseConnected, true);
+  assert.equal(plain.state('ledger', 'sample-workspace').data.databaseConnected, false);
+});
+
+test('a widget\'s query goes to the connection its own widget.json names, in the workspace the board attached', async () => {
+  makeWidget('ledger', { name: 'Ledger', database: 'Main database' }, { 'index.html': PAGE });
+  makeWidget('clock-face', { name: 'Clock' }, { 'index.html': PAGE });
+  const calls = [];
+  let answer = { ok: true, results: [[{ id: 1 }], 3] };
+  const databases = { async query(workspace, name, ops) { calls.push({ workspace, name, ops }); return answer; } };
+  const host = widgets.createWidgetHost({ safeStorage: fakeSafeStorage(), databases });
+  const ops = [{ find: 'orders', limit: 1 }, { count: 'orders' }];
+  assert.deepEqual(await host.query({ id: 'ledger', workspace: 'sample-workspace', ops, database: 'Elsewhere', name: 'Elsewhere' }),
+    { ok: true, data: [[{ id: 1 }], 3] });
+  assert.deepEqual(calls, [{ workspace: 'sample-workspace', name: 'Main database', ops }], 'the name is the manifest\'s, whatever the request says');
+  answer = { ok: false, code: 'refused', error: 'Widgets may only run a SELECT, WITH, VALUES or TABLE statement.' };
+  assert.deepEqual(await host.query({ id: 'ledger', workspace: 'sample-workspace', ops }), { ok: false, code: 'refused', error: answer.error });
+  answer = { ok: false, error: 'Something else.' };
+  assert.equal((await host.query({ id: 'ledger', workspace: 'sample-workspace', ops })).code, 'database');
+
+  const before = calls.length;
+  const noWorkspace = await host.query({ id: 'ledger', workspace: null, ops });
+  assert.equal(noWorkspace.code, 'needs-connection');
+  assert.match(noWorkspace.error, /no workspace/);
+  const noDatabase = await host.query({ id: 'clock-face', workspace: 'sample-workspace', ops });
+  assert.equal(noDatabase.code, 'needs-connection');
+  assert.match(noDatabase.error, /names no "database"/);
+  assert.equal((await host.query({ id: 'not-here', workspace: 'sample-workspace', ops })).code, 'refused');
+  assert.equal((await host.query(null)).ok, false);
+  assert.equal(calls.length, before, 'none of those reached the databases');
+  const unwired = widgets.createWidgetHost({ safeStorage: fakeSafeStorage() });
+  assert.equal((await unwired.query({ id: 'ledger', workspace: 'sample-workspace', ops })).code, 'database');
+
+  // At most QUERY_MAX_INFLIGHT on their way at once per widget.
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const slow = widgets.createWidgetHost({ safeStorage: fakeSafeStorage(), databases: { query: () => held } });
+  const waiting = Array.from({ length: widgets.QUERY_MAX_INFLIGHT }, () => slow.query({ id: 'ledger', workspace: 'sample-workspace', ops }));
+  const extra = await slow.query({ id: 'ledger', workspace: 'sample-workspace', ops });
+  assert.equal(extra.code, 'refused');
+  assert.match(extra.error, /already has 8 database queries/);
+  release({ ok: true, results: [] });
+  assert.ok((await Promise.all(waiting)).every(r => r.ok));
+  assert.equal((await slow.query({ id: 'ledger', workspace: 'sample-workspace', ops })).ok, true);
+});
+
 // ── the CLI ────────────────────────────────────────────────────────────────
 
 test('scripts/widget.js makes, checks, keys, places and removes a widget', async () => {
@@ -791,4 +889,54 @@ test('scripts/widget.js makes, checks, keys, places and removes a widget', async
   assert.equal(fs.readdirSync(path.join(cliTemp, 'widgets', '.removed')).length, 1, 'moved aside, not deleted');
   assert.equal(fs.existsSync(pendingFile), false);
   assert.match(run(['remove', 'weather']).err, /no widget called/);
+});
+
+test('scripts/widget.js makes a widget that reads a database, and says whether a board\'s workspace has its connection', () => {
+  const cliTemp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'switchboard-widget-db-cli-')));
+  after(() => fs.rmSync(cliTemp, { recursive: true, force: true }));
+  const cliConfig = path.join(cliTemp, 'config.json');
+  fs.writeFileSync(cliConfig, '{}\n');
+  const env = { ...process.env, SWITCHBOARD_CONFIG: cliConfig };
+  const run = args => {
+    const result = spawnSync(process.execPath, [path.join(__dirname, 'widget.js'), ...args], { cwd: cliTemp, input: '', encoding: 'utf8', env });
+    return { code: result.status, out: result.stdout, err: result.stderr };
+  };
+
+  const made = run(['create', 'ledger', '--name', 'Ledger', '--database', 'Main database']);
+  assert.equal(made.code, 0, made.err);
+  assert.match(made.out, /reads the connection named "Main database"/);
+  assert.match(made.out, /never ask for or handle its connection string/);
+  const dir = path.join(cliTemp, 'widgets', 'ledger');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'widget.json'), 'utf8')), { name: 'Ledger', entry: 'index.html', database: 'Main database' });
+  assert.match(fs.readFileSync(path.join(dir, 'index.html'), 'utf8'), /Switchboard\.db/);
+  assert.match(run(['create', 'leaky', '--name', 'L', '--database', 'mongodb://reader:secret@db.example.test/sample']).err, /NAME, never its address/);
+  assert.equal(fs.existsSync(path.join(cliTemp, 'widgets', 'leaky')), false);
+
+  const checked = run(['check', 'ledger']);
+  assert.equal(checked.code, 0, checked.err);
+  assert.match(checked.out, /Database: "Main database" — Switchboard\.db reads the connection of that name/);
+  fs.writeFileSync(path.join(dir, 'widget.json'), JSON.stringify({ name: 'Ledger', database: ' Main database' }));
+  assert.match(run(['check', 'ledger']).err, /no spaces at either end/);
+  fs.writeFileSync(path.join(dir, 'widget.json'), JSON.stringify({ name: 'Ledger', database: 'Main database' }));
+
+  const drawn = spawnSync(process.execPath, [path.join(__dirname, 'whiteboard.js'), 'create', '-', '--name', 'Example board'], {
+    cwd: cliTemp, input: JSON.stringify({ kind: 'flow', nodes: [{ id: 'start', label: 'Start' }], edges: [] }), encoding: 'utf8', env,
+  });
+  assert.equal(drawn.status, 0, drawn.stderr);
+  const boardId = /id ([0-9a-f-]{36})/.exec(drawn.stdout)[1];
+  const boardFile = path.join(cliTemp, 'whiteboards', 'boards', boardId + '.json');
+  let added = run(['add', 'ledger', '--board', boardId]);
+  assert.equal(added.code, 0, added.err);
+  assert.match(added.out, /Database: the board has no workspace yet/);
+
+  const file = JSON.parse(fs.readFileSync(boardFile, 'utf8'));
+  file.workspace = 'sample-workspace';
+  fs.writeFileSync(boardFile, JSON.stringify(file));
+  added = run(['add', 'ledger', '--board', boardId]);
+  assert.equal(added.code, 0, added.err);
+  assert.match(added.out, /Database: sample-workspace has no connection named "Main database" yet: the user adds it in sample-workspace's Databases tab/);
+  writeConnections(path.join(cliTemp, 'databases'), 'sample-workspace', ['Main database']);
+  assert.match(run(['check', 'ledger']).out, /"Example board": sample-workspace has a connection named "Main database"/);
+  writeConnections(path.join(cliTemp, 'databases'), 'sample-workspace', ['Main database', 'Main database']);
+  assert.match(run(['check', 'ledger']).out, /sample-workspace has 2 connections named "Main database"/);
 });

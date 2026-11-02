@@ -187,12 +187,14 @@ contextBridge.exposeInMainWorld('sb', {
   diagramsSheetFind: (src, sheet, query, limit) => ipcRenderer.invoke('sb:diagrams:sheetFind', src, sheet, query, limit),
   // Widgets on a whiteboard (§4.17): a folder of HTML main serves over sbwidget:// into a
   // sandboxed iframe. State: { id, name, entry, size, minSize, apiHost, secretName,
-  // hasSecret, secretEncrypted, secretLast4, secretFor, keychain, error, code } — never a
-  // key; code 'missing' for a widget that isn't installed, 'manifest' for a widget.json
-  // that's wrong; secretFor the host a kept key was given for when widget.json now names
-  // another API (the key isn't sent there until it is given again).
+  // hasSecret, secretEncrypted, secretLast4, secretFor, keychain, database,
+  // databaseConnected, databaseDuplicate, workspace, error, code } — never a key; code
+  // 'missing' for a widget that isn't installed, 'manifest' for a widget.json that's
+  // wrong; secretFor the host a kept key was given for when widget.json now names another
+  // API (the key isn't sent there until it is given again). `workspace` is the board's:
+  // databaseConnected says whether its Databases tab has the connection widget.json names.
   widgetsList: () => ipcRenderer.invoke('sb:widgets:list'),
-  widgetsState: id => ipcRenderer.invoke('sb:widgets:state', id),
+  widgetsState: (id, workspace) => ipcRenderer.invoke('sb:widgets:state', id, workspace || null),
   // The key the widget's manifest names, from its "Needs a key" panel: encrypted with the
   // system's keychain, kept for the API widget.json names now, and never handed back — the
   // answer is the widget's state.
@@ -204,7 +206,13 @@ contextBridge.exposeInMainWorld('sb', {
   // 'needs-secret' when no key is kept). Main attaches the key and keeps to the manifest's
   // api.baseUrl.
   widgetsFetch: req => ipcRenderer.invoke('sb:widgets:fetch', req || {}),
-  // A widget's files or keys changed: { id, reason: 'files' | 'secret' }.
+  // A widget's database batch, relayed from its iframe: { id, workspace, ops } — id and
+  // workspace the board's node's, never the frame's — → { ok, data: results } or
+  // { ok:false, error, code } (code 'needs-connection' | 'refused' | 'too-large' |
+  // 'timeout' | 'database'). Main reads the connection name from widget.json.
+  widgetsQuery: req => ipcRenderer.invoke('sb:widgets:query', req || {}),
+  // A widget's files or keys changed: { id, reason: 'files' | 'secret' }; or a database
+  // connection was added or removed: { id: null, reason: 'database', workspace }.
   onWidgetsChanged: cb => subscribe('sb:evt:widgetsChanged', cb),
 
   // ✦ Answer (§4.18) — who answers a box's question on this Mac, and the asking.

@@ -2368,6 +2368,10 @@ SB.views = SB.views || {};
         boardId: boardId,
         active: false,
         onOpenSettings: function () { SB.go({ view: 'settings' }); },
+        // A widget's "Needs a connection": the board's workspace's Databases tab.
+        onOpenDatabases: function (wsId) {
+          if (typeof wsId === 'string' && wsId) SB.go({ view: 'workspace', wsId: wsId, tab: 'databases' });
+        },
         onOpenBoard: kept(function (id) { openFrom(item, id); }),
         onClosed: kept(function (folderId) { closedFrom(item, folderId); }),
         onBoardChange: kept(function (board, folder) { boardChanged(item, board, folder); }),

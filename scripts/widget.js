@@ -7,7 +7,7 @@
 // through the agent:
 //
 //   node scripts/widget.js list [--json]
-//   node scripts/widget.js create <id> --name <name> [--width N --height N] [--api <baseUrl>] [--secret <NAME>]
+//   node scripts/widget.js create <id> --name <name> [--width N --height N] [--api <baseUrl>] [--secret <NAME>] [--database <connection name>]
 //   node scripts/widget.js check <id>
 //   node scripts/widget.js set-secret <id> [NAME]        the key on stdin, never as an argument
 //   node scripts/widget.js add <id> --board <board> [--folder <name>] [--x N --y N] [--width N --height N]
@@ -28,12 +28,19 @@
 // (widget-secrets.pending.json, mode 0600), with the API origin it was given for, and the
 // app encrypts it into its own keys file and takes it out of the pending one as soon as
 // it sees it.
+//
+// A widget that reads a database names a connection the user saved in the Databases tab
+// of the board's workspace ("database" in widget.json). check and add say whether a
+// board's workspace has a connection of that name — reading only the names in that
+// workspace's metadata file, never decrypting anything; the user adds the connection in
+// the app, and no connection string ever passes through here.
 
 const fs = require('fs');
 const path = require('path');
 
 const widgets = require('../src/main/widgets.js');
 const whiteboards = require('../src/main/whiteboards.js');
+const databases = require('../src/main/databases.js');
 const board = require('./whiteboard.js');
 
 const { Refusal } = board;
@@ -53,8 +60,9 @@ function pasteCommand(id) {
 const USAGE = `Usage:
   widget.js list [--json]                      the installed widgets
   widget.js create <id> --name <name> [--width N --height N] [--api <baseUrl>] [--secret <NAME>]
+                   [--database <connection name>]
                                                a new widget: widget.json and a starter index.html
-  widget.js check <id>                         validate it; list its files; say whether its key is kept
+  widget.js check <id>                         validate it; list its files; say whether its key and connection are there
   widget.js set-secret <id> [NAME]             its API key, read from stdin (typed hidden, or piped)
   widget.js add <id> --board <board> [--folder <name>] [--x N --y N] [--width N --height N]
                                                put it on a whiteboard
@@ -130,10 +138,22 @@ async function boardsByWidget() {
       if (!node || node.shape !== 'widget' || typeof node.widget !== 'string' || seen.has(node.widget)) continue;
       seen.add(node.widget);
       if (!uses.has(node.widget)) uses.set(node.widget, []);
-      uses.get(node.widget).push({ id: b.id, name: b.name, folder: board.folderName(idx, b.folderId), archived: !!b.archivedAt });
+      uses.get(node.widget).push({ id: b.id, name: b.name, folder: board.folderName(idx, b.folderId), archived: !!b.archivedAt, workspace: b.workspace || null });
     }
   }
   return uses;
+}
+
+/**
+ * Whether the board's workspace `wsId` has the connection `name`, in words — from the
+ * names in its Databases tab's metadata file alone, never decrypting anything.
+ */
+function connectionWords(wsId, name) {
+  if (!wsId) return `the board has no workspace yet: the user picks one for it, then adds a connection named "${name}" in its Databases tab`;
+  const count = databases.connectionNames(widgets.databasesDir(), wsId).filter(saved => saved === name).length;
+  if (count === 1) return `${wsId} has a connection named "${name}"`;
+  if (count > 1) return `${wsId} has ${count} connections named "${name}": the user removes all but one in its Databases tab`;
+  return `${wsId} has no connection named "${name}" yet: the user adds it in ${wsId}'s Databases tab (the widget shows "Needs a connection" until then)`;
 }
 
 function keyWords(where) {
@@ -151,7 +171,7 @@ function keyWords(where) {
  * data-theme on <html>), and either a clock or, with an API, one request through the
  * host's fetch — a page to replace, written so the agent sees every part of the SDK.
  */
-function starterPage(name, api) {
+function starterPage(name, api, database) {
   const fetchPart = `
     // Data comes through Switchboard.fetch: the app adds the key and talks only to
     // widget.json's api.baseUrl. Replace "status" with the endpoint under it.
@@ -171,6 +191,19 @@ function starterPage(name, api) {
     }
     Switchboard.ready().then(load);
     Switchboard.onRefresh(load);`;
+  const dbPart = `
+    // Data comes through Switchboard.db, read-only, from the connection widget.json's
+    // "database" names in the Databases tab of the board's workspace. Replace this with the
+    // widget's own query — for MongoDB, e.g.
+    //   Switchboard.db.find('orders', { status: 'open' }, { sort: { createdAt: -1 }, limit: 20 })
+    // and for PostgreSQL, e.g.
+    //   Switchboard.db.sql('SELECT id, total FROM orders WHERE status = $1 LIMIT 20', ['open'])
+    function load() {
+      value.textContent = '…';
+      label.textContent = ${JSON.stringify(database ? `Reads ${database}` : name)};
+    }
+    Switchboard.ready().then(load);
+    Switchboard.onRefresh(load);`;
   const clockPart = `
     function tick() {
       value.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -184,7 +217,7 @@ function starterPage(name, api) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(name)}</title>
-  <!-- The app's SDK: window.Switchboard (ready, fetch, onTheme, onResize, onRefresh). -->
+  <!-- The app's SDK: window.Switchboard (ready, fetch, db, onTheme, onResize, onRefresh). -->
   <script src="/__switchboard/widget.js"></script>
   <style>
     :root { --bg: #ffffff; --fg: #111827; --muted: #6b7280; --accent: #4f46e5; }
@@ -210,7 +243,7 @@ function starterPage(name, api) {
   <script>
     var value = document.getElementById('value');
     var label = document.getElementById('label');
-${api ? fetchPart : clockPart}
+${api ? fetchPart : database ? dbPart : clockPart}
   </script>
 </body>
 </html>
@@ -263,6 +296,7 @@ async function create(positional, flags) {
     manifest.api = { baseUrl: String(flags.api) };
     if (flags.secret !== undefined) manifest.api.secret = String(flags.secret);
   }
+  if (flags.database !== undefined) manifest.database = String(flags.database);
   const parsed = widgets.parseManifest(manifest);
   if (!parsed.ok) throw new Refusal(parsed.error);
   // The base URL as the app reads it (always ending in "/"), so the file says what is meant.
@@ -270,13 +304,17 @@ async function create(positional, flags) {
   try {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, widgets.MANIFEST_FILE), JSON.stringify(manifest, null, 2) + '\n');
-    fs.writeFileSync(path.join(dir, 'index.html'), starterPage(parsed.manifest.name, parsed.manifest.api));
+    fs.writeFileSync(path.join(dir, 'index.html'), starterPage(parsed.manifest.name, parsed.manifest.api, parsed.manifest.database));
   } catch (err) {
     throw new Refusal(`Could not make the widget: ${err.message}`);
   }
   console.log(`Created "${parsed.manifest.name}" (${id}) in ${dir}`);
-  console.log('  widget.json   its name, size and API');
+  console.log('  widget.json   its name, size, API and database');
   console.log('  index.html    a starter page using the SDK — replace it with the widget');
+  if (parsed.manifest.database) {
+    console.log(`It reads the connection named "${parsed.manifest.database}" in the Databases tab of the board's workspace — the user`);
+    console.log('adds it there; never ask for or handle its connection string.');
+  }
   if (parsed.manifest.api && parsed.manifest.api.secret) {
     console.log(`Its key (${parsed.manifest.api.secret}) is the user's to give — never in a file or the chat:`);
     console.log(`  ${pasteCommand(id)}     (or paste it into the widget's "Needs a key" panel)`);
@@ -326,8 +364,14 @@ async function check(positional) {
   } else {
     console.log('API: none — Switchboard.fetch refuses every request (add "api": { "baseUrl": … } to widget.json)');
   }
+  if (manifest.database) {
+    console.log(`Database: "${manifest.database}" — Switchboard.db reads the connection of that name in the Databases tab of the board's workspace, read-only`);
+  } else {
+    console.log('Database: none — Switchboard.db refuses every query (add "database": "<connection name>" to widget.json)');
+  }
   const uses = (await boardsByWidget()).get(id) || [];
   console.log(uses.length ? `On ${uses.map(b => `"${b.name}" (${b.folder})`).join(', ')}` : 'On no board yet.');
+  if (manifest.database) for (const use of uses) console.log(`  "${use.name}": ${connectionWords(use.workspace, manifest.database)}`);
   console.log(`Address: sbwidget://${id}/${manifest.entry}`);
 }
 
@@ -438,6 +482,7 @@ async function add(positional, flags) {
   await whiteboards.settle();
   console.log(`Added "${manifest.name}" to "${found.name}" as ${nodeId}, ${size.width}×${size.height} at ${position.x}, ${position.y}.`);
   console.log('Open in Switchboard, the board shows it as it lands; Undo there takes it off again.');
+  if (manifest.database) console.log(`Database: ${connectionWords(data.workspace || found.workspace || null, manifest.database)}.`);
 }
 
 async function remove(positional, flags) {

@@ -251,9 +251,18 @@ Mac shell script does not become a Windows command automatically.
   `node scripts/widget.js set-secret <id>` and paste it at the hidden prompt (or pipe it
   from the clipboard: `pbpaste | …` on a Mac, `powershell -NoProfile -Command
   Get-Clipboard | …` on Windows) — never in a chat. A key is sent only to the API it was
-  given for: a widget whose `widget.json` is pointed somewhere else asks for it again. The
-  node's strip has **Reload**, the key, and **Open folder**. `npm run test:widgets` and
-  `npm run test:widgets:browser` cover them.
+  given for: a widget whose `widget.json` is pointed somewhere else asks for it again. A
+  widget can also read a database you saved in a workspace's **Databases** tab: its
+  `widget.json` names the connection (`"database": "Main database"`), and it reads that
+  connection in the board's workspace through `Switchboard.db` — MongoDB find, aggregate
+  and count, or a PostgreSQL SELECT — always read-only, checked and run by the app, and
+  never seeing the connection's address or password. Give a PostgreSQL connection that
+  widgets use a role with only SELECT grants (and no `pg_signal_backend`): a read-only
+  transaction stops writes, but not every function a SELECT can call, such as dblink's. Until that workspace has a
+  connection of the name, the widget shows **Needs a connection** with a button that opens
+  the Databases tab; add it there (never in a chat) and the widget loads. The node's strip
+  has **Reload**, the key, and **Open folder**. `npm run test:widgets`, `npm run
+  test:databases` and `npm run test:widgets:browser` cover them.
 
   **Terminals** float over a whiteboard: **Open terminal…** asks which workspace — the
   whiteboard's own first, then the ones you used recently, then the rest, with a search
@@ -388,7 +397,8 @@ Mac shell script does not become a Windows command automatically.
   Refresh (or ⌘R) reads them again. Click a row to see every field, including nested
   objects and arrays. Connections require a URI containing the database name and are
   verified before being saved. The browser issues reads only; PostgreSQL queries run
-  in read-only transactions. Large tables scroll without creating a DOM node for every
+  in read-only transactions, and one stopped by its timeout, by removing its connection
+  or by quitting is cancelled on the server too. Large tables scroll without creating a DOM node for every
   record. A fetch past 100,000 records, 32 MB or its timeout reports an error instead of
   quietly showing incomplete data. Removing a saved connection leaves its database intact.
 - **Settings** — the row under Usage, or ⌘,: who answers ✦ Answer on this Mac, one row
@@ -519,7 +529,9 @@ when the video is made (an oEmbed request to www.youtube.com, sent without cooki
 YouTube's player, from www.youtube-nocookie.com, loads only when you press Play. A
 widget's page is served by the app from `~/.switchboard/widgets/` over its own
 `sbwidget://` scheme and may connect to nothing itself; the requests it asks for are made
-by the main process, to its manifest's base URL alone, with its key added there. Database browsing connects directly to the database
+by the main process, to its manifest's base URL alone, with its key added there, and its
+database queries run in the main process too, read-only, on the connection its manifest
+names in the board's workspace. Database browsing connects directly to the database
 URI you supply, from the main process; credentials never return to the renderer.
 Dev commands also run in local shells. Claude usage
 uses the direct request described above; local port checks use sockets and system

@@ -11,6 +11,11 @@
 //
 //   Switchboard.ready()            → Promise<{ widget: { id, name }, theme, size }>
 //   Switchboard.fetch(path, init?) → Promise<{ ok, status, statusText, headers, text(), json() }>
+//   Switchboard.db.find(collection, filter?, { projection, sort, limit, skip }?) → Promise<object[]>
+//   Switchboard.db.aggregate(collection, pipeline) → Promise<object[]>
+//   Switchboard.db.count(collection, filter?)      → Promise<number>
+//   Switchboard.db.sql(text, params?)              → Promise<object[]>
+//   Switchboard.db.batch(ops)                      → Promise<any[]>
 //   Switchboard.onTheme(cb) / onResize(cb) / onRefresh(cb) → unsubscribe
 //   Switchboard.theme, Switchboard.size, Switchboard.widget
 //
@@ -19,6 +24,16 @@
 // URL; `path` is relative to it. The page's own CSP (connect-src 'self') is why there is
 // no other way out.
 //
+// Nor does it hold a database's address. Switchboard.db reads the connection widget.json's
+// "database" names in the Databases tab of the board's workspace: the board attaches the
+// widget's id and its own workspace, and main reads the name from the manifest, checks
+// every operation is a read and runs the batch on one connection (one read-only
+// transaction for PostgreSQL). Filters, projections, sorts and pipelines are MongoDB
+// Extended JSON ({"$oid": "…"} an ObjectId, {"$date": "…"} a Date — a Date object in one
+// is sent as {"$date"}); results come back as plain JSON (an ObjectId as its hex string,
+// a Date as an ISO string). A failure rejects with an Error whose `code` is
+// 'needs-connection', 'refused', 'too-large', 'timeout' or 'database'.
+//
 // It also keeps <html data-theme="light|dark"> (and color-scheme) in step with the
 // board, so plain CSS can follow it: [data-theme="dark"] { … } — whether or not the page
 // ever calls ready(): the SDK says 'ready' itself as it loads, which is what has the board
@@ -26,11 +41,13 @@
 //
 // The protocol — every message an object, `v: 1`, `sb: 'widget'` from here and
 // `sb: 'host'` from the board:
-//   widget → host: { type: 'ready' }, { type: 'fetch', id, path, init }
+//   widget → host: { type: 'ready' }, { type: 'fetch', id, path, init },
+//                  { type: 'query', id, ops }
 //   host → widget: { type: 'init', widget, theme, size }, { type: 'theme', theme },
 //                  { type: 'resize', size }, { type: 'refresh' },
 //                  { type: 'response', id, ok, status, statusText, headers, body } or
-//                  { type: 'response', id, error, code? }
+//                  { type: 'response', id, error, code? },
+//                  { type: 'result', id, results } or { type: 'result', id, error, code }
 // Only messages from the parent window are read. What this page posts carries nothing
 // a widget didn't write itself, so it goes to the parent whatever its origin.
 (function () {
@@ -40,6 +57,8 @@
   var VERSION = 1;
   // Longer than main's 20 s for a request, so main's own sentence is what a widget sees.
   var ANSWER_TIMEOUT_MS = 30000;
+  // Longer than main's wait for a free database slot (15 s) and its 15 s for the batch.
+  var QUERY_TIMEOUT_MS = 45000;
   var host = window.parent;
   var root = document.documentElement;
 
@@ -120,7 +139,7 @@
 
   function answer(message) {
     var waiting = pending[message.id];
-    if (!waiting) return;
+    if (!waiting || waiting.kind !== 'fetch') return;
     delete pending[message.id];
     clearTimeout(waiting.timer);
     if (typeof message.error === 'string') {
@@ -145,6 +164,21 @@
       text: function () { return body; },
       json: function () { return JSON.parse(body); },
     }));
+  }
+
+  // A database batch's answer: its results in order, or the app's reason and code.
+  function result(message) {
+    var waiting = pending[message.id];
+    if (!waiting || waiting.kind !== 'query') return;
+    delete pending[message.id];
+    clearTimeout(waiting.timer);
+    if (typeof message.error === 'string') {
+      var error = new Error(message.error);
+      error.code = typeof message.code === 'string' ? message.code : 'database';
+      waiting.reject(error);
+      return;
+    }
+    waiting.resolve(Array.isArray(message.results) ? message.results : []);
   }
 
   window.addEventListener('message', function (event) {
@@ -175,6 +209,9 @@
         break;
       case 'response':
         answer(message);
+        break;
+      case 'result':
+        result(message);
         break;
     }
   });
@@ -226,6 +263,7 @@
     var id = nextId++;
     return new Promise(function (resolve, reject) {
       pending[id] = {
+        kind: 'fetch',
         resolve: resolve,
         reject: reject,
         timer: setTimeout(function () {
@@ -247,11 +285,88 @@
     });
   }
 
+  function refusedError(text) {
+    var error = new TypeError(text);
+    error.code = 'refused';
+    return error;
+  }
+
+  // Plain JSON for main, and a Date in a MongoDB input as Extended JSON's {"$date"} — sent
+  // as JSON's ISO string it would silently compare as text. (A SQL param keeps the string,
+  // which PostgreSQL reads as a timestamp.)
+  function plainOps(ops) {
+    return JSON.parse(JSON.stringify(ops.map(function (op) {
+      if (!op || typeof op !== 'object' || 'sql' in op) return op;
+      return JSON.parse(JSON.stringify(op, function (key, value) {
+        var raw = this[key];
+        return raw instanceof Date ? { $date: raw.toISOString() } : value;
+      }));
+    })));
+  }
+
+  /**
+   * Operations run in order on one connection — one read-only transaction for PostgreSQL —
+   * each `{ find, filter?, projection?, sort?, limit?, skip? }`, `{ aggregate, pipeline }`,
+   * `{ count, filter? }` or `{ sql, params? }`, at most 20. Resolves to their results in the
+   * same order; rejects with the app's reason, `error.code` 'needs-connection', 'refused',
+   * 'too-large', 'timeout' or 'database'.
+   */
+  function batch(ops) {
+    if (!Array.isArray(ops)) return Promise.reject(refusedError('Switchboard.db.batch(ops): ops must be an array of operations'));
+    var plain;
+    try { plain = plainOps(ops); } catch (err) { return Promise.reject(refusedError('Switchboard.db: the query must be plain JSON (' + err.message + ')')); }
+    var id = nextId++;
+    return new Promise(function (resolve, reject) {
+      pending[id] = {
+        kind: 'query',
+        resolve: resolve,
+        reject: reject,
+        timer: setTimeout(function () {
+          delete pending[id];
+          var error = new Error('Switchboard did not answer in time');
+          error.code = 'timeout';
+          reject(error);
+        }, QUERY_TIMEOUT_MS),
+      };
+      post({ type: 'query', id: id, ops: plain });
+    });
+  }
+
+  function one(op) {
+    return batch([op]).then(function (results) { return results[0]; });
+  }
+
+  var db = Object.freeze({
+    find: function (collection, filter, options) {
+      var op = { find: collection };
+      if (filter !== undefined && filter !== null) op.filter = filter;
+      if (options && typeof options === 'object') {
+        ['projection', 'sort', 'limit', 'skip'].forEach(function (name) {
+          if (options[name] !== undefined && options[name] !== null) op[name] = options[name];
+        });
+      }
+      return one(op);
+    },
+    aggregate: function (collection, pipeline) { return one({ aggregate: collection, pipeline: pipeline }); },
+    count: function (collection, filter) {
+      var op = { count: collection };
+      if (filter !== undefined && filter !== null) op.filter = filter;
+      return one(op);
+    },
+    sql: function (text, params) {
+      var op = { sql: text };
+      if (params !== undefined && params !== null) op.params = params;
+      return one(op);
+    },
+    batch: batch,
+  });
+
   var api = {};
   Object.defineProperties(api, {
     version: { value: VERSION, enumerable: true },
     ready: { value: ready, enumerable: true },
     fetch: { value: request, enumerable: true },
+    db: { value: db, enumerable: true },
     onTheme: { value: function (callback) { return subscribe(themeListeners, callback); }, enumerable: true },
     onResize: { value: function (callback) { return subscribe(resizeListeners, callback); }, enumerable: true },
     onRefresh: { value: function (callback) { return subscribe(refreshListeners, callback); }, enumerable: true },
