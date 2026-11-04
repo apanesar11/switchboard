@@ -151,6 +151,7 @@
   /* React Flow disables pointer events on read-only nodes; file actions stay usable. */
   .flow-file-node { pointer-events: auto; }
   .flow-file-copy { position: absolute; right: 6px; bottom: 6px; z-index: 5; display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid #d1d5db; border-radius: 6px; background: #ffffffed; color: #4b5563; box-shadow: 0 1px 4px #1118271a; opacity: 0; pointer-events: none; cursor: pointer; transition: opacity .12s; }
+  .flow-image-open { top: 6px; bottom: auto; }
   .flow-file-node:hover .flow-file-copy, .flow-file-node:focus-within .flow-file-copy, .flow-file-copy[data-copied=true], .flow-file-copy[aria-busy=true] { opacity: 1; pointer-events: auto; }
   .flow-file-copy:hover { background: #eff6ff; color: #0969da; }
   .flow-file-copy:focus-visible { outline: 2px solid #0969da; outline-offset: 2px; }
@@ -258,6 +259,9 @@
   .flow-file-panel[data-resizing] { cursor: ew-resize; -webkit-user-select: none; user-select: none; }
   .flow-file-panel[data-resizing] .flow-file-frame { pointer-events: none; }
   .flow-file-pdf { flex: 1; min-height: 0; background: #525659; border-top: 1px solid #e5e7eb; }
+  .flow-file-image { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 16px; background: #f3f4f6; }
+  .flow-file-image img { display: block; width: 100%; height: 100%; object-fit: contain; }
+  .flow-file-image[data-actual-size=true] img { width: auto; height: auto; max-width: none; }
   .flow-file-frame { display: block; width: 100%; height: 100%; border: 0; }
   .flow-file-loading { flex: 1; }
   .flow-file-problem { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 32px; text-align: center; color: #6b7280; font-size: 13px; line-height: 1.6; }
@@ -323,6 +327,7 @@
   .flow-file-panel .flow-document-footer em:where([data-term-theme="dark"] *) { color: #fbbf24; }
   .flow-file-divider:where([data-term-theme="dark"] *) { background: #374151; }
   .flow-file-pdf:where([data-term-theme="dark"] *) { background: #3b3e42; border-color: #374151; }
+  .flow-file-image:where([data-term-theme="dark"] *) { background: #0d1422; }
   .flow-file-problem p:where([data-term-theme="dark"] *) { color: #e5e7eb; }
   .flow-file-problem button:where([data-term-theme="dark"] *) { border-color: #4b5563; color: #e5e7eb; }
   .flow-file-problem button:hover:where([data-term-theme="dark"] *) { background: #1f2937; }

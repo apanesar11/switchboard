@@ -33,7 +33,7 @@ import { useFlowDocuments } from "./useFlowDocuments"
 import { DiagramFileCopyContext } from "./DiagramFileCopy"
 import { cx } from "@/lib/utils"
 import type { DiagramSpec } from "@/lib/diagrams/types"
-import { VideoBoardContext, VideoShownContext, diagramNodeTypes, openableFile } from "./DiagramNodes"
+import { DiagramImageOpenContext, VideoBoardContext, VideoShownContext, diagramNodeTypes, openableFile } from "./DiagramNodes"
 import { FLOW_EDGE_THEME } from "./DiagramEdges"
 
 // React Flow's own stylesheet. `style.css` (rather than `base.css`) because the
@@ -78,7 +78,7 @@ type Props = {
 export function DiagramCanvas({ spec, resetKey, diagramName, shown = true, boardId }: Props) {
   const layout = useMemo(() => layoutDiagram(spec), [spec])
   const [document, setDocument] = useState<FlowBoxNodeData | null>(null)
-  // Switchboard: the PDF or spreadsheet open beside the canvas. One panel at a time:
+  // Switchboard: the image, PDF or spreadsheet open beside the canvas. One panel at a time:
   // opening a file puts the document away, and opening a document the file; they share
   // the view, which each opens floating.
   const [file, setFile] = useState<FlowBoxNodeData | null>(null)
@@ -88,6 +88,11 @@ export function DiagramCanvas({ spec, resetKey, diagramName, shown = true, board
 
   return (
     <DiagramFileCopyContext.Provider value={documents.getPath}>
+    <DiagramImageOpenContext.Provider value={(id) => {
+      const node = layout.nodes.find((entry) => entry.id === id)
+      if (!node || !openableFile(node.data as FlowBoxNodeData)) return
+      setDocument(null); setFile(node.data as FlowBoxNodeData); setView("floating")
+    }}>
     <VideoShownContext.Provider value={shown}>
     <VideoBoardContext.Provider value={boardId ?? null}>
     <div className={cx("relative flex size-full min-w-0 bg-gray-50 dark:bg-gray-900", FLOW_EDGE_THEME)}>
@@ -171,6 +176,7 @@ export function DiagramCanvas({ spec, resetKey, diagramName, shown = true, board
     </div>
     </VideoBoardContext.Provider>
     </VideoShownContext.Provider>
+    </DiagramImageOpenContext.Provider>
     </DiagramFileCopyContext.Provider>
   )
 }

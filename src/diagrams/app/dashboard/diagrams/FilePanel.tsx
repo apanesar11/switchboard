@@ -1,4 +1,4 @@
-// Switchboard: the panel a PDF or a spreadsheet on a whiteboard opens in, beside the
+// Switchboard: the panel an image, PDF or spreadsheet on a whiteboard opens in, beside the
 // canvas as a Markdown document's does (DocumentPanel.tsx) — its chrome, its three
 // views and its classes, so the canvas treats the two alike: its keys, the Edit menu
 // (index.tsx editAction) and a pinned terminal's overlay all leave a
@@ -21,6 +21,7 @@ import {
   RiFileExcel2Line,
   RiFilePdf2Line,
   RiFullscreenLine,
+  RiImageLine,
   RiLayoutRightLine,
   RiSearchLine,
   RiWindowLine,
@@ -81,8 +82,8 @@ type Found = { matches: Cell[]; more: boolean; index: number; searching: boolean
 const NOT_FOUND: Found = { matches: [], more: false, index: -1, searching: false, error: null }
 
 export function FilePanel({ kind, src, title, diagramName, view, onView, onRename, onClose }: {
-  kind: "pdf" | "sheet"
-  /** The node's `file`: sbfile://file/<name>. */
+  kind: "image" | "pdf" | "sheet"
+  /** The node's image `src`, or its `file`: sbfile://file/<name>. */
   src: string
   title: string
   diagramName?: string
@@ -98,7 +99,7 @@ export function FilePanel({ kind, src, title, diagramName, view, onView, onRenam
   const previousView = useRef<DocumentView>("floating")
   const openFind = useRef<(() => void) | null>(null)
   const ext = parseFlowFileSrc(src)?.ext ?? (kind === "pdf" ? "pdf" : "xlsx")
-  const fallback = kind === "pdf" ? PDF_LABEL : SHEET_LABEL
+  const fallback = kind === "image" ? "Image" : kind === "pdf" ? PDF_LABEL : SHEET_LABEL
   const name = title || fallback
   // What macOS opens each in unless told otherwise; shell.openPath uses whichever app
   // the user made the default.
@@ -139,7 +140,7 @@ export function FilePanel({ kind, src, title, diagramName, view, onView, onRenam
         style={view === "focus" ? undefined : { width }}
         role={view === "focus" ? "dialog" : "region"}
         aria-modal={view === "focus" ? true : undefined}
-        aria-label={`${kind === "pdf" ? "PDF" : "Spreadsheet"}: ${name}`}
+        aria-label={`${fallback}: ${name}`}
         tabIndex={-1}
         onKeyDown={(event) => {
           event.stopPropagation()
@@ -185,23 +186,27 @@ export function FilePanel({ kind, src, title, diagramName, view, onView, onRenam
         }} /> : null}
         <header className="flow-document-header">
           <span className="flow-document-kind">
-            {kind === "pdf" ? <><RiFilePdf2Line size={17} /> PDF</> : <><RiFileExcel2Line size={17} /> Spreadsheet</>}
+            {kind === "image" ? <><RiImageLine size={17} /> Image</> : kind === "pdf" ? <><RiFilePdf2Line size={17} /> PDF</> : <><RiFileExcel2Line size={17} /> Spreadsheet</>}
           </span>
           <div className="flow-document-actions">
-            <button title={openLabel} aria-label={openLabel} onClick={() => void openInApp()}><RiExternalLinkLine size={17} /></button>
-            <span className="flow-file-divider" aria-hidden="true" />
+            {kind !== "image" ? <>
+              <button title={openLabel} aria-label={openLabel} onClick={() => void openInApp()}><RiExternalLinkLine size={17} /></button>
+              <span className="flow-file-divider" aria-hidden="true" />
+            </> : null}
             {view === "focus" ? <button title="Return to canvas" aria-label="Return to canvas" onClick={leaveFocus}><RiArrowGoBackLine size={17} /></button> : null}
             <button title="Floating panel" aria-label="Floating panel" aria-pressed={view === "floating"} onClick={() => switchView("floating")}><RiWindowLine size={17} /></button>
             <button title="Dock to the right" aria-label="Dock to the right" aria-pressed={view === "docked"} onClick={() => switchView("docked")}><RiLayoutRightLine size={17} /></button>
             <button title="Focus view" aria-label="Focus view" aria-pressed={view === "focus"} onClick={() => switchView("focus")}><RiFullscreenLine size={17} /></button>
-            <button title="Close · Esc" aria-label={kind === "pdf" ? "Close PDF" : "Close spreadsheet"} onClick={onClose}><RiCloseLine size={19} /></button>
+            <button title="Close · Esc" aria-label={kind === "image" ? "Close image" : kind === "pdf" ? "Close PDF" : "Close spreadsheet"} onClick={onClose}><RiCloseLine size={19} /></button>
           </div>
         </header>
         <div className="flow-document-heading">
-          <div className="flow-document-breadcrumb">{diagramName || "Flowchart"} <span>/</span> {kind === "pdf" ? "PDF" : sheetFormatName(ext)}</div>
-          <NameField title={title} fallback={fallback} label={kind === "pdf" ? "PDF name" : "Spreadsheet name"} onRename={onRename} />
+          <div className="flow-document-breadcrumb">{diagramName || "Flowchart"} <span>/</span> {kind === "image" ? "Image" : kind === "pdf" ? "PDF" : sheetFormatName(ext)}</div>
+          <NameField title={kind === "image" ? name : title} fallback={fallback} label={`${fallback} name`} onRename={onRename} />
         </div>
-        {kind === "pdf"
+        {kind === "image"
+          ? <ImageView src={src} title={name} />
+          : kind === "pdf"
           ? <PdfView src={src} title={name} />
           : <SheetView src={src} ext={ext} openLabel={openLabel} onOpen={() => void openInApp()} findRef={openFind} />}
       </section>
@@ -277,6 +282,21 @@ function PdfView({ src, title }: { src: string; title: string }) {
       <iframe key={src} className="flow-file-frame" src={src} title={title} />
     </div>
     <FileFooter src={src} ext="pdf">PDF file</FileFooter>
+  </>
+}
+
+function ImageView({ src, title }: { src: string; title: string }) {
+  const [actualSize, setActualSize] = useState(false)
+  const [failed, setFailed] = useState(false)
+  return <>
+    {failed ? <div className="flow-file-problem" role="alert"><RiErrorWarningLine size={24} /><p>Couldn't load this image.</p></div> : <div className="flow-file-image" data-actual-size={actualSize}>
+      <img src={src} alt={title} draggable={false} onError={() => setFailed(true)} />
+    </div>}
+    <footer className="flow-document-footer">
+      <span>Image</span>
+      <button aria-label={actualSize ? "Fit image" : "Actual size"} disabled={failed} onClick={() => setActualSize(!actualSize)}>{actualSize ? "Fit image" : "Actual size"}</button>
+      <CopyPathButton label="Copy image file path" onPath={() => call("diagramsGetImagePath", src)}>Copy file path</CopyPathButton>
+    </footer>
   </>
 }
 

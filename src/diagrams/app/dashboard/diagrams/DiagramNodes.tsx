@@ -45,6 +45,7 @@ import {
   RiFileExcel2Line,
   RiFilePdf2Line,
   RiFolderOpenLine,
+  RiFullscreenLine,
   RiImageLine,
   RiKey2Line,
   RiPlayFill,
@@ -385,13 +386,31 @@ export function teleportDestinationName(box: FlowBoxNodeData | undefined): strin
 }
 
 /**
- * Switchboard: the PDF or spreadsheet a node opens beside the canvas — what it is and
- * its sbfile:// address — or null for any other node, or one whose file doesn't name
- * what the node is (the validator never lets one through; a canvas mid-undo might).
+ * The image, PDF or spreadsheet a node opens beside the canvas — or null for any
+ * other node, or a file whose kind doesn't match its node during an undo.
  */
-export function openableFile(box: FlowBoxNodeData | undefined): { kind: "pdf" | "sheet"; src: string } | null {
+export function openableFile(box: FlowBoxNodeData | undefined): { kind: "image" | "pdf" | "sheet"; src: string } | null {
+  if (box?.shape === "image" && box.src) return { kind: "image", src: box.src }
   if (!box || (box.shape !== "pdf" && box.shape !== "sheet") || !box.file) return null
   return parseFlowFileSrc(box.file)?.kind === box.shape ? { kind: box.shape, src: box.file } : null
+}
+
+// Opening a preview never changes the saved node data, on either canvas.
+export const DiagramImageOpenContext = createContext<((id: string) => void) | null>(null)
+
+function ImagePreviewButton({ nodeId }: { nodeId?: string }) {
+  const open = useContext(DiagramImageOpenContext)
+  if (!nodeId || !open) return null
+  return <button
+    type="button"
+    className="flow-file-copy flow-image-open nodrag nopan nowheel"
+    aria-label="Open image preview"
+    title="Open image preview · Double-click image"
+    onPointerDown={(event) => event.stopPropagation()}
+    onDoubleClick={(event) => event.stopPropagation()}
+    onKeyDown={(event) => event.stopPropagation()}
+    onClick={(event) => { event.stopPropagation(); open(nodeId) }}
+  ><RiFullscreenLine size={14} aria-hidden="true" /></button>
 }
 
 /**
@@ -792,7 +811,7 @@ export function FlowBox({
   onToggleCheck?: (field: "label" | "detail", paragraph: number) => void
   /** Switchboard: a click on a teleport, on the read-only canvas. */
   onTeleport?: (event: React.MouseEvent) => void
-  /** Switchboard: the node's id — what a video on the read-only canvas keeps its place under. */
+  /** The node's id, for opening images and remembering a video's place. */
   nodeId?: string
   className?: string
   children?: React.ReactNode
@@ -816,8 +835,9 @@ export function FlowBox({
   }
   if (shape === "image") {
     return (
-      <div className="flow-file-node relative size-full">
+      <div className="flow-file-node relative size-full" title={`${label || "Image"} · Double-click to open`}>
         <FlowImage src={box.src} alt={label} />
+        {box.src ? <ImagePreviewButton nodeId={nodeId} /> : null}
         <DiagramFileCopy box={box} />
         {children}
       </div>

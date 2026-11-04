@@ -186,6 +186,7 @@ import {
   RiFolderImageLine,
   RiHand,
   RiImageAddLine,
+  RiImageLine,
   RiVideoLine,
   RiItalic,
   RiKeyboardLine,
@@ -361,6 +362,7 @@ import { DiagramFileCopyContext } from "./DiagramFileCopy"
 import {
   FlowBox,
   openableFile,
+  DiagramImageOpenContext,
   FLOW_TEXT_WRAP,
   TELEPORT_DURATION_MS,
   teleportViewport,
@@ -1805,6 +1807,7 @@ function EditableBoxNode({ id, data, selected }: NodeProps) {
     <div className={cx("relative size-full", interactive && "group")}>
       {box.shape === "timer" ? <TimerFace id={id} label={box.label} timer={box.timer} shown={editor?.shown} onRename={editor && interactive ? label => editor.updateNode(id, { label }) : undefined} onChange={editor && interactive ? timer => editor.updateNode(id, { timer }) : undefined} /> : <FlowBox
         {...box}
+        nodeId={id}
         // Switchboard: a PDF or a spreadsheet whose name is cleared in its panel says
         // what it is (FlowBox), not "Untitled".
         label={box.label.trim() || box.shape === "note" || box.shape === "pdf" || box.shape === "sheet" ? box.label : UNTITLED_FLOW_LABEL}
@@ -2140,7 +2143,7 @@ function FlowEditorCanvas({
   const documentBox = documentNode?.data as FlowBoxNodeData | undefined
   // Switchboard: one store of documents for every whiteboard, keyed by document id.
   const documents = useFlowDocuments(documentBox?.documentId)
-  // Switchboard: the PDF or spreadsheet open beside the canvas (FilePanel), and how —
+  // Switchboard: the image, PDF or spreadsheet open beside the canvas (FilePanel), and how —
   // the one panel there with a document's, so at most one of the two ids is set.
   const [fileNodeId, setFileNodeId] = useState<string | null>(null)
   const [fileView, setFileView] = useState<DocumentView>("floating")
@@ -3100,7 +3103,7 @@ function FlowEditorCanvas({
     return true
   }
 
-  // Switchboard: a PDF's or a spreadsheet's panel is a document's (the same chrome and
+  // Switchboard: a file's panel is a document's (the same chrome and
   // classes), and keeps its node in view the same way.
   const panelNodeId = documentNodeId ?? fileNodeId
   const panelView = documentNodeId !== null ? documentView : fileView
@@ -3209,12 +3212,12 @@ function FlowEditorCanvas({
     setTool("select")
     setDocumentStartsWriting(writing)
     setDocumentView("floating")
-    // Switchboard: in place of a PDF or a spreadsheet open there.
+    // Switchboard: in place of an image, PDF or spreadsheet open there.
     setFileNodeId(null)
     setDocumentNodeId(node.id)
   }
 
-  // Switchboard: a PDF or a spreadsheet opens beside the canvas as a document does,
+  // Switchboard: an image, PDF or spreadsheet opens beside the canvas as a document does,
   // floating, in place of whatever document is open there (written out first, as its
   // own Close does).
   function openFile(node: Node) {
@@ -5454,7 +5457,7 @@ function FlowEditorCanvas({
     }
   }, [json, nodes])
   const soleNode = selectedNodes.length === 1 && selectedEdges.length === 0 ? selectedNodes[0] : null
-  // Switchboard: the PDF or spreadsheet that node is, for the toolbar's Open.
+  // Switchboard: the file that node shows, for the toolbar's Open.
   const soleFile = soleNode ? openableFile(soleNode.data as FlowBoxNodeData) : null
   // Each in its own memo, so the context below can depend on a plain string.
   const soleNodeId = useMemo(() => {
@@ -5534,7 +5537,7 @@ function FlowEditorCanvas({
     }
     if (soleNode) {
       if ((soleNode.data as FlowBoxNodeData).shape === "document") { openDocument(soleNode); return true }
-      // Switchboard: on a PDF or a spreadsheet, it opens as a document does.
+      // Switchboard: an image, PDF or spreadsheet opens as a document does.
       if (openableFile(soleNode.data as FlowBoxNodeData)) { openFile(soleNode); return true }
       // Switchboard: Enter on a teleport goes where it goes.
       if (isTeleport(soleNode)) { teleport(soleNode); return true }
@@ -6011,6 +6014,10 @@ function FlowEditorCanvas({
 
   return (
     <DiagramFileCopyContext.Provider value={documents.getPath}>
+    <DiagramImageOpenContext.Provider value={(id) => {
+      const node = nodesRef.current.find((entry) => entry.id === id)
+      if (node) openFile(node)
+    }}>
     <EditorContext.Provider value={context}>
     <VideoBoardContext.Provider value={boardId}>
     <TerminalContext.Provider value={terminalContext}>
@@ -6098,7 +6105,7 @@ function FlowEditorCanvas({
             }}
             onNodeDoubleClick={(_, node) => {
               if (tool !== "hand" && (node.data as FlowBoxNodeData).shape === "document") openDocument(node)
-              // Switchboard: and a PDF or a spreadsheet, beside the canvas as a document.
+              // Switchboard: and an image, PDF or spreadsheet, beside the canvas as a document.
               if (tool !== "hand" && openableFile(node.data as FlowBoxNodeData)) openFile(node)
               if (tool !== "hand" && hasText(node.data as FlowBoxNodeData)) changeEditing(node.id)
             }}
@@ -6582,7 +6589,7 @@ function FlowEditorCanvas({
             diagramName={diagramName}
             view={fileView}
             onView={setFileView}
-            onRename={(label) =>
+            onRename={openFileOf.kind === "image" ? undefined : (label) =>
               updateNode(fileNode.id, {
                 label: label.trim() || (openFileOf.kind === "pdf" ? PDF_LABEL : SHEET_LABEL),
               })
@@ -6602,6 +6609,7 @@ function FlowEditorCanvas({
     </TerminalContext.Provider>
     </VideoBoardContext.Provider>
     </EditorContext.Provider>
+    </DiagramImageOpenContext.Provider>
     </DiagramFileCopyContext.Provider>
   )
 }
@@ -6950,8 +6958,8 @@ function BoxBar({
   count: number
   onChange: (patch: Partial<FlowBoxNodeData>) => void
   onOpenDocument?: () => void
-  /** Switchboard: for one PDF or spreadsheet selected on its own — open it beside the canvas. */
-  openFile?: { kind: "pdf" | "sheet"; onOpen: () => void }
+  /** For one image, PDF or spreadsheet selected on its own — open it beside the canvas. */
+  openFile?: { kind: "image" | "pdf" | "sheet"; onOpen: () => void }
   onEditText?: () => void
   /** Switchboard: for one teleport selected on its own — go there, or say where. */
   teleport?: { linked: boolean; onGo: () => void; onPick: () => void }
@@ -7004,8 +7012,10 @@ function BoxBar({
       ) : null}
       {onOpenDocument ? <BarButton label="Open document · Enter" onClick={onOpenDocument}><RiFileTextLine className="size-4" aria-hidden="true" /></BarButton> : null}
       {openFile ? (
-        <BarButton label={openFile.kind === "pdf" ? "Open PDF · Enter" : "Open spreadsheet · Enter"} onClick={openFile.onOpen}>
-          {openFile.kind === "pdf" ? (
+        <BarButton label={openFile.kind === "image" ? "Open image · Enter" : openFile.kind === "pdf" ? "Open PDF · Enter" : "Open spreadsheet · Enter"} onClick={openFile.onOpen}>
+          {openFile.kind === "image" ? (
+            <RiImageLine className="size-4" aria-hidden="true" />
+          ) : openFile.kind === "pdf" ? (
             <RiFilePdf2Line className="size-4" aria-hidden="true" />
           ) : (
             <RiFileExcel2Line className="size-4" aria-hidden="true" />
